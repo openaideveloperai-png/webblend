@@ -61,7 +61,7 @@ export function initMenus(app, ui) {
       { label: 'Open folder…', icon: 'folder', action: () => openFolder(app) },
       { label: 'Add animation to selected model…', icon: 'bone', disabled: !app.selection.model, action: () => openAnimationFor(app, app.selection.model) },
       { sep: true },
-      { label: 'Export scene as GLB', icon: 'download', kbd: MOD + 'E', disabled: !app.models.length, action: () => exportGLB(app, app.models, 'webblend-scene') },
+      { label: 'Save scene (.glb, reopen to keep editing)', icon: 'download', kbd: MOD + 'E', disabled: !app.models.length, action: () => exportGLB(app, app.models, 'webblend-scene') },
       { label: 'Export selected model as GLB', icon: 'download', disabled: !app.selection.model, action: () => exportGLB(app, [app.selection.model]) },
       { label: 'Export active clip as JSON', icon: 'download', disabled: !app.selection.model?.activeClip, action: () => exportClipJSON(app, app.selection.model, app.selection.model.activeClip) },
       { sep: true },
@@ -117,6 +117,8 @@ export function initMenus(app, ui) {
     { header: 'File' }, ...defs.File().slice(0, 6),
     { header: 'Add' }, ...defs.Add().filter((i) => i.label && i.label !== 'Image or model from file…').slice(0, 12),
     { header: 'View' }, ...defs.View().slice(0, 2),
+    { sep: true },
+    { label: 'Settings…', icon: 'gear', action: () => ui.openSettings() },
   ];
 
   // transform tools

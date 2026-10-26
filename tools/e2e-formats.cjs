@@ -4,6 +4,7 @@ const path = require('path');
 const [,, Z, OUT] = process.argv;
 const cases = [
   ['donut_draco.glb', { mesh: true, map: true, clip: true }],
+  ['hero_meshopt.glb', { mesh: true, clip: true, bones: true }],
   ['gltf_separate.zip', { mesh: true, map: true, clip: true }],
   ['donut.stl', { mesh: true }],
   ['donut.ply', { mesh: true }],

@@ -140,7 +140,8 @@ export class Viewport {
     if (!s.get('autoQuality')) return;
     const cur = QUALITY_LEVELS.indexOf(s.get('quality'));
     if (cur <= 0) return;
-    const next = QUALITY_LEVELS[cur - 1];
+    // very slow: skip a level
+    const next = QUALITY_LEVELS[Math.max(0, cur - (fps < 12 ? 2 : 1))];
     this.app.setQuality(next, true);
     this.app.toast(`Running slowly (${fps.toFixed(0)} fps), switched to ${next[0].toUpperCase() + next.slice(1)} mode. Change it in Settings.`, 'warn', 5000);
   }

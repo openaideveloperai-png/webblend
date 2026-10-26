@@ -138,7 +138,7 @@ const state = (page) => page.evaluate(() => {
   await page.click('.menu-btn:has-text("File")');
   let dl;
   try {
-    [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.click('.dd-item:has-text("Export scene as GLB")')]);
+    [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.click('.dd-item:has-text("Save scene")')]);
   } catch (e) {
     console.log('   export toasts:', JSON.stringify(await page.evaluate(() => [...document.querySelectorAll('.toast')].map((t) => t.textContent))));
     console.log('   errors so far:', errors.slice(-5));
@@ -150,8 +150,8 @@ const state = (page) => page.evaluate(() => {
   ok('GLB export downloaded', size > 10000, size + ' bytes');
   await page.evaluate(() => window.webblend.clearScene());
   await openViaMenu(page, [glbPath]);
-  const re = await page.evaluate(() => { const m = window.webblend.models[0]; return m ? { clips: m.clips.length, bones: m.bones.length } : null; });
-  ok('re-imported GLB keeps animations', re && re.clips >= 5, JSON.stringify(re));
+  const re = await page.evaluate(() => window.webblend.models.map((m) => m.name + ':' + m.clips.length));
+  ok('reopened scene restores each model with its clips', re.length === 6 && re.every((x) => +x.split(':')[1] >= 1), JSON.stringify(re));
 
   // 9. quality switching (renderer rebuild for antialias)
   await page.evaluate(() => { const a = window.webblend; a.setQuality('ultra'); a.setQuality('high'); a.setQuality('potato'); a.setQuality('medium'); });

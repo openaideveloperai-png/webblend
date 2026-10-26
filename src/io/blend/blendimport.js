@@ -506,14 +506,187 @@ function applyMirror(md, mod) {
       dverts = cur.dverts.slice();
       for (let i = 0; i < V; i++) dverts[V + i] = (cur.dverts[i] || []).map(([g, w]) => [(flag & MIR_VGROUP) ? -(g + 1) : g, w]);
     }
-    const origVert = new Int32Array(V * 2);
-    for (let i = 0; i < V; i++) { origVert[i] = cur.origVert ? cur.origVert[i] : i; origVert[V + i] = origVert[i]; }
-    const flipSign = new Int8Array(V * 2 * 3).fill(1);
-    if (cur.flipSign) { flipSign.set(cur.flipSign); flipSign.set(cur.flipSign, V * 3); }
-    for (let i = 0; i < V; i++) flipSign[(V + i) * 3 + axis] *= -1;
-    cur = { ...cur, totvert: V * 2, totpoly: F * 2, totloop: L * 2, positions: pos, faceOffsets: fo, cornerVerts: cv, uvs, matIndex: mat, sharpFace: sharp, dverts, origVert, flipSign };
+    const morphs = cur.morphs ? cur.morphs.map((m) => {
+      const a = new Float32Array(V * 6);
+      a.set(m.data);
+      for (let i = 0; i < V; i++) for (let k = 0; k < 3; k++) a[(V + i) * 3 + k] = m.data[i * 3 + k] * (k === axis ? -1 : 1);
+      return { ...m, data: a };
+    }) : null;
+    cur = { ...cur, totvert: V * 2, totpoly: F * 2, totloop: L * 2, positions: pos, faceOffsets: fo, cornerVerts: cv, uvs, matIndex: mat, sharpFace: sharp, dverts, morphs };
   }
   return cur;
+}
+
+// Catmull-Clark subdivision (one level). Every new vertex is a weighted sum of
+// old vertices, so positions, shape keys and skin weights all go through the same rows.
+function subdivideOnce(md) {
+  const V = md.totvert, F = md.totpoly, L = md.totloop;
+  const fo = md.faceOffsets, cv = md.cornerVerts;
+  const edgeMap = new Map();
+  const ev0 = [], ev1 = [], efaces = [];
+  const cornerEdge = new Int32Array(L);
+  for (let f = 0; f < F; f++) {
+    const s = fo[f], e = fo[f + 1];
+    for (let i = s; i < e; i++) {
+      const a = cv[i], b = cv[i + 1 < e ? i + 1 : s];
+      const key = a < b ? a * V + b : b * V + a;
+      let ei = edgeMap.get(key);
+      if (ei === undefined) { ei = ev0.length; edgeMap.set(key, ei); ev0.push(a); ev1.push(b); efaces.push([]); }
+      efaces[ei].push(f);
+      cornerEdge[i] = ei;
+    }
+  }
+  const E = ev0.length;
+  const vEdges = Array.from({ length: V }, () => []);
+  const vFaces = Array.from({ length: V }, () => []);
+  for (let ei = 0; ei < E; ei++) { vEdges[ev0[ei]].push(ei); vEdges[ev1[ei]].push(ei); }
+  for (let f = 0; f < F; f++) for (let i = fo[f]; i < fo[f + 1]; i++) vFaces[cv[i]].push(f);
+  // rows: arrays [idx, w, idx, w, ...]
+  const faceRow = (f) => {
+    const s = fo[f], e = fo[f + 1], k = e - s, r = [];
+    for (let i = s; i < e; i++) r.push(cv[i], 1 / k);
+    return r;
+  };
+  const merge = (parts) => { // parts: [[row, scale], ...]
+    const m = new Map();
+    for (const [row, sc] of parts) for (let j = 0; j < row.length; j += 2) m.set(row[j], (m.get(row[j]) || 0) + row[j + 1] * sc);
+    const out = [];
+    for (const [i, w] of m) if (w !== 0) out.push(i, w);
+    return out;
+  };
+  const rows = new Array(V + E + F);
+  for (let f = 0; f < F; f++) rows[V + E + f] = faceRow(f);
+  for (let ei = 0; ei < E; ei++) {
+    const ff = efaces[ei];
+    if (ff.length === 2) rows[V + ei] = merge([[[ev0[ei], 1, ev1[ei], 1], 0.25], [rows[V + E + ff[0]], 0.25], [rows[V + E + ff[1]], 0.25]]);
+    else rows[V + ei] = [ev0[ei], 0.5, ev1[ei], 0.5];
+  }
+  for (let v = 0; v < V; v++) {
+    const edges = vEdges[v];
+    if (!edges.length) { rows[v] = [v, 1]; continue; }
+    const boundary = edges.filter((ei) => efaces[ei].length !== 2);
+    if (boundary.length) {
+      if (boundary.length === 2) {
+        const o = boundary.map((ei) => (ev0[ei] === v ? ev1[ei] : ev0[ei]));
+        rows[v] = [v, 0.75, o[0], 0.125, o[1], 0.125];
+      } else rows[v] = [v, 1];
+      continue;
+    }
+    const n = edges.length;
+    const parts = [[[v, 1], (n - 3) / n]];
+    const faces = vFaces[v];
+    for (const f of faces) parts.push([rows[V + E + f], 1 / (faces.length * n)]);
+    for (const ei of edges) parts.push([[ev0[ei], 0.5, ev1[ei], 0.5], 2 / (edges.length * n)]);
+    rows[v] = merge(parts);
+  }
+  const apply = (src, comps) => {
+    const out = new Float32Array(rows.length * comps);
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      for (let j = 0; j < row.length; j += 2) {
+        const i = row[j], w = row[j + 1];
+        for (let c = 0; c < comps; c++) out[r * comps + c] += w * src[i * comps + c];
+      }
+    }
+    return out;
+  };
+  // topology: each k-gon -> k quads
+  const nF = L;
+  const nfo = new Int32Array(nF + 1);
+  const ncv = new Int32Array(nF * 4);
+  const nuv = md.uvs ? new Float32Array(nF * 8) : null;
+  const nmat = md.matIndex ? new Int32Array(nF) : null;
+  const nsharp = md.sharpFace ? new Uint8Array(nF) : null;
+  let q = 0;
+  for (let f = 0; f < F; f++) {
+    const s = fo[f], e = fo[f + 1], k = e - s;
+    let fu = 0, fv = 0;
+    if (nuv) { for (let i = s; i < e; i++) { fu += md.uvs[i * 2]; fv += md.uvs[i * 2 + 1]; } fu /= k; fv /= k; }
+    for (let j = 0; j < k; j++) {
+      const i = s + j, nx = s + ((j + 1) % k), pv = s + ((j - 1 + k) % k);
+      nfo[q] = q * 4;
+      ncv.set([cv[i], V + cornerEdge[i], V + E + f, V + cornerEdge[pv]], q * 4);
+      if (nuv) {
+        const U = md.uvs;
+        nuv.set([U[i * 2], U[i * 2 + 1], (U[i * 2] + U[nx * 2]) / 2, (U[i * 2 + 1] + U[nx * 2 + 1]) / 2, fu, fv, (U[i * 2] + U[pv * 2]) / 2, (U[i * 2 + 1] + U[pv * 2 + 1]) / 2], q * 8);
+      }
+      if (nmat) nmat[q] = md.matIndex[f];
+      if (nsharp) nsharp[q] = md.sharpFace[f];
+      q++;
+    }
+  }
+  nfo[nF] = nF * 4;
+  let dverts = null;
+  if (md.dverts) {
+    dverts = new Array(rows.length);
+    for (let r = 0; r < rows.length; r++) {
+      const m = new Map();
+      const row = rows[r];
+      for (let j = 0; j < row.length; j += 2) for (const [g, w] of md.dverts[row[j]] || []) m.set(g, (m.get(g) || 0) + w * row[j + 1]);
+      dverts[r] = [...m].filter(([, w]) => w > 1e-4);
+    }
+  }
+  return {
+    ...md, totvert: rows.length, totpoly: nF, totloop: nF * 4, positions: apply(md.positions, 3), faceOffsets: nfo, cornerVerts: ncv,
+    uvs: nuv, matIndex: nmat, sharpFace: nsharp, dverts, morphs: md.morphs ? md.morphs.map((m) => ({ ...m, data: apply(m.data, 3) })) : null,
+  };
+}
+
+// Move vertices of an all-quad Catmull-Clark mesh onto the limit surface
+// (Blender's default "Use Limit Surface").
+function projectToLimit(md) {
+  const V = md.totvert, F = md.totpoly, fo = md.faceOffsets, cv = md.cornerVerts;
+  const nbr = Array.from({ length: V }, () => new Set());
+  const diag = Array.from({ length: V }, () => []);
+  const edgeCount = new Map();
+  for (let f = 0; f < F; f++) {
+    const s = fo[f], e = fo[f + 1], k = e - s;
+    if (k !== 4) return md; // only valid for quads
+    for (let j = 0; j < 4; j++) {
+      const a = cv[s + j], b = cv[s + ((j + 1) % 4)], o = cv[s + ((j + 2) % 4)];
+      nbr[a].add(b); nbr[b].add(a);
+      diag[a].push(o);
+      const key = a < b ? a * V + b : b * V + a;
+      edgeCount.set(key, (edgeCount.get(key) || 0) + 1);
+    }
+  }
+  const isBoundaryEdge = (a, b) => edgeCount.get(a < b ? a * V + b : b * V + a) === 1;
+  const rows = new Array(V);
+  for (let v = 0; v < V; v++) {
+    const ns = [...nbr[v]];
+    const bnd = ns.filter((n) => isBoundaryEdge(v, n));
+    if (bnd.length) {
+      rows[v] = bnd.length === 2 ? [v, 4 / 6, bnd[0], 1 / 6, bnd[1], 1 / 6] : [v, 1];
+      continue;
+    }
+    const n = ns.length;
+    if (!n) { rows[v] = [v, 1]; continue; }
+    const den = n * (n + 5);
+    const row = [v, (n * n) / den];
+    for (const u of ns) row.push(u, 4 / den);
+    for (const u of diag[v]) row.push(u, 1 / den);
+    rows[v] = row;
+  }
+  const apply = (src) => {
+    const out = new Float32Array(V * 3);
+    for (let r = 0; r < V; r++) {
+      const row = rows[r];
+      for (let j = 0; j < row.length; j += 2) { const i = row[j] * 3, w = row[j + 1]; out[r * 3] += w * src[i]; out[r * 3 + 1] += w * src[i + 1]; out[r * 3 + 2] += w * src[i + 2]; }
+    }
+    return out;
+  };
+  return { ...md, positions: apply(md.positions), morphs: md.morphs ? md.morphs.map((m) => ({ ...m, data: apply(m.data) })) : null };
+}
+
+export function subdivide(md, levels, maxFaces = 400000, limit = true) {
+  let cur = md;
+  let done = 0;
+  for (let l = 0; l < levels; l++) {
+    if (cur.totloop > maxFaces) break; // next level would have totloop faces
+    cur = subdivideOnce(cur);
+    done++;
+  }
+  return done && limit ? projectToLimit(cur) : cur;
 }
 
 // "Arm.L" <-> "Arm.R", "LeftHand" <-> "RightHand", "thigh_l" <-> "thigh_r"
@@ -851,6 +1024,8 @@ export async function importBlend(arrayBuffer, opts = {}) {
     if (!md.positions || !md.faceOffsets || !md.cornerVerts) { warnings.push(`Mesh ${me.idName()}: no face data`); continue; }
     const totcol = Math.max(me.get('totcol') || 0, ob.get('totcol') || 0);
     md.matCount = totcol;
+    const sk = readShapeKeys(bf, me, me.get('totvert'));
+    if (sk && sk.blocks.length) md.morphs = sk.blocks.map((b) => ({ name: b.name, value: b.value, data: b.data }));
     // modifiers
     let armMod = null;
     for (const mod of bf.listBase(ob.get('modifiers'), 'ModifierData')) {
@@ -865,8 +1040,10 @@ export async function importBlend(arrayBuffer, opts = {}) {
         const armOb = adef ? new StructView(bf, mod.offset, adef, mod.scope).deref('object') : null;
         if (armOb) armMod = armatures.get(armOb.offset);
       } else if (mt === MOD_SUBSURF) {
-        if (!entry.warnedSubsurf) warnings.push(`"${node.name}" uses Subdivision Surface; showing the base mesh`);
-        entry.warnedSubsurf = true;
+        const sdef = bf.structDef('SubsurfModifierData');
+        const sv = sdef ? new StructView(bf, mod.offset, sdef, mod.scope) : null;
+        const levels = Math.min(sv ? sv.get('levels') ?? 1 : 1, opts.maxSubdivLevels ?? 2);
+        if (levels > 0) md = subdivide(md, levels, opts.maxSubdivFaces || 400000, true);
       }
     }
     md.matCount = totcol;
@@ -888,23 +1065,16 @@ export async function importBlend(arrayBuffer, opts = {}) {
       if (!m) m = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.6, name: 'Default' });
       mats.push(m);
     }
-    // shape keys
-    const sk = readShapeKeys(bf, me, me.get('totvert'));
+    // shape keys (already carried through mirror / subdivision)
     const srcVert = geo.userData.srcVert;
-    if (sk && sk.blocks.length) {
-      const morphs = [];
-      for (const kb of sk.blocks) {
+    if (md.morphs && md.morphs.length) {
+      geo.morphAttributes.position = md.morphs.map((m) => {
         const arr = new Float32Array(srcVert.length * 3);
-        for (let i = 0; i < srcVert.length; i++) {
-          const sv = srcVert[i];
-          const v = md.origVert ? md.origVert[sv] : sv;
-          for (let k = 0; k < 3; k++) arr[i * 3 + k] = kb.data[v * 3 + k] * (md.flipSign ? md.flipSign[sv * 3 + k] : 1);
-        }
+        for (let i = 0; i < srcVert.length; i++) { const v = srcVert[i] * 3; arr[i * 3] = m.data[v]; arr[i * 3 + 1] = m.data[v + 1]; arr[i * 3 + 2] = m.data[v + 2]; }
         const a = new THREE.BufferAttribute(arr, 3);
-        a.name = kb.name;
-        morphs.push(a);
-      }
-      geo.morphAttributes.position = morphs;
+        a.name = m.name;
+        return a;
+      });
       geo.morphTargetsRelative = false;
     }
     let mesh;

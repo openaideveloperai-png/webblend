@@ -26,7 +26,6 @@ import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 import { importBlend } from './blend/blendimport.js';
 import { createDracoLoader } from './draco.js';
 import { VFS } from './vfs.js';
@@ -117,6 +116,17 @@ function getKTX2(renderer) {
   return ktx2Loader;
 }
 
+// meshopt compiles WebAssembly on load: only pull it in when a file needs it
+let meshopt = null;
+async function getMeshopt() {
+  if (!meshopt) {
+    const mod = await import('three/examples/jsm/libs/meshopt_decoder.module.js');
+    meshopt = mod.MeshoptDecoder;
+    meshopt.ready?.catch?.(() => {});
+  }
+  return meshopt;
+}
+
 let dracoLoader = null;
 function getDraco() {
   if (!dracoLoader) dracoLoader = createDracoLoader();
@@ -124,6 +134,17 @@ function getDraco() {
 }
 
 const readText = (blob) => blob.text();
+
+// cheap check of the glTF JSON for an extension name
+function usesExtension(buf, name) {
+  const u8 = new Uint8Array(buf, 0, Math.min(buf.byteLength, 4 * 1024 * 1024));
+  let json;
+  if (u8[0] === 0x67 && u8[1] === 0x6c && u8[2] === 0x54 && u8[3] === 0x46) { // glTF binary
+    const len = new DataView(buf).getUint32(12, true);
+    json = new TextDecoder().decode(new Uint8Array(buf, 20, Math.min(len, buf.byteLength - 20)));
+  } else json = new TextDecoder().decode(u8);
+  return json.includes(name);
+}
 const readBuf = (blob) => blob.arrayBuffer();
 
 function stdMaterial(color = 0xb8bec8) {
@@ -223,9 +244,9 @@ export class Importer {
       case 'glb': case 'gltf': case 'vrm': {
         const loader = new GLTFLoader(manager);
         loader.setDRACOLoader(getDraco());
-        loader.setMeshoptDecoder(MeshoptDecoder);
         loader.setKTX2Loader(getKTX2(renderer));
         const data = await readBuf(entry.blob);
+        if (usesExtension(data, 'EXT_meshopt_compression')) loader.setMeshoptDecoder(await getMeshopt());
         const gltf = await loader.parseAsync(data, basePath);
         root = gltf.scene || gltf.scenes?.[0] || new THREE.Group();
         animations = gltf.animations || [];
@@ -424,6 +445,8 @@ export class Importer {
       case 'blend': {
         const res = await importBlend(await readBuf(entry.blob), {
           importLights: this.app.settings.get('importLights'),
+          maxSubdivLevels: ['potato', 'low'].includes(this.app.settings.get('quality')) ? 1 : 2,
+          maxSubdivFaces: ['potato', 'low'].includes(this.app.settings.get('quality')) ? 150000 : 400000,
           loadImage: async ({ bytes, path }) => {
             if (bytes && bytes.length) {
               const type = sniffImageType(bytes);
@@ -486,7 +509,7 @@ export class Importer {
     // tidy clip names: "Armature|Walk" -> "Walk", "mixamo.com" -> file name
     for (const c of animations) {
       if (!c || !c.name) continue;
-      let n = c.name.replace(/^[^|]*\|/, '').trim();
+      let n = c.name.includes(' | ') ? c.name : c.name.replace(/^[^|]*\|/, '').trim();
       if (!n || /^(mixamo\.com|Take 0*1|Unreal Take|AnimStack|Scene|default)$/i.test(n)) n = name;
       c.name = n;
     }

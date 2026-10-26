@@ -15,6 +15,12 @@ for (const f of files) {
   const tr = truth[name];
   console.log(`\n== ${name} (${ms}ms) info=${JSON.stringify(res.info)} warnings=${JSON.stringify(res.warnings)} images=${images}`);
   if (!tr) { console.log('  no truth'); continue; }
+  // evaluate animations at their first frame, like Blender at frame 1
+  if (res.animations.length) {
+    const mixer = new THREE.AnimationMixer(res.scene);
+    for (const c of res.animations) mixer.clipAction(c).play();
+    mixer.setTime(0);
+  }
   res.scene.updateMatrixWorld(true);
   for (const [oname, od] of Object.entries(tr.objects)) {
     const node = res.scene.getObjectByName(oname);

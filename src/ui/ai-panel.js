@@ -1,6 +1,6 @@
 // AI tab: chat-style animation requests.
 import { h, icon, clear } from './dom.js';
-import { AIAssistant, parsePrompt } from '../anim/ai.js';
+import { AIAssistant, isSimplePrompt } from '../anim/ai.js';
 
 export function initAIPanel(app, ui) {
   const root = document.getElementById('tab-ai');
@@ -81,8 +81,7 @@ export function initAIPanel(app, ui) {
     if (!promptArg) input.value = '';
     msg('user', prompt);
     const provider = ai.provider();
-    const parsed = parsePrompt(prompt);
-    const simple = parsed.steps.every((s) => s.human.length || s.object.length || s.chain.length) && prompt.split(/\s+/).length <= 8;
+    const simple = isSimplePrompt(prompt);
     const useOffline = provider === 'offline' || (!forceClaude && simple && !app.settings.get('aiAlwaysClaude'));
     if (useOffline) {
       const r = ai.runOffline(prompt);

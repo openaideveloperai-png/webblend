@@ -56,6 +56,16 @@ export async function exportGLB(app, models, filename) {
   if (!models.length) { app.toast('Nothing to export', 'warn'); return; }
   const group = new THREE.Group();
   group.name = models.length === 1 ? models[0].name : 'Scene';
+  // lets WebBlend split the file back into separate models when reopened
+  // unique names so clips map back to the right model
+  const used = new Map();
+  const uname = new Map(models.map((m) => {
+    const base = (m.name || 'Model').replace(/\s*\|\s*/g, ' ');
+    const n = used.get(base) || 0;
+    used.set(base, n + 1);
+    return [m, n ? `${base} ${n + 1}` : base];
+  }));
+  group.userData = { webblend: { version: 1, models: models.map((m) => ({ name: uname.get(m), kind: m.kind, clips: m.clips.map((e) => ({ name: e.clip.name, playing: e.playing, weight: e.weight, speed: e.speed, loop: e.loop })) })) } };
   const parents = models.map((m) => [m, m.root.parent]);
   const hidden = [];
   const clips = [];
@@ -66,7 +76,7 @@ export async function exportGLB(app, models, filename) {
       group.add(m.root);
       for (const e of m.clips) {
         const c = morphTracksByName(clipWithUuids(e.clip, m.root), m.root);
-        c.name = models.length > 1 ? `${m.name} | ${e.clip.name}` : e.clip.name;
+        c.name = `${uname.get(m)} | ${e.clip.name}`;
         if (c.tracks.length) clips.push(c);
       }
     }

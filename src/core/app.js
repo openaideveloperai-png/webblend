@@ -752,6 +752,28 @@ export class App extends Emitter {
     // models
     const newModels = [];
     for (const { entry, res } of loaded) {
+      // a scene saved by WebBlend: restore each model separately
+      let saved = null;
+      res.root.traverse((o) => { if (!saved && o.userData && o.userData.webblend) saved = o; });
+      if (saved && saved.userData.webblend.models) {
+        const meta = saved.userData.webblend.models;
+        const kids = [...saved.children];
+        kids.forEach((child, i) => {
+          const info = meta[i] || { name: child.name, clips: [] };
+          const prefix = info.name + ' | ';
+          const clips = res.animations.filter((c) => c.name.startsWith(prefix)).map((c) => { c.name = c.name.slice(prefix.length); return c; });
+          saved.remove(child);
+          const m = this.addModel(child, { name: info.name || child.name, kind: info.kind === 'character' ? 'character' : info.kind || 'import', source: entry.name, format: res.format, animations: clips, select: false });
+          (info.clips || []).forEach((ci, j) => {
+            const e = m.clips.find((x) => x.clip.name === ci.name) || m.clips[j];
+            if (!e) return;
+            m.setWeight(e, ci.weight ?? 1); m.setSpeed(e, ci.speed ?? 1); m.setLoop(e, ci.loop || 'repeat'); m.setPlaying(e, ci.playing !== false);
+          });
+          newModels.push(m);
+          added++;
+        });
+        continue;
+      }
       const name = res.root.name && res.root.name !== 'Scene' && !/^(root|group|Scene_Root|RootNode|Blend|AuxScene|Sketchfab_Scene|Sketchfab_model|OSG_Scene|model|object)$/i.test(res.root.name) ? res.root.name : stripExt(entry.name);
       res.root.name = name;
       const m = this.addModel(res.root, { name, kind: res.kind === 'skeleton' ? 'skeleton' : 'import', source: entry.name, format: res.format, animations: res.animations, select: false });

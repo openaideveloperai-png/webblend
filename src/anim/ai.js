@@ -88,6 +88,22 @@ export function parsePrompt(text) {
   return { steps, target, global };
 }
 
+const FILLER = new Set(('make let have get do does please can could would you i want him her them it its the a an to and then with me my his their this that is be '
+  + 'character model object guy man woman person robot cube sphere ball everything all everyone each both selected one times time seconds second sec s x loop forever '
+  + 'slow slowly fast quickly quick very super really big small little tiny gentle subtle hard soft left right up down forward backward back around in place '
+  + 'once twice thrice two three four five six seven eight nine ten for of on at by like while again some bit just start keep continuously repeat after followed').split(/\s+/));
+
+// Short requests made only of motion words + modifiers are handled instantly offline.
+export function isSimplePrompt(text) {
+  const p = parsePrompt(text);
+  if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length)) return false;
+  const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
+  const motionWords = new Set();
+  for (const t of [HUMANOID, OBJECT, CHAIN]) for (const m of Object.values(t)) for (const w of m.words) for (const part of w.split(/\s+/)) motionWords.add(part);
+  const unknown = words.filter((w) => !FILLER.has(w) && !motionWords.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
+  return unknown.length <= 1;
+}
+
 // ------------------------------------------------------------ clip utils
 
 // Concatenate clips in time (same targets). Missing tracks hold their neighbour values.
