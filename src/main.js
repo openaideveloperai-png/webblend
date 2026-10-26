@@ -29,6 +29,7 @@ function boot() {
   }
   window.webblend = app; // handy for debugging from the console
   window.__exportGLB = exportGLB;
+  window.__recordVideo = recordVideo;
   initToasts(app);
   app.on('fatal', (m) => app.toast(m, 'error', 0));
 

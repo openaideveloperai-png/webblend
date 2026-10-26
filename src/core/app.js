@@ -82,10 +82,23 @@ export class App extends Emitter {
   }
 
   attachCameraHelper(model) {
-    const h = new THREE.CameraHelper(model.root);
+    // short proxy frustum so the guide lines don't run across the whole scene
+    const proxy = new THREE.PerspectiveCamera();
+    const h = new THREE.CameraHelper(proxy);
     h.userData.helper = true;
+    h.userData.proxy = proxy;
     this.viewport.helpers.add(h);
     this.cameraHelpers.set(model, h);
+  }
+
+  updateCameraHelper(model, h) {
+    const cam = model.root, proxy = h.userData.proxy;
+    cam.updateMatrixWorld(true);
+    proxy.fov = cam.fov; proxy.aspect = this.viewport.camera.aspect; proxy.near = Math.min(cam.near, 0.05);
+    proxy.far = Math.max(0.5, (this.viewport.worldScale || 4) * 0.25);
+    proxy.updateProjectionMatrix();
+    proxy.matrixWorld.copy(cam.matrixWorld);
+    h.update();
   }
 
   updateWorldScale() {
@@ -671,7 +684,7 @@ export class App extends Emitter {
     }
     this.world.updateMatrixWorld(true);
     for (const m of this.models) m.updateHelpers();
-    for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); h.update(); }
+    for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); this.updateCameraHelper(m, h); }
     if (this.selBox.visible && (tr.playing || this._drag)) this.updateSelBox();
   }
 

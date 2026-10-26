@@ -131,12 +131,13 @@ export async function screenshot(app) {
 export async function recordVideo(app, { seconds, fps = 30, onProgress } = {}) {
   const canvas = app.viewport.renderer.domElement;
   if (!canvas.captureStream || typeof MediaRecorder === 'undefined') { app.toast('Video recording isn\'t supported in this browser', 'warn'); return; }
-  const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+  // VP8 encodes fastest (matters on low-end PCs); VP9 can stall in software
+  const types = ['video/webm;codecs=vp8', 'video/webm', 'video/webm;codecs=vp9', 'video/mp4'];
   const mime = types.find((t) => MediaRecorder.isTypeSupported(t));
   if (!mime) { app.toast('No supported video format in this browser', 'warn'); return; }
   const duration = seconds || app.duration();
   const stream = canvas.captureStream(fps);
-  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 5_000_000 });
   const chunks = [];
   rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
   const done = new Promise((res) => { rec.onstop = res; });
@@ -145,7 +146,14 @@ export async function recordVideo(app, { seconds, fps = 30, onProgress } = {}) {
   app.pause();
   app.setTime(0);
   app.viewport.continuous++;
+  // let frames flow into the stream and the encoder start before playback,
+  // otherwise the first recording in a session can come back empty
+  await new Promise((r) => setTimeout(r, 350));
+  const started = new Promise((res) => { rec.onstart = res; setTimeout(res, 1500); });
   rec.start(250);
+  await started;
+  await new Promise((r) => setTimeout(r, 150));
+  app.setTime(0);
   app.play();
   const start = performance.now();
   await new Promise((res) => {
@@ -163,5 +171,6 @@ export async function recordVideo(app, { seconds, fps = 30, onProgress } = {}) {
   app.pause();
   stream.getTracks().forEach((t) => t.stop());
   const blob = new Blob(chunks, { type: mime.split(';')[0] });
+  if (!blob.size) { app.toast('The browser didn\'t produce any video frames. Try again, or use a lower quality mode.', 'error', 6000); return; }
   await saveFile(blob, `webblend-${Date.now()}.${mime.includes('mp4') ? 'mp4' : 'webm'}`, app);
 }
