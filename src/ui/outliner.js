@@ -1,0 +1,112 @@
+// Scene tree: models -> objects -> bones. Lazy expansion, filter, visibility.
+import { h, icon, clear } from './dom.js';
+import { dropdown } from './toast.js';
+
+const MAX_CHILDREN = 250;
+
+function kindIcon(o, model) {
+  if (o === model.root) {
+    if (model.kind === 'character' || model.humanoid) return ['person', 'person'];
+    if (o.isLight) return ['light', ''];
+    if (o.isCamera) return ['camera', ''];
+    if (model.kind === 'image') return ['image', ''];
+    if (model.bones.length) return ['bone', 'bone'];
+  }
+  if (o.isBone) return ['bone', 'bone'];
+  if (o.isLight) return ['light', ''];
+  if (o.isCamera) return ['camera', ''];
+  if (o.isMesh || o.isPoints || o.isLine) return ['mesh', ''];
+  return ['group', ''];
+}
+
+function visibleChildren(o) {
+  return o.children.filter((c) => !c.userData.editorOnly && !c.userData.helper);
+}
+
+export function initOutliner(app, ui) {
+  const root = document.getElementById('outliner');
+  const search = document.getElementById('ol-search');
+  const expanded = new Set();
+  let query = '';
+
+  const expandTo = (o) => {
+    let p = o.parent;
+    while (p && p !== app.world) { expanded.add(p.uuid); p = p.parent; }
+  };
+
+  const row = (o, model, depth) => {
+    const kids = visibleChildren(o);
+    const isOpen = expanded.has(o.uuid);
+    const [ic, icCls] = kindIcon(o, model);
+    const sel = app.selection.object === o;
+    const caret = h('button', { class: 'ol-caret' + (isOpen ? ' open' : '') + (kids.length ? '' : ' empty'), 'aria-label': isOpen ? 'Collapse' : 'Expand', tabindex: -1 }, icon('chevron'));
+    caret.addEventListener('click', (e) => { e.stopPropagation(); if (isOpen) expanded.delete(o.uuid); else expanded.add(o.uuid); render(); });
+    const r = h('div', { class: 'ol-row' + (sel ? ' sel' : '') + (o === model.root ? ' model' : ''), style: { paddingLeft: 6 + depth * 14 + 'px' }, role: 'treeitem', 'aria-selected': sel ? 'true' : 'false', 'aria-expanded': kids.length ? String(isOpen) : undefined, tabindex: sel ? 0 : -1 },
+      caret, h('span', { class: 'ol-icon ' + icCls }, icon(ic)), h('span', { class: 'ol-name', title: o.name }, o.name || (o.isMesh ? 'Mesh' : o.isBone ? 'Bone' : o.type)));
+    if (o === model.root) {
+      if (model.clips.length) r.append(h('span', { class: 'ol-badge', title: `${model.clips.length} animation clip(s)` }, `${model.clips.length}▸`));
+      const eye = h('button', { class: 'ol-eye' + (o.visible ? '' : ' off'), title: o.visible ? 'Hide' : 'Show', 'aria-label': o.visible ? 'Hide' : 'Show' }, icon(o.visible ? 'eye' : 'eyeoff'));
+      eye.addEventListener('click', (e) => { e.stopPropagation(); model.setVisible(!o.visible); app.viewport.requestRender(); render(); });
+      r.append(eye);
+    }
+    r.addEventListener('click', () => app.select(o, model));
+    r.addEventListener('dblclick', () => app.viewport.frameObject(o));
+    r.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      app.select(o, model);
+      dropdown([
+        { label: 'Frame in view', icon: 'frame', action: () => app.viewport.frameObject(o) },
+        { label: 'Insert key', icon: 'key', kbd: 'K', action: () => app.keySelection() },
+        o === model.root ? { label: 'Duplicate', icon: 'copy', action: () => app.duplicateModel(model) } : null,
+        o === model.root ? { label: 'Delete', icon: 'trash', action: () => app.removeModel(model) } : null,
+        o.isCamera ? { label: 'Look through camera', icon: 'camera', action: () => app.lookThrough(model) } : null,
+      ], { x: e.clientX, y: e.clientY });
+    });
+    return { r, kids, isOpen };
+  };
+
+  const render = () => {
+    clear(root);
+    if (!app.models.length) {
+      root.append(h('div', { class: 'empty-note' }, 'Nothing here yet. ', h('b', {}, 'Drop a model'), ' on the page, or use ', h('b', {}, 'Add → Demo mannequin'), ' to try animating right away.'));
+      return;
+    }
+    root.setAttribute('role', 'tree');
+    if (query) {
+      let n = 0;
+      for (const model of app.models) {
+        model.root.traverse((o) => {
+          if (n > 400 || o.userData.editorOnly || o.userData.helper) return;
+          if ((o.name || '').toLowerCase().includes(query)) { root.append(row(o, model, 0).r); n++; }
+        });
+      }
+      if (!n) root.append(h('div', { class: 'empty-note' }, 'No matches.'));
+      return;
+    }
+    const walk = (o, model, depth) => {
+      const { r, kids, isOpen } = row(o, model, depth);
+      root.append(r);
+      if (isOpen) {
+        kids.slice(0, MAX_CHILDREN).forEach((c) => walk(c, model, depth + 1));
+        if (kids.length > MAX_CHILDREN) root.append(h('div', { class: 'ol-more' }, `${kids.length - MAX_CHILDREN} more — use the filter box`));
+      }
+    };
+    for (const model of app.models) walk(model.root, model, 0);
+    root.querySelector('.ol-row.sel')?.scrollIntoView({ block: 'nearest' });
+  };
+
+  search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); render(); });
+  app.on('models', render);
+  app.on('clips', render);
+  app.on('selection', (s) => { if (s.object) expandTo(s.object); render(); });
+  // keyboard: up/down through rows when the tree has focus
+  root.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const rows = [...root.querySelectorAll('.ol-row')];
+    const i = rows.findIndex((r) => r.classList.contains('sel'));
+    const next = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+    if (next) { e.preventDefault(); next.click(); setTimeout(() => root.querySelector('.ol-row.sel')?.focus(), 0); }
+  });
+  render();
+  ui.renderOutliner = render;
+}

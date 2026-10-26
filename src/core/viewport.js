@@ -67,8 +67,22 @@ export class Viewport {
     renderer.setClearColor(new THREE.Color(this.app.settings.get('bgColor')), 1);
     renderer.domElement.className = 'viewport-canvas';
     renderer.domElement.tabIndex = 0;
-    renderer.domElement.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this.app.toast('Graphics context lost. Switching to a lighter mode…', 'warn'); this.contextLost = true; });
-    renderer.domElement.addEventListener('webglcontextrestored', () => { this.contextLost = false; this.requestRender(); });
+    // only the live renderer's context matters (old ones are lost on purpose when rebuilt)
+    renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      if (renderer !== this.renderer) return;
+      e.preventDefault();
+      this.contextLost = true;
+      this.app.toast('The graphics card reset (often low memory). Recovering…', 'warn', 5000);
+    });
+    renderer.domElement.addEventListener('webglcontextrestored', () => {
+      if (renderer !== this.renderer) return;
+      this.contextLost = false;
+      this.requestRender();
+      // step quality down to make another reset less likely
+      const lvls = QUALITY_LEVELS, cur = lvls.indexOf(this.app.settings.get('quality'));
+      if (cur > 0) setTimeout(() => this.app.setQuality(lvls[cur - 1], true), 50);
+    });
+    this.renderer = renderer;
     if (old) {
       this.container.replaceChild(renderer.domElement, old.domElement);
       old.dispose();
@@ -76,7 +90,6 @@ export class Viewport {
     } else {
       this.container.prepend(renderer.domElement);
     }
-    this.renderer = renderer;
     this.antialias = !!preset.antialias;
     if (this.orbit) { this.orbit.disconnect(); this.orbit.connect(renderer.domElement); }
     if (this.gizmo) { this.gizmo.disconnect(); this.gizmo.connect(renderer.domElement); }

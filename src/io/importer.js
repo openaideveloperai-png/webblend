@@ -13,6 +13,7 @@ import { TDSLoader } from 'three/examples/jsm/loaders/TDSLoader.js';
 import { VRMLLoader } from 'three/examples/jsm/loaders/VRMLLoader.js';
 import { VOXLoader, buildMesh as buildVoxMesh } from 'three/examples/jsm/loaders/VOXLoader.js';
 import { USDLoader } from 'three/examples/jsm/loaders/USDLoader.js';
+import { USDComposer } from 'three/examples/jsm/loaders/usd/USDComposer.js';
 import { LWOLoader } from 'three/examples/jsm/loaders/LWOLoader.js';
 import { KMZLoader } from 'three/examples/jsm/loaders/KMZLoader.js';
 import { PCDLoader } from 'three/examples/jsm/loaders/PCDLoader.js';
@@ -48,6 +49,29 @@ export function unsupportedMessage(ext) {
   if (!what) return null;
   if (ext === 'rar' || ext === '7z') return `${what} can't be opened in the browser. Re-pack the folder as a .zip and drop it again.`;
   return `${what} can't be read in a browser. Export from that app as .glb/.gltf or .fbx (with "embed textures" on if available) and drop that instead.`;
+}
+
+// three's USDC parser sometimes returns a bare number for vector transform ops
+// (seen with Blender .usdz). Drop malformed ops instead of failing the import.
+let usdPatched = false;
+function patchUSD(warn) {
+  if (usdPatched) return;
+  usdPatched = true;
+  const orig = USDComposer.prototype.applyTransform;
+  USDComposer.prototype.applyTransform = function (obj, fields = {}, attrs = {}) {
+    const clean = (o) => {
+      const out = { ...o };
+      for (const k of Object.keys(out)) {
+        if (!k.startsWith('xformOp:') || k === 'xformOp:scale') continue;
+        const v = out[k];
+        const need = k.startsWith('xformOp:orient') ? 4 : k === 'xformOp:transform' ? 16 : /rotate[XYZ]$/.test(k) ? 1 : 3;
+        const okv = need === 1 ? typeof v === 'number' || (v && v.length >= 1) : v && typeof v.length === 'number' && v.length >= need && typeof v[0] === 'number';
+        if (!okv) { delete out[k]; patchUSD.bad = true; }
+      }
+      return out;
+    };
+    return orig.call(this, obj, clean(fields), clean(attrs));
+  };
 }
 
 const GREY_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNo6Ojo/w8ABFIB/ZpNwGQAAAAASUVORK5CYII=';
@@ -301,11 +325,14 @@ export class Importer {
         break;
       }
       case 'usdz': case 'usda': case 'usdc': case 'usd': {
+        patchUSD();
+        patchUSD.bad = false;
         const loader = new USDLoader(manager);
         const buf = await readBuf(entry.blob);
         root = await new Promise((res, rej) => {
           try { loader.parse(buf, basePath, res, rej); } catch (e) { rej(e); }
         });
+        if (patchUSD.bad) warnings.push('some transforms in this USD file could not be read, so parts may be out of place');
         break;
       }
       case 'lwo': {
@@ -345,6 +372,20 @@ export class Importer {
         res.clip.name = name;
         animations = [res.clip];
         kind = 'skeleton';
+        // Z-up BVH (e.g. exported from Blender): stand it up
+        {
+          const bones = res.skeleton.bones;
+          root.updateMatrixWorld(true);
+          const head = bones.find((b) => /head/i.test(b.name)) || bones[bones.length - 1];
+          const d = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld).sub(new THREE.Vector3().setFromMatrixPosition(bones[0].matrixWorld));
+          if (Math.abs(d.z) > Math.abs(d.y) * 1.5) {
+            const wrap = new THREE.Group();
+            wrap.name = name;
+            root.rotation.x = d.z > 0 ? -Math.PI / 2 : Math.PI / 2;
+            wrap.add(root);
+            root = wrap;
+          }
+        }
         break;
       }
       case 'md2': {
@@ -412,7 +453,7 @@ export class Importer {
           root = await new THREE.ObjectLoader(manager).parseAsync(json);
           animations = root.animations || [];
         } else {
-          const list = Array.isArray(json) ? json : json.animations || (json.tracks ? [json] : json.clips || []);
+          const list = Array.isArray(json) ? json : json.animations || (json.clip ? [json.clip] : null) || (json.tracks ? [json] : json.clips || []);
           animations = list.filter((c) => c && c.tracks).map((c) => THREE.AnimationClip.parse(c));
           if (!animations.length) throw new Error('This .json file has no model or animation data');
           root = null;
@@ -442,10 +483,35 @@ export class Importer {
         await optimizeTextures(root, this.app.settings.maxTexture(), gpuMax);
       } catch (e) { console.warn(e); }
     }
+    // tidy clip names: "Armature|Walk" -> "Walk", "mixamo.com" -> file name
+    for (const c of animations) {
+      if (!c || !c.name) continue;
+      let n = c.name.replace(/^[^|]*\|/, '').trim();
+      if (!n || /^(mixamo\.com|Take 0*1|Unreal Take|AnimStack|Scene|default)$/i.test(n)) n = name;
+      c.name = n;
+    }
+    // most FBX/BVH/DAE files are in centimeters: convert to meters
+    let unitNote = null;
+    if (root && ['fbx', 'bvh', 'dae'].includes(ext)) {
+      root.updateMatrixWorld(true);
+      const box = new THREE.Box3().setFromObject(root);
+      let hgt = box.isEmpty() ? 0 : box.getSize(new THREE.Vector3()).y;
+      if (!hgt || !isFinite(hgt)) { root.traverse((o) => { if (o.isBone) box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(o.matrixWorld)); }); hgt = box.isEmpty() ? 0 : box.getSize(new THREE.Vector3()).y; }
+      if (hgt > 30 && hgt < 5000) {
+        const wrap = new THREE.Group();
+        wrap.name = root.name || name;
+        wrap.scale.setScalar(0.01);
+        wrap.add(root);
+        root.name = root.name || 'model';
+        root = wrap;
+        unitNote = 'converted from centimeters to meters';
+      }
+    }
     if (missing.size) warnings.push(`Missing texture${missing.size > 1 ? 's' : ''}: ${[...missing].slice(0, 6).join(', ')}${missing.size > 6 ? '…' : ''} (drop the textures or a .zip together with the model)`);
     const animationOnly = !!root && !hasMesh(root) && animations.length > 0;
-    if (kind === 'animation') return { root: null, animations, warnings, format: ext, name, kind, animationOnly: true };
-    return { root, animations, warnings, format: ext, name, kind, animationOnly, hasBones: root ? hasBones(root) : false, info };
+    const notes = unitNote ? [unitNote] : [];
+    if (kind === 'animation') return { root: null, animations, warnings, notes, format: ext, name, kind, animationOnly: true };
+    return { root, animations, warnings, notes, format: ext, name, kind, animationOnly, hasBones: root ? hasBones(root) : false, info };
   }
 
   async imagePlane(entry) {

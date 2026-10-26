@@ -33,6 +33,8 @@ export const DEFAULTS = {
   pickMode: 'object', // object | model
   textureLimitOverride: 0, // 0 = use quality preset
   undoLimit: 80,
+  aiAlwaysClaude: false,
+  demoScene: true,
 };
 
 export class Settings {

@@ -1,0 +1,54 @@
+<div class="app" id="app">
+  <header class="topbar" id="topbar">
+    <button class="tbtn mobile-only" id="btn-left" title="Scene list" aria-label="Scene list"></button>
+    <div class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.5 14 8l-6 6.5L2 8z" fill="currentColor"/></svg></span><span>WebBlend <small>Animator</small></span></div>
+    <nav class="menus" id="menus" aria-label="Main menu"></nav>
+    <div class="sep desktop-only"></div>
+    <div class="tool-group" id="gizmo-tools" role="toolbar" aria-label="Transform tools"></div>
+    <div class="spacer"></div>
+    <button class="chip" id="btn-quality" title="Quality mode (click to change)"><span class="q-dot" id="q-dot"></span><span id="q-label">High</span></button>
+    <button class="chip ai" id="btn-ai" title="AI animation assistant"></button>
+    <button class="tbtn" id="btn-settings" title="Settings" aria-label="Settings"></button>
+    <button class="tbtn mobile-only" id="btn-right" title="Inspector" aria-label="Inspector"></button>
+  </header>
+
+  <aside class="panel left" id="left-panel" aria-label="Scene">
+    <div class="panel-head"><span class="panel-title">Scene</span><button class="ibtn" id="btn-add-quick" title="Add object" aria-label="Add object"></button></div>
+    <label class="search"><span id="search-ico"></span><input id="ol-search" type="search" placeholder="Filter objects and bones" aria-label="Filter objects"></label>
+    <div class="panel-body"><div class="outliner" id="outliner"></div></div>
+    <div class="resizer v" data-resize="left"></div>
+  </aside>
+
+  <section class="viewport" id="viewport" aria-label="3D viewport">
+    <div class="vp-tl"><span class="vp-label" id="vp-label">Perspective</span></div>
+    <div class="vp-tr" id="vp-tools"></div>
+    <div class="stats" id="stats" hidden></div>
+    <div class="empty-state" id="empty-state">
+      <div class="empty-card">
+        <h2>Drop a model to start animating</h2>
+        <p>Drag files, folders or a .zip (with textures) anywhere on this page. Nothing is uploaded: everything runs in your browser.</p>
+        <div class="btns" id="empty-btns"></div>
+        <div class="formats">glb · gltf · fbx · obj+mtl · blend · dae · stl · ply · 3ds · 3mf · usdz · vrml · vox · lwo · bvh · md2 · svg · zip · images</div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="panel right" id="right-panel" aria-label="Inspector">
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="panel-body" id="tab-props" role="tabpanel"></div>
+    <div class="panel-body" id="tab-anims" role="tabpanel" hidden></div>
+    <div class="panel-body" id="tab-ai" role="tabpanel" hidden></div>
+    <div class="resizer v" data-resize="right"></div>
+  </aside>
+
+  <footer class="timeline" id="timeline" aria-label="Timeline">
+    <div class="resizer h" data-resize="timeline"></div>
+    <div class="tl-bar" id="tl-bar"></div>
+    <div class="tl-body" id="tl-body"><canvas class="tl-canvas" id="tl-canvas" tabindex="0" aria-label="Dope sheet"></canvas><div class="tl-empty" id="tl-empty"></div></div>
+  </footer>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<div id="drop-overlay" class="drop-overlay" hidden><div>Drop to import</div></div>
+<input type="file" id="file-input" multiple hidden>
+<input type="file" id="folder-input" webkitdirectory directory multiple hidden>
+<input type="file" id="anim-input" multiple hidden>

@@ -97,3 +97,27 @@ export function isTextInput(el) {
   const tag = el.tagName;
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
 }
+
+// Safe arithmetic for number fields: "1.5*2", "-(3+4)/2" (no eval)
+export function evalExpr(str) {
+  const s = String(str).replace(/\s+/g, '').replace(/,/g, '.');
+  let i = 0;
+  const peek = () => s[i];
+  const num = () => {
+    const m = /^(\d+\.?\d*|\.\d+)(e[-+]?\d+)?/i.exec(s.slice(i));
+    if (!m) throw new Error('bad');
+    i += m[0].length;
+    return parseFloat(m[0]);
+  };
+  const factor = () => {
+    if (peek() === '-') { i++; return -factor(); }
+    if (peek() === '+') { i++; return factor(); }
+    if (peek() === '(') { i++; const v = expr(); if (s[i++] !== ')') throw new Error('bad'); return v; }
+    return num();
+  };
+  const term = () => { let v = factor(); while (peek() === '*' || peek() === '/') { const op = s[i++]; const r = factor(); v = op === '*' ? v * r : v / r; } return v; };
+  const expr = () => { let v = term(); while (peek() === '+' || peek() === '-') { const op = s[i++]; const r = term(); v = op === '+' ? v + r : v - r; } return v; };
+  const v = expr();
+  if (i !== s.length) throw new Error('bad');
+  return v;
+}
