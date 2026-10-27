@@ -40,7 +40,7 @@ export function initAIPanel(app, ui) {
     clear(chips);
     const m = app.selection.model;
     let list;
-    if (m && m.humanoid && (!app.selection.object || app.selection.object === m.root || app.selection.object.isSkinnedMesh)) list = ['walk', 'run', 'jump then wave', 'dance', 'idle breathing', 'walk and wave', 'sneak', 'cheer', 'sit down'];
+    if (m && m.humanoid && (!app.selection.object || app.selection.object === m.root || app.selection.object.isSkinnedMesh)) list = ['walk', 'run', 'jump then wave', 'dance', 'idle breathing', 'hands on lap', 'hands on hips', 'hand on chest', 'walk and wave', 'cheer', 'sit down'];
     else if (m && m.bones.length && !m.humanoid) list = ['wiggle', 'slow sway', 'fast wag', 'bounce'];
     else if (m) list = ['bounce', 'spin', 'float', 'pulse', 'flip', 'grow then spin', 'shake', 'rainbow colors'];
     else list = ['make everything bounce'];

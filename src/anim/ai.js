@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
-import { POSE_PARAMS, defaultParams, paramsToSpec } from './humanoid.js';
+import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS } from './humanoid.js';
 import { inArtifact } from '../core/util.js';
 
 const NUM_WORDS = { once: 1, one: 1, twice: 2, two: 2, three: 3, thrice: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
@@ -72,11 +72,49 @@ export function parseModifiers(text) {
   return o;
 }
 
+// "put her left hand on her lap", "hands on hips", "hand under the belly"...
+const SPOT_WORDS = [
+  ['lower belly', 'lap'], ['lower stomach', 'lap'], ['lower tummy', 'lap'], ['under belly', 'lap'], ['underbelly', 'lap'], ['lap', 'lap'],
+  ['belly', 'belly'], ['stomach', 'belly'], ['tummy', 'belly'], ['abdomen', 'belly'], ['waist', 'hip'], ['hips', 'hip'], ['hip', 'hip'],
+  ['heart', 'heart'], ['chest', 'chest'], ['breasts', 'chest'], ['breast', 'chest'], ['lower back', 'back'], ['back', 'back'],
+  ['top of head', 'head'], ['top of her head', 'head'], ['top of his head', 'head'], ['head', 'head'], ['mouth', 'face'], ['lips', 'face'], ['face', 'face'],
+  ['cheek', 'cheek'], ['cheeks', 'cheek'], ['chin', 'chin'], ['jaw', 'chin'], ['shoulder', 'shoulder'], ['shoulders', 'shoulder'],
+  ['thighs', 'thigh'], ['thigh', 'thigh'], ['legs', 'thigh'], ['leg', 'thigh'], ['knees', 'knee'], ['knee', 'knee'],
+];
+const SPOT_RE = SPOT_WORDS.map(([w]) => w.replace(/ /g, '\\s+')).join('|');
+const TOUCH_RE = new RegExp(`\\b(?:(left|right|both|one|two|her|his|their|the|a)\\s+)?(hands?|palms?|arms?)\\b(.{0,40}?)\\b(on|onto|over|against|at|to|under|below|beneath|behind|across|touching|touch)\\s+(?:(?:her|his|their|the|its|my|your|own|each|other)\\s+)*(${SPOT_RE})\\b`, 'gi');
+const NEGATION = /\b(don'?t|do\s+not|not|never|without|no|avoid)\b[^.,;]{0,25}$/i;
+
+export function parseTouches(text) {
+  const t = String(text || '').toLowerCase().replace(/[’']/g, "'");
+  const touches = [];
+  let m;
+  TOUCH_RE.lastIndex = 0;
+  while ((m = TOUCH_RE.exec(t))) {
+    if (NEGATION.test(t.slice(Math.max(0, m.index - 30), m.index))) continue;
+    const word = m[5].replace(/\s+/g, ' ');
+    let spot = (SPOT_WORDS.find(([w]) => w === word) || [])[1];
+    if (!spot) continue;
+    if ((m[4] === 'under' || m[4] === 'below' || m[4] === 'beneath') && spot === 'belly') spot = 'lap';
+    if (m[4] === 'behind' && spot !== 'head') spot = 'back';
+    const sideWord = m[1] || (/\b(left|right)\b/.exec(m[3]) || [])[1];
+    const plural = /s$/.test(m[2]) || sideWord === 'both' || sideWord === 'two';
+    const sides = sideWord === 'left' ? ['left'] : sideWord === 'right' ? ['right'] : plural ? ['left', 'right'] : ['right'];
+    for (const side of sides) touches.push({ side, spot });
+  }
+  // later mentions win for the same hand
+  const bySide = {};
+  for (const x of touches) bySide[x.side] = x.spot;
+  const lockLegs = /\b(standing|stand still|stands still|while (she|he|they)('s| is| are)? standing|keep (the |her |his |their )?(legs|feet)|(don'?t|do not|not|never|no) (move|touch|moving|touching|bend|bending|animate)( (the|her|his|their))? (legs?|feet|knees?)|legs? (still|straight)|without moving)\b/.test(t);
+  return { touch: Object.keys(bySide).length ? bySide : null, lockLegs };
+}
+
 export function parsePrompt(text) {
   const clean = String(text || '').toLowerCase().replace(/[“”"]/g, '').trim();
   const stepTexts = clean.split(/\s*(?:,?\s*\bthen\b|,?\s*\bafter that\b|,?\s*\bfollowed by\b|;|->|→|\band then\b)\s*/).filter(Boolean);
   const steps = stepTexts.map((st) => ({
     text: st,
+    touch: parseTouches(st),
     human: findMotions(st, HUMANOID),
     object: findMotions(st, OBJECT),
     chain: findMotions(st, CHAIN),
@@ -96,9 +134,10 @@ const FILLER = new Set(('make let have get do does please can could would you i 
 // Short requests made only of motion words + modifiers are handled instantly offline.
 export function isSimplePrompt(text) {
   const p = parsePrompt(text);
-  if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length)) return false;
+  if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length || s.touch.touch)) return false;
   const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
-  const motionWords = new Set();
+  const motionWords = new Set(['hand', 'hands', 'palm', 'palms', 'arm', 'arms', 'put', 'place', 'rest', 'resting', 'touch', 'touching', 'over', 'onto', 'under', 'below', 'behind', 'against', 'other', 'own', 'top', 'lower', 'pose', 'posing', 'still']);
+  for (const [w] of SPOT_WORDS) for (const part of w.split(/\s+/)) motionWords.add(part);
   for (const t of [HUMANOID, OBJECT, CHAIN]) for (const m of Object.values(t)) for (const w of m.words) for (const part of w.split(/\s+/)) motionWords.add(part);
   const unknown = words.filter((w) => !FILLER.has(w) && !motionWords.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
   return unknown.length <= 1;
@@ -204,6 +243,17 @@ export class AIAssistant {
       const segs = [];
       for (const step of parsed.steps) {
         const opts = { ...parsed.global, ...step.opts };
+        if (rig && step.touch.touch) {
+          // hands placed on the body, on top of a base motion (or a still pose)
+          const base = step.human.find((h) => !LAYERABLE[h.key]) || null;
+          const key = base ? base.key : 'still';
+          const touch = { ...step.touch.touch };
+          if (key === 'sit') for (const sd of ['left', 'right']) if (touch[sd] === 'lap') touch[sd] = 'thigh';
+          const where = Object.entries(touch).map(([sd, sp]) => `${sd} hand on ${SPOTS[sp] ? SPOTS[sp].label.replace(/ \(.*\)/, '') : sp}`).join(', ');
+          const still = HUMANOID[key].still || key === 'still';
+          segs.push(bakeHumanoid(rig, key, { ...opts, touch, lockLegs: step.touch.lockLegs || still, duration: opts.duration || (HUMANOID[key].loop ? Math.max(3, HUMANOID[key].cycle) : undefined), name: (base ? HUMANOID[key].label + ' + ' : '') + where.charAt(0).toUpperCase() + where.slice(1) }));
+          continue;
+        }
         if (rig && step.human.length) {
           const base = step.human[0];
           let layer = null;
@@ -294,6 +344,8 @@ JSON FORMAT:
     "preset": one of ${JSON.stringify(['none', ...Object.keys(HUMANOID), ...Object.keys(OBJECT).map((k) => 'object:' + k)])},
     "speed": 1, "intensity": 1,
     "humanoidKeys": [{"t": seconds, "values": [{"param": "rElbow", "value": 70}, ...]}],
+    "handTouches": [{"t": seconds, "hand": "left"|"right", "spot": "lap", "weight": 0-1}],
+    "plantFeet": true/false,
     "objectKeys": [{"t": seconds, "channel": "position"|"rotation"|"scale"|"opacity"|"color", "x": n, "y": n, "z": n}],
     "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg}]
   }]
@@ -303,6 +355,9 @@ RULES
 - Humanoid characters: prefer humanoidKeys with these rig-independent parameters (degrees unless noted). Unlisted params keep their default. Character space: +x = character's left, +y up, +z forward.
 ${params}
 - A preset (e.g. "walk") can be combined with humanoidKeys: keys override the preset's params for that clip (good for "walk while waving").
+- To put a hand ON the body, use handTouches instead of arm angles: the app measures this character's actual body surface and uses IK so the palm rests exactly on that spot, with the hand turned to lie flat. Spots: ${Object.entries(SPOTS).map(([k, v]) => `"${k}" = ${v.label}`).join('; ')}. A touch key has weight 0-1: ease in from 0 to 1 over about 0.4-0.7 s and back to 0 to take the hand away. While a hand's touch weight is 1, that arm's humanoidKeys are ignored. "On her lap" while standing means the "lap" spot (front of the lower belly / top of the thighs, below the belly); use "thigh" when sitting.
+- plantFeet: true keeps both feet exactly where they stand; the legs only bend to follow the hips. Use it for anything done standing or in place. Do not key leg or hips params unless the user asks for leg/hip motion, and never when they say not to move the legs.
+- Held poses (hand on lap, hands on hips, hand on chest...) should look calm: after the hands arrive, keep the body nearly still with only subtle breathing (chestPitch about ±1.5, tiny headPitch), and loop only that breathing.
 - objectKeys: position = offset from the object's current place in multiples of its size; rotation = degrees (x,y,z euler) added to its current rotation; scale = multipliers; opacity uses x (0-1); color uses x,y,z as r,g,b 0-1.
 - boneKeys rotate a bone (degrees, local x/y/z) relative to its rest pose. Use them for tails, wings, tentacles, robots, creatures.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
@@ -325,7 +380,7 @@ USER REQUEST: ${prompt}`;
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'objectKeys', 'boneKeys'],
+            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys'],
             properties: {
               name: { type: 'string' },
               target: { type: 'string' },
@@ -344,6 +399,11 @@ USER REQUEST: ${prompt}`;
                   },
                 },
               },
+              handTouches: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['t', 'hand', 'spot', 'weight'], properties: { t: { type: 'number' }, hand: { type: 'string', enum: ['left', 'right'] }, spot: { type: 'string', enum: Object.keys(SPOTS) }, weight: { type: 'number' } } },
+              },
+              plantFeet: { type: 'boolean' },
               objectKeys: {
                 type: 'array',
                 items: { type: 'object', additionalProperties: false, required: ['t', 'channel', 'x', 'y', 'z'], properties: { t: { type: 'number' }, channel: { type: 'string', enum: ['position', 'rotation', 'scale', 'opacity', 'color'] }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } } },
@@ -432,7 +492,23 @@ USER REQUEST: ${prompt}`;
     const tracks = [];
     // humanoid
     const hKeys = (c.humanoidKeys || []).filter((k) => k && Array.isArray(k.values)).sort((a, b) => a.t - b.t);
-    if (rig && (hKeys.length || (preset && HUMANOID[preset]))) {
+    const tKeys = (c.handTouches || []).filter((k) => k && SPOTS[k.spot] && (k.hand === 'left' || k.hand === 'right')).sort((a, b) => a.t - b.t);
+    const touchAt = (hand, t) => {
+      const ks = tKeys.filter((k) => k.hand === hand);
+      if (!ks.length) return null;
+      const w = (k) => THREE.MathUtils.clamp(Number(k.weight ?? 1), 0, 1);
+      if (t <= ks[0].t) return { spot: ks[0].spot, weight: ks.length > 1 || ks[0].t <= 0 ? w(ks[0]) : w(ks[0]) * (ks[0].t > 0 ? Math.min(1, t / ks[0].t) : 1) };
+      if (t >= ks[ks.length - 1].t) return { spot: ks[ks.length - 1].spot, weight: w(ks[ks.length - 1]) };
+      let i = 0;
+      while (i < ks.length - 2 && ks[i + 1].t <= t) i++;
+      const a = ks[i], b = ks[i + 1];
+      const u = (t - a.t) / Math.max(1e-6, b.t - a.t);
+      const e = u * u * (3 - 2 * u);
+      if (a.spot === b.spot) return { spot: a.spot, weight: w(a) + (w(b) - w(a)) * e };
+      // moving from one spot to another: lift off, then land
+      return e < 0.5 ? { spot: a.spot, weight: w(a) * (1 - 2 * e) } : { spot: b.spot, weight: w(b) * (2 * e - 1) };
+    };
+    if (rig && (hKeys.length || tKeys.length || (preset && HUMANOID[preset]))) {
       const defaults = defaultParams();
       const presetM = preset && HUMANOID[preset];
       const cycle = presetM ? presetM.cycle / speed : duration;
@@ -456,9 +532,13 @@ USER REQUEST: ${prompt}`;
         if (presetM) {
           const ph = presetM.loop ? (t / cycle) % 1 : Math.min(1, t / cycle);
           p = presetM.at(ph, p, {});
-          if (intensity !== 1) for (const k of Object.keys(p)) p[k] = defaults[k] + (p[k] - defaults[k]) * intensity;
+          if (intensity !== 1) for (const k of Object.keys(p)) if (typeof p[k] === 'number' && typeof defaults[k] === 'number') p[k] = defaults[k] + (p[k] - defaults[k]) * intensity;
         }
         for (const k of keyed) { if (k in p) { const v = valueAt(k, t); if (v !== undefined && isFinite(v)) p[k] = v; } }
+        const lt = touchAt('left', t), rt = touchAt('right', t);
+        if (lt) p.lTouch = lt;
+        if (rt) p.rTouch = rt;
+        if (c.plantFeet) p.plantFeet = true;
         return paramsToSpec(p);
       }, 30);
       tracks.push(...clip.tracks);

@@ -31,14 +31,26 @@ function keyposes(keys, ph, base) {
 // at(phase 0..1, params) -> params. `cycle` = seconds per loop at speed 1.
 export const HUMANOID = {
   idle: {
-    label: 'Idle (breathing)', words: ['idle', 'breath', 'breathe', 'stand', 'standing', 'wait', 'rest'], cycle: 4, loop: true,
+    // breathing only: the legs and feet stay where they are
+    label: 'Idle (breathing)', words: ['idle', 'breath', 'breathe', 'stand', 'standing', 'wait', 'rest', 'stand still'], cycle: 4, loop: true, still: true,
     at(ph, p) {
       p.chestPitch = -1.5 * S(ph); p.spinePitch = 1 - 0.8 * S(ph);
       p.lShoulder = 1.5 * pos(S(ph)); p.rShoulder = 1.5 * pos(S(ph));
-      p.headYaw = 4 * S(ph * 0.5); p.headPitch = 2 + 1.5 * S(ph);
-      p.hipsX = 0.012 * S(ph * 0.5); p.hipsRoll = 1.5 * S(ph * 0.5);
+      p.headYaw = 3 * S(ph * 0.5); p.headPitch = 2 + 1.2 * S(ph);
       p.lArmRaise = 9 + 1.5 * S(ph); p.rArmRaise = 9 + 1.5 * S(ph);
-      p.lElbow = 14; p.rElbow = 14; p.lKnee = 4; p.rKnee = 6 + 2 * S(ph * 0.5);
+      p.lElbow = 14; p.rElbow = 14;
+      p.plantFeet = true;
+      return p;
+    },
+  },
+  still: {
+    // a held pose: barely moving, for "hand on her lap while standing" and similar
+    label: 'Pose', words: ['pose', 'posing', 'hold still', 'stay still', 'freeze'], cycle: 4, loop: true, still: true,
+    at(ph, p) {
+      p.chestPitch = -1 * S(ph); p.spinePitch = 0.6 - 0.5 * S(ph);
+      p.headPitch = 1.5 + 0.8 * S(ph);
+      p.lShoulder = 0.8 * pos(S(ph)); p.rShoulder = 0.8 * pos(S(ph));
+      p.plantFeet = true;
       return p;
     },
   },
@@ -335,18 +347,32 @@ export function bakeHumanoid(rig, motionKey, opts = {}) {
   const defaults = defaultParams();
   const forward = opts.travel && m.locomotion ? m.locomotion * speed : 0; // hip-heights per second
   const layer = opts.layer || null; // second motion keys overriding arm params etc.
+  const num = (k, p) => typeof p[k] === 'number' && typeof defaults[k] === 'number';
+  // hands placed on the body: {left: spot, right: spot}, eased in over `touchIn` seconds
+  const touch = opts.touch || null;
+  const touchIn = Math.min(0.7, duration * 0.3);
+  const LEGS = ['lLegSwing', 'lLegSpread', 'lKnee', 'lFootPitch', 'rLegSwing', 'rLegSpread', 'rKnee', 'rFootPitch', 'hipsX', 'hipsY', 'hipsZ', 'hipsPitch', 'hipsYaw', 'hipsRoll'];
   const fn = (t) => {
     let ph = m.loop ? (t / cycle) % 1 : Math.min(1, (t / cycle) % (1 + 1e-9));
     if (!m.loop && reps > 1) ph = (t / cycle) % 1;
     if (!m.loop && t >= duration - 1e-6 && m.hold) ph = 1;
     let p = m.at(ph, { ...defaults }, opts);
-    if (intensity !== 1) for (const k of Object.keys(p)) p[k] = defaults[k] + (p[k] - defaults[k]) * intensity;
+    if (intensity !== 1) for (const k of Object.keys(p)) if (num(k, p)) p[k] = defaults[k] + (p[k] - defaults[k]) * intensity;
     if (forward) p.rootZ = (p.rootZ || 0) + forward * t;
     if (layer) {
       const lm = HUMANOID[layer.key];
       const lc = lm.cycle / (layer.speed || 1);
       const lp = lm.at(lm.loop ? (t / lc) % 1 : Math.min(1, t / lc), { ...defaults }, layer);
-      for (const k of Object.keys(lp)) if (Math.abs(lp[k] - defaults[k]) > 1e-6 && layer.channels.test(k)) p[k] = lp[k];
+      for (const k of Object.keys(lp)) if (num(k, lp) && Math.abs(lp[k] - defaults[k]) > 1e-6 && layer.channels.test(k)) p[k] = lp[k];
+    }
+    if (opts.lockLegs) {
+      for (const k of LEGS) p[k] = defaults[k];
+      p.plantFeet = true;
+    }
+    if (touch) {
+      const w = ease(Math.min(1, t / Math.max(1e-3, touchIn)));
+      if (touch.left) p.lTouch = { spot: touch.left, weight: w };
+      if (touch.right) p.rTouch = { spot: touch.right, weight: w };
     }
     return paramsToSpec(p);
   };

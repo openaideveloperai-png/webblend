@@ -75,6 +75,7 @@ Only the bones that move the mesh (plus the control bones and IK handles that dr
 Open the **AI** tab (or the AI button at the top) and describe what you want:
 
 - `walk`, `run fast`, `jump then wave`, `walk and wave with the left hand`, `dance like crazy`, `sneak`, `sit down`, `nod twice`, `cheer`
+- Hands on the body: `put her hand on her lap while standing`, `hands on hips`, `left hand on her chest and right hand on her head`, `hands behind her back`, `hand on chin`, `hands on knees`. The app measures the character's own body, so the palm lands on that spot (lap, belly, chest, heart, hip, thigh, knee, lower back, head, face, cheek, chin, other shoulder) and the hand turns to lie flat. Standing poses keep the feet planted and the legs still; for spots out of reach (knees) the body leans to get there.
 - `make everything bounce`, `spin slowly on the x axis`, `float`, `grow then pulse`, `rainbow colors`
 - On creatures and rigs with tails or tentacles: `wiggle`, `slow sway`
 
@@ -130,6 +131,7 @@ The test assets are generated with Blender's Python module (`pip install bpy`):
 tools/make-test-assets.sh /path/to/python-with-bpy ./test-assets
 node tools/test-blend.mjs truth.json test-assets/testfiles/*.blend   # .blend vs Blender ground truth (tools/blender/truth.py)
 node tools/test-humanoid.mjs                                         # rig detection, pose solving, retargeting
+node tools/test-touch.mjs test-assets/assets/hero.blend              # hands placed on body spots, feet planted
 node tools/test-ai.mjs                                               # offline AI prompt parsing
 node tools/e2e.cjs test-assets/assets ./out                          # full app in headless Chromium
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer

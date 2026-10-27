@@ -238,6 +238,8 @@ export class HumanoidRig {
         parentMatInv: b.parent ? new THREE.Matrix4().multiplyMatrices(rootInv, b.parent.matrixWorld).invert() : new THREE.Matrix4(),
       };
       r.PqInv = r.Pq.clone().invert();
+      r.parentPos = b.parent ? posR(b.parent) : new THREE.Vector3();
+      r.offLocal = r.pos.clone().sub(r.parentPos).applyQuaternion(r.PqInv);
       this.rest.set(b, r);
     }
     // bone directions (to the next canonical bone or first child)
@@ -283,6 +285,41 @@ export class HumanoidRig {
     this.hipsRestPos = hips.clone();
     // character's height
     this.height = Math.max(headP.dot(up) - minUp, this.hipHeight) * 1.12;
+    // hands: finger direction and palm normal (model space, rest)
+    this.handAxes = {};
+    for (const side of ['left', 'right']) {
+      const hb = this.map[side + 'Hand'];
+      if (!hb) continue;
+      const hr = this.rest.get(hb);
+      const kids = hb.children.filter((c) => c.isBone && this.rest.has(c));
+      const isThumb = (c) => /thumb|親指|_0?1$|finger_?0\b/i.test(c.name);
+      const fingers = kids.filter((c) => !isThumb(c));
+      const thumb = kids.find(isThumb);
+      let f = new THREE.Vector3();
+      const mid = fingers.find((c) => /middle|中指/i.test(c.name));
+      if (mid) f.copy(this.rest.get(mid).pos).sub(hr.pos);
+      else if (fingers.length) { for (const c of fingers) f.add(this.rest.get(c).pos.clone().sub(hr.pos)); f.divideScalar(fingers.length); }
+      const la = this.map[side + 'LowerArm'];
+      const forearm = la ? hr.pos.distanceTo(this.rest.get(la).pos) : this.hipHeight * 0.28;
+      // palm length: wrist to finger knuckles (about 0.4 of the forearm when there are no finger bones)
+      let palmLen = f.length();
+      if (!(palmLen > forearm * 0.15 && palmLen < forearm * 0.8)) palmLen = forearm * 0.4;
+      if (f.lengthSq() < 1e-12 && la) f.copy(hr.pos).sub(this.rest.get(la).pos);
+      if (f.lengthSq() < 1e-12) f.set(side === 'left' ? 1 : -1, 0, 0).applyQuaternion(this.F);
+      f.normalize();
+      let n;
+      if (thumb) {
+        const t = this.rest.get(thumb).pos.clone().sub(hr.pos);
+        t.addScaledVector(f, -t.dot(f));
+        if (t.lengthSq() > 1e-12) n = side === 'left' ? new THREE.Vector3().crossVectors(f, t) : new THREE.Vector3().crossVectors(t, f);
+      }
+      if (!n || n.lengthSq() < 1e-12) n = this.up.clone().negate(); // T/A-pose: palms face down
+      n.addScaledVector(f, -n.dot(f)).normalize();
+      // in the hand bone's own frame
+      const inv = hr.Wq.clone().invert();
+      this.handAxes[side] = { f: f.clone().applyQuaternion(inv), n: n.clone().applyQuaternion(inv), palmLen };
+    }
+    this._spots = null;
     // direction of each limb in character space (rest)
     this.restDirChar = {};
     for (const k of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm', 'leftUpperLeg', 'leftLowerLeg', 'rightUpperLeg', 'rightLowerLeg', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot']) {
@@ -302,9 +339,56 @@ export class HumanoidRig {
   // Solve a pose spec -> Map<bone, {q, p?}> of local transforms.
   // spec keys are canonical names with {rot:[p,y,r]} | {dir:Vector3(char)} | {bend:deg, front:Vector3(char)},
   // plus hips {pos: Vector3(char, hip-height units)}.
-  solve(spec) {
+  // Extras: leftHand/rightHand {touch: {spot, weight, offset?}} puts the palm on
+  // that spot of the body (IK), spec.plantFeet keeps the feet where they stand.
+  solve(specIn) {
+    let spec = specIn;
+    const touches = ['left', 'right'].filter((s) => spec[s + 'Hand'] && spec[s + 'Hand'].touch && spec[s + 'Hand'].touch.weight > 0 && this.map[s + 'UpperArm'] && this.map[s + 'LowerArm'] && this.map[s + 'Hand']);
+    if (!touches.length && !spec.plantFeet) return this.solveFK(spec).out;
+    const merge = (base, extra) => {
+      const m = { ...base };
+      for (const [k, v] of Object.entries(extra)) m[k] = { ...(base[k] || {}), ...v, rot: k.endsWith('Hand') || k.endsWith('Foot') ? undefined : (base[k] || {}).rot };
+      return m;
+    };
+    // body first (with feet planted), then the hands on top of it
+    const body = (sp) => {
+      let f = this.solveFK(sp);
+      if (sp.plantFeet) {
+        const ex = {};
+        for (const side of ['left', 'right']) Object.assign(ex, this.plantSpec(side, f));
+        sp = merge(sp, ex);
+        f = this.solveFK(sp);
+      }
+      return { sp, f };
+    };
+    let { sp, f } = body(spec);
+    // spots out of reach (knees, low on the thighs): lean forward, push the hips back and bend the knees
+    if (touches.length) {
+      for (let lean = 1; lean <= 10; lean++) {
+        const short = Math.max(...touches.map((side) => this.touchShortfall(side, spec[side + 'Hand'].touch, f)));
+        if (short <= 0) break;
+        const rot = (k) => (spec[k] && spec[k].rot) || [0, 0, 0];
+        const hp = spec.hips && spec.hips.pos ? spec.hips.pos.clone() : new THREE.Vector3();
+        hp.y -= 0.018; hp.z -= 0.02;
+        spec = {
+          ...spec,
+          spine: { ...(spec.spine || {}), rot: [rot('spine')[0] + 6, rot('spine')[1], rot('spine')[2]] },
+          chest: { ...(spec.chest || {}), rot: [rot('chest')[0] + 4, rot('chest')[1], rot('chest')[2]] },
+          hips: { ...(spec.hips || {}), pos: hp, rot: [rot('hips')[0] + 3, rot('hips')[1], rot('hips')[2]] },
+          plantFeet: true,
+        };
+        ({ sp, f } = body(spec));
+      }
+    }
+    const extra = {};
+    for (const side of touches) Object.assign(extra, this.touchSpec(side, spec[side + 'Hand'].touch, f));
+    return this.solveFK(merge(sp, extra)).out;
+  }
+
+  solveFK(spec) {
     const out = new Map();
     const cur = new Map();
+    const curP = new Map();
     const tmpQ = new THREE.Quaternion();
     // fold rotations of missing canonical bones into their nearest existing parent
     const fold = { upperChest: ['chest', 'spine'], chest: ['spine', 'upperChest'], neck: ['head', 'upperChest', 'chest'], leftShoulder: ['leftUpperArm'], rightShoulder: ['rightUpperArm'] };
@@ -323,10 +407,12 @@ export class HumanoidRig {
     for (const b of this.bones) {
       const r = this.rest.get(b);
       const parentW = b.parent && cur.has(b.parent) ? cur.get(b.parent) : r.Pq;
+      const parentP = b.parent && curP.has(b.parent) ? curP.get(b.parent) : r.parentPos;
       const c = this.canonOf.get(b);
       const s = c ? eff[c] : null;
       let L = r.Lq.clone();
       let pos = null;
+      let modelPos = parentP.clone().add(r.offLocal.clone().applyQuaternion(parentW));
       if (s) {
         let target = null;
         if (s.dir) target = this.charToModel(s.dir).normalize();
@@ -343,16 +429,30 @@ export class HumanoidRig {
             target = pDir.clone().applyAxisAngle(axis, THREE.MathUtils.degToRad(s.bend));
           }
         }
-        if (target) {
+        if (s.worldRot) {
+          // absolute orientation in model space (hands placed on the body, planted feet)
+          L = parentW.clone().invert().multiply(s.worldRot);
+        } else if (target) {
           const Wun = parentW.clone().multiply(r.Lq);
           const curDir = r.dirLocal.clone().applyQuaternion(Wun).normalize();
           let W = tmpQ.setFromUnitVectors(curDir, target).clone().multiply(Wun);
           if (s.twist) W = new THREE.Quaternion().setFromAxisAngle(target, THREE.MathUtils.degToRad(s.twist)).multiply(W);
+          if (s.twistToward) {
+            // turn the forearm part of the way toward where the hand must point,
+            // so the wrist doesn't twist unnaturally
+            const rel = W.clone().invert().multiply(s.twistToward.q);
+            const ax = r.dirLocal.clone().normalize();
+            const twist = new THREE.Quaternion(rel.x, rel.y, rel.z, rel.w);
+            const d = ax.x * twist.x + ax.y * twist.y + ax.z * twist.z;
+            twist.set(ax.x * d, ax.y * d, ax.z * d, rel.w).normalize();
+            const half = new THREE.Quaternion().slerp(twist, s.twistToward.share ?? 0.5);
+            W = W.multiply(half);
+          }
           L = parentW.clone().invert().multiply(W);
         }
         if (s.rot) {
           const D = this.charRot(s.rot[0], s.rot[1], s.rot[2]);
-          if (target) {
+          if (target || s.worldRot) {
             // extra rotation applied in the solved frame (e.g. hand twist after aiming)
             const W = parentW.clone().multiply(L);
             L = parentW.clone().invert().multiply(D).multiply(W);
@@ -362,13 +462,216 @@ export class HumanoidRig {
         }
         if (s.pos && c === 'hips') {
           const d = this.charToModel(s.pos).multiplyScalar(this.hipHeight);
-          pos = r.pos.clone().add(d).applyMatrix4(r.parentMatInv);
+          modelPos = r.pos.clone().add(d);
+          pos = modelPos.clone().applyMatrix4(r.parentMatInv);
         }
       }
       cur.set(b, parentW.clone().multiply(L));
+      curP.set(b, modelPos);
       out.set(b, { q: L, p: pos });
     }
-    return out;
+    return { out, cur, curP };
+  }
+
+  // two-bone IK: elbow/knee position for a chain from a to goal, bending toward hint
+  twoBoneJoint(a, goal, l1, l2, hint) {
+    const toT = goal.clone().sub(a);
+    const d = THREE.MathUtils.clamp(toT.length(), Math.abs(l1 - l2) + 1e-6, (l1 + l2) * 0.9995);
+    const dir = toT.lengthSq() > 1e-14 ? toT.normalize() : hint.clone().normalize();
+    const side = hint.clone().addScaledVector(dir, -hint.dot(dir));
+    if (side.lengthSq() < 1e-10) side.copy(new THREE.Vector3(0, 0, 1).addScaledVector(dir, -dir.z));
+    side.normalize();
+    const x = (l1 * l1 - l2 * l2 + d * d) / (2 * d);
+    const h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
+    return { joint: a.clone().addScaledVector(dir, x).addScaledVector(side, h), end: a.clone().addScaledVector(dir, d) };
+  }
+
+  // how far (model units) the wrist goal is beyond the arm's reach
+  touchShortfall(side, touch, first) {
+    const g = this.touchGoal(side, touch, first);
+    if (!g) return 0;
+    const ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'], hb = this.map[side + 'Hand'];
+    const reach = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos) + this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
+    return first.curP.get(ua).distanceTo(g.wrist) - reach * 0.985;
+  }
+
+  touchGoal(side, touch, first) {
+    const spot = this.spot(touch.spot, side);
+    if (!spot) return null;
+    const ref = this.map[spot.ref] || this.map.hips;
+    const refW = first.cur.get(ref), refP = first.curP.get(ref);
+    const refDelta = refW.clone().multiply(this.rest.get(ref).Wq.clone().invert());
+    const toModel = (c) => this.charToModel(c).applyQuaternion(refDelta);
+    const contact = spot.local.clone().applyQuaternion(refW).add(refP);
+    if (touch.offset) contact.add(toModel(touch.offset).multiplyScalar(this.hipHeight));
+    const palm = toModel(spot.palm).normalize();
+    const fing = toModel(spot.fingers);
+    fing.addScaledVector(palm, -fing.dot(palm)).normalize();
+    const ax = this.handAxes[side];
+    const wrist = contact.clone().addScaledVector(palm, -0.22 * ax.palmLen).addScaledVector(fing, -0.55 * ax.palmLen);
+    return { spot, contact, palm, fing, wrist, hint: toModel(spot.hint) };
+  }
+
+  // spec overrides that put one hand's palm on a body spot
+  touchSpec(side, touch, first) {
+    const g = this.touchGoal(side, touch, first);
+    if (!g) return {};
+    const { palm, fing, wrist } = g;
+    const w = THREE.MathUtils.clamp(touch.weight, 0, 1);
+    const ax = this.handAxes[side];
+    const hb = this.map[side + 'Hand'], ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'];
+    const shoulder = first.curP.get(ua);
+    // segment lengths between the canonical joints (twist bones may sit in between)
+    const l1 = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos), l2 = this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
+    const { joint: elbow, end } = this.twoBoneJoint(shoulder, wrist, l1, l2, g.hint);
+    // hand orientation: rest finger/palm axes -> wanted ones
+    const restW = this.rest.get(hb).Wq;
+    const f0 = ax.f.clone().applyQuaternion(restW), n0 = ax.n.clone().applyQuaternion(restW);
+    const basis = (f, n) => new THREE.Matrix4().makeBasis(f, n, new THREE.Vector3().crossVectors(f, n));
+    const R = new THREE.Quaternion().setFromRotationMatrix(basis(fing, palm).multiply(basis(f0, n0).transpose()));
+    let handW = R.multiply(restW);
+    // blend with the pose from the regular params while easing in / out
+    const fkDir = (b) => this.rest.get(b).dirLocal.clone().applyQuaternion(first.cur.get(b)).normalize();
+    const mix = (fk, ik) => fk.clone().lerp(ik, w).normalize();
+    const upDir = mix(fkDir(ua), elbow.clone().sub(shoulder).normalize());
+    const loDir = mix(fkDir(la), end.clone().sub(elbow).normalize());
+    if (w < 1) handW = first.cur.get(hb).clone().slerp(handW, w);
+    const toChar = (v) => v.clone().applyQuaternion(this.Finv);
+    return {
+      [side + 'UpperArm']: { dir: toChar(upDir), twist: 0 },
+      [side + 'LowerArm']: { dir: toChar(loDir), bend: undefined, twistToward: { q: handW, share: 0.5 } },
+      [side + 'Hand']: { worldRot: handW },
+    };
+  }
+
+  // keep a foot where it stands at rest (legs bend to follow the hips)
+  plantSpec(side, first) {
+    const ul = this.map[side + 'UpperLeg'], ll = this.map[side + 'LowerLeg'], ft = this.map[side + 'Foot'];
+    if (!ul || !ll || !ft) return {};
+    const hip = first.curP.get(ul);
+    const goal = this.rest.get(ft).pos.clone();
+    const l1 = this.rest.get(ll).pos.distanceTo(this.rest.get(ul).pos), l2 = this.rest.get(ft).pos.distanceTo(this.rest.get(ll).pos);
+    const { joint: knee, end } = this.twoBoneJoint(hip, goal, l1, l2, this.charToModel(new THREE.Vector3(0, 0, 1)));
+    const toChar = (v) => v.clone().applyQuaternion(this.Finv);
+    return {
+      [side + 'UpperLeg']: { dir: toChar(knee.clone().sub(hip).normalize()) },
+      [side + 'LowerLeg']: { dir: toChar(end.clone().sub(knee).normalize()), bend: undefined },
+      [side + 'Foot']: { worldRot: this.rest.get(ft).Wq.clone() },
+    };
+  }
+
+  // ---- body spots a hand can touch, measured on this character's mesh
+  spot(name, side) {
+    const key = SPOT_ALIAS[name] || name;
+    const def = SPOTS[key];
+    if (!def) return null;
+    if (!this._spots) this._spots = new Map();
+    const id = key + ':' + side;
+    if (!this._spots.has(id)) this._spots.set(id, this.measureSpot(key, def, side));
+    return this._spots.get(id);
+  }
+
+  measureSpot(key, def, side) {
+    const m = side === 'left' ? 1 : -1;
+    const hh = this.hipHeight;
+    const P = (k) => (this.map[k] ? this.rest.get(this.map[k]).pos : null);
+    const hips = this.hipsRestPos;
+    const upOf = (p) => (p ? p.clone().sub(hips).dot(this.up) / hh : 0);
+    const latOf = (p) => (p ? p.clone().sub(hips).dot(this.lat) / hh : 0);
+    const legY = (upOf(P('leftUpperLeg')) + upOf(P('rightUpperLeg'))) / 2 || -0.08;
+    const legX = Math.abs(latOf(P('leftUpperLeg')) - latOf(P('rightUpperLeg'))) / 2 || 0.1;
+    const chestY = upOf(P('upperChest') || P('chest') || P('spine')) || 0.45;
+    const neckY = upOf(P('neck') || P('head')) || chestY + 0.3;
+    const headY = upOf(P('head')) || neckY + 0.1;
+    const shX = Math.abs(latOf(P('leftUpperArm')) - latOf(P('rightUpperArm'))) / 2 || 0.25;
+    const headTop = headY + Math.max(0.18, (headY - neckY) * 2.2);
+    const kneeY = upOf(P(side + 'LowerLeg')) || -0.5;
+    const shY = (upOf(P('leftUpperArm')) + upOf(P('rightUpperArm'))) / 2 || neckY - 0.05;
+    const ctx = { m, legY, legX, chestY, neckY, headY, headTop, shX, shY, kneeY, side };
+    const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top', depth (fallback), z?}
+    // cast a ray at the body to find its surface there
+    const charPt = (x, y, z) => hips.clone().add(this.charToModel(new THREE.Vector3(x, y, z)).multiplyScalar(hh));
+    const dirs = { front: [0, 0, -1], back: [0, 0, 1], side: [-m, 0, 0], top: [0, -1, 0] };
+    const dc = new THREE.Vector3(...dirs[g.from]);
+    const startC = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -3);
+    let hit = this.surfaceHit(charPt(startC.x, startC.y, startC.z), this.charToModel(dc).normalize(), g.region || 'torso');
+    // ignore hits far from where that body part should be (ray slipped past it)
+    const expected = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -(g.depth ?? 0.12));
+    if (hit && hit.point.clone().sub(charPt(expected.x, expected.y, expected.z)).length() > 0.3 * hh) hit = null;
+    let point, normalC = null;
+    if (hit) {
+      point = hit.point;
+      normalC = hit.normal.clone().applyQuaternion(this.Finv);
+      if (normalC.dot(dc) > 0) normalC.negate();
+    } else {
+      // no mesh hit: estimate from the skeleton
+      const surf = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -(g.depth ?? 0.12));
+      point = charPt(surf.x, surf.y, surf.z);
+    }
+    point.add(this.charToModel(normalC || dc.clone().negate()).multiplyScalar(0.006 * hh)); // rest on the skin
+    // palm: face the surface (blend of the measured normal and the usual hand pose)
+    const palm = def.palm(m).normalize();
+    if (normalC) palm.lerp(normalC.clone().negate(), 0.5).normalize();
+    const ref = this.map[def.ref(side)] ? def.ref(side) : 'hips';
+    const rr = this.rest.get(this.map[ref]);
+    return {
+      ref,
+      local: point.clone().sub(rr.pos).applyQuaternion(rr.Wq.clone().invert()),
+      palm,
+      fingers: def.fingers(m),
+      hint: def.hint(m),
+      hit: !!hit,
+    };
+  }
+
+  // first body-surface hit along a ray (model space), ignoring arms/hands (and hair unless asked)
+  surfaceHit(origin, dir, region) {
+    const meshes = [];
+    this.root.traverse((o) => { if ((o.isSkinnedMesh || o.isMesh) && !o.userData.helper) { let v = true; for (let p = o; p; p = p.parent) if (!p.visible) v = false; if (v) meshes.push(o); } });
+    if (!meshes.length) return null;
+    const arm = new Set();
+    for (const k of ['leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm']) {
+      const b = this.map[k];
+      if (b) b.traverse((o) => { if (o.isBone) arm.add(o); });
+    }
+    const head = new Set();
+    if (this.map.head) this.map.head.traverse((o) => { if (o.isBone) head.add(o); });
+    const okBone = (b) => b && !arm.has(b) && (region === 'head' ? head.has(b) : !head.has(b));
+    // measure in the rest pose
+    const saved = this.bones.map((b) => [b, b.position.clone(), b.quaternion.clone()]);
+    for (const b of this.bones) { const r = this.rest.get(b); b.quaternion.copy(r.Lq); b.position.copy(r.Lp); }
+    this.root.updateMatrixWorld(true);
+    for (const o of meshes) if (o.isSkinnedMesh) { o.skeleton.update(); o.boundingSphere = null; o.boundingBox = null; }
+    let best = null;
+    try {
+      const M = this.root.matrixWorld;
+      const ray = new THREE.Raycaster(origin.clone().applyMatrix4(M), dir.clone().transformDirection(M), 0, Infinity);
+      const hits = ray.intersectObjects(meshes, false);
+      const inv = new THREE.Matrix4().copy(M).invert();
+      for (const h of hits) {
+        const o = h.object;
+        let bone = null;
+        if (o.isSkinnedMesh && h.face) {
+          const si = o.geometry.attributes.skinIndex, sw = o.geometry.attributes.skinWeight;
+          if (si && sw) {
+            let bi = 0, bw = -1;
+            for (let k = 0; k < 4; k++) { const wv = sw.getComponent(h.face.a, k); if (wv > bw) { bw = wv; bi = si.getComponent(h.face.a, k); } }
+            bone = o.skeleton.bones[bi];
+          }
+        } else {
+          for (let p = o.parent; p; p = p.parent) if (p.isBone) { bone = p; break; }
+          if (!bone) bone = this.map.hips;
+        }
+        if (!okBone(bone)) continue;
+        const n = h.face ? h.face.normal.clone().transformDirection(o.matrixWorld).transformDirection(inv) : dir.clone().negate();
+        best = { point: h.point.clone().applyMatrix4(inv), normal: n.normalize() };
+        break;
+      }
+    } catch (e) { console.warn('surface ray', e); }
+    for (const [b, p, q] of saved) { b.position.copy(p); b.quaternion.copy(q); }
+    this.root.updateMatrixWorld(true);
+    for (const o of meshes) if (o.isSkinnedMesh) { o.skeleton.update(); o.boundingSphere = null; o.boundingBox = null; }
+    return best;
   }
 
   apply(solved) {
@@ -443,6 +746,31 @@ export class HumanoidRig {
     return new THREE.Vector3().setFromMatrixPosition(o.matrixWorld).applyMatrix4(inv);
   }
 }
+
+// ---- spots a hand can touch ----
+// at(): where to aim (x = character's left, y = up from the hips, in hip-height
+// units) and which way to look for the surface. palm/fingers/hint are the wanted
+// palm normal (pointing into the body), finger direction and elbow direction.
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+export const SPOTS = {
+  lap: { label: 'lap (below the belly)', ref: () => 'hips', at: (c) => ({ x: c.m * c.legX * 0.35, y: c.legY + 0.02, from: 'front', depth: 0.12 }), palm: () => V(0, -0.35, -1), fingers: (m) => V(-m * 0.5, -0.85, 0.15), hint: (m) => V(m * 0.85, -0.35, -0.45) },
+  belly: { label: 'belly', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.42, from: 'front', depth: 0.15 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.9, -0.3, 0), hint: (m) => V(m * 0.9, -0.4, -0.3) },
+  chest: { label: 'chest', ref: () => 'chest', at: (c) => ({ x: c.m * c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.6, 0.75, 0), hint: (m) => V(m * 0.7, -0.7, 0) },
+  heart: { label: 'heart (left side of the chest)', ref: () => 'chest', at: (c) => ({ x: c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.5, 0.8, 0), hint: (m) => V(m * 0.6, -0.8, 0) },
+  hip: { label: 'hip (side of the waist)', ref: () => 'hips', at: (c) => ({ x: c.m * 0.2, y: c.legY + 0.14, from: 'side', depth: 0.06 }), palm: (m) => V(-m, 0, 0), fingers: () => V(0, -0.45, 0.9), hint: (m) => V(m, 0, -0.35) },
+  thigh: { label: 'front of the thigh', ref: (s) => s + 'UpperLeg', at: (c) => ({ x: c.m * c.legX, y: c.legY - 0.2, from: 'front', depth: 0.08 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.15, -1, 0.1), hint: (m) => V(m * 0.6, -0.2, -0.75) },
+  knee: { label: 'knee', ref: (s) => s + 'LowerLeg', at: (c) => ({ x: c.m * c.legX, y: c.kneeY + 0.02, from: 'front', depth: 0.07 }), palm: () => V(0, -0.6, -0.8), fingers: () => V(0, -0.7, 0.7), hint: (m) => V(m * 0.8, 0.2, -0.3) },
+  back: { label: 'lower back (behind the back)', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.25, from: 'back', depth: 0.11 }), palm: () => V(0, 0, 1), fingers: (m) => V(-m * 0.75, -0.6, 0), hint: (m) => V(m * 0.6, -0.4, -0.8) },
+  head: { label: 'top of the head', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * 0.03, y: c.headTop - 0.06, z: 0, from: 'top', depth: 0.06 }), palm: () => V(0, -1, 0), fingers: (m) => V(-m * 0.8, 0, 0.5), hint: (m) => V(m, 0.5, 0) },
+  face: { label: 'mouth / face', ref: () => 'head', region: 'head', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.28, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
+  cheek: { label: 'cheek', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * 0.06, y: c.headY + (c.headTop - c.headY) * 0.32, z: 0.03, from: 'side', depth: 0.02 }), palm: (m) => V(-m, 0, -0.2), fingers: () => V(0, 1, 0.15), hint: (m) => V(m * 0.4, -0.9, 0.2) },
+  chin: { label: 'chin (resting the chin on the hand)', ref: () => 'head', region: 'head', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.12, from: 'front', depth: 0.08 }), palm: () => V(0, 0.6, -0.8), fingers: (m) => V(-m * 0.5, 0.5, 0.6), hint: (m) => V(m * 0.3, -0.9, 0.3) },
+  shoulder: { label: 'the other shoulder', ref: () => 'chest', at: (c) => ({ x: -c.m * c.shX * 0.6, y: c.shY, from: 'top', depth: 0.04 }), palm: () => V(0, -1, 0.1), fingers: (m) => V(-m * 0.3, -0.2, -0.9), hint: (m) => V(m * 0.3, -0.6, 0.7) },
+};
+export const SPOT_ALIAS = {
+  lowerbelly: 'lap', underbelly: 'lap', abdomen: 'belly', stomach: 'belly', tummy: 'belly', waist: 'hip', hips: 'hip', side: 'hip',
+  breast: 'chest', heart: 'heart', mouth: 'face', lips: 'face', jaw: 'chin', leg: 'thigh', thighs: 'thigh', knees: 'knee', lowerback: 'back', behind: 'back',
+};
 
 // ---- pose param helpers (used by the motion library and the AI) ----
 
@@ -524,10 +852,13 @@ export function paramsToSpec(p) {
     const up = p[s + 'ElbowUp'] || 0;
     spec[side + 'LowerArm'] = { bend: p[s + 'Elbow'], front: up < 0 ? inward(side, -up) : elbowFront(up) };
     spec[side + 'Hand'] = { rot: [p[s + 'HandPitch'], p[s + 'HandYaw'], p[s + 'HandRoll']] };
+    const touch = p[s + 'Touch'];
+    if (touch && touch.spot && touch.weight > 0) spec[side + 'Hand'].touch = touch;
     spec[side + 'UpperLeg'] = { dir: legDir(side, p[s + 'LegSwing'], p[s + 'LegSpread']) };
     spec[side + 'LowerLeg'] = { bend: p[s + 'Knee'], front: new THREE.Vector3(0, 0, -1) };
     spec[side + 'Foot'] = { rot: [p[s + 'FootPitch'], 0, 0] };
   }
+  if (p.plantFeet) spec.plantFeet = true;
   return spec;
 }
 

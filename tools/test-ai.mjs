@@ -29,3 +29,30 @@ console.log('NaN check', nan ? 'FAIL' : 'ok');
 const spec = { message: 'x', clips: [{ name: 'Custom wave', target: 'selected', duration: 2, loop: true, preset: 'walk', speed: 1, intensity: 1, humanoidKeys: [{ t: 0, values: [{ param: 'rArmRaise', value: 100 }, { param: 'rElbow', value: 60 }] }, { t: 1, values: [{ param: 'rElbow', value: 100 }] }, { t: 2, values: [{ param: 'rElbow', value: 60 }] }], objectKeys: [], boneKeys: [] }, { name: 'Cube hop', target: 'Cube', duration: 1, loop: true, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], objectKeys: [{ t: 0, channel: 'position', x: 0, y: 0, z: 0 }, { t: 0.5, channel: 'position', x: 0, y: 1, z: 0 }, { t: 1, channel: 'position', x: 0, y: 0, z: 0 }, { t: 0.5, channel: 'color', x: 1, y: 0, z: 0 }], boneKeys: [] }] };
 const built = ai.buildFromSpec(spec);
 console.log('spec ->', built.results.map(r => `${r.model.name}:${r.clip.name}:${r.clip.tracks.length}`), built.notes);
+
+// hands placed on the body (offline and from Claude's handTouches)
+{
+  let bad = 0;
+  app.selection = { model: mModel, object: man };
+  const hb = mModel.humanoid.map.rightHand;
+  const evalAt = (clip, t) => { const mx = new THREE.AnimationMixer(man); mx.clipAction(clip).play(); mx.setTime(t); man.updateMatrixWorld(true); const p = hb.getWorldPosition(new THREE.Vector3()); mx.stopAllAction(); mx.uncacheRoot(man); return p; };
+  const legTracks = (clip) => clip.tracks.filter((t) => /Leg|Foot|Toe/.test(man.getObjectByProperty('uuid', t.name.split('.')[0])?.name || '') && t.times.length > 1 && t.values.some((v, i) => Math.abs(v - t.values[i % 4]) > 1e-4));
+  for (const p of ['put hand on her lap while shes standing dont touch legs or anything', 'hands on hips', 'right hand on her head']) {
+    const r = ai.runOffline(p);
+    const clip = r.results[0].clip;
+    const moved = legTracks(clip).length;
+    console.log(JSON.stringify(p).padEnd(42), r.understood ? 'ok ' : '?? ', clip.name, `legs animated: ${moved}`);
+    if (!r.understood || moved) bad++;
+  }
+  // Claude: a hand eases onto the lap and stays, feet planted
+  const tspec = { message: 'x', clips: [{ name: 'Hand on lap', target: 'selected', duration: 3, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [{ t: 0, values: [{ param: 'chestPitch', value: 0 }] }, { t: 3, values: [{ param: 'chestPitch', value: 1.5 }] }], handTouches: [{ t: 0, hand: 'right', spot: 'lap', weight: 0 }, { t: 0.6, hand: 'right', spot: 'lap', weight: 1 }], plantFeet: true, objectKeys: [], boneKeys: [] }] };
+  const tb = ai.buildFromSpec(tspec);
+  const clip = tb.results[0] && tb.results[0].clip;
+  const h0 = clip && evalAt(clip, 0), h2 = clip && evalAt(clip, 2);
+  const rig = mModel.humanoid;
+  const front = h2 ? h2.clone().sub(rig.posModel(rig.map.hips)).dot(rig.fwd) : 0;
+  console.log('claude handTouches ->', clip ? `${clip.tracks.length} tracks, hand moved ${h0.distanceTo(h2).toFixed(2)}, in front of hips ${front.toFixed(2)}, legs animated ${legTracks(clip).length}` : 'no clip');
+  if (!clip || h0.distanceTo(h2) < 0.1 || front < 0.02 || legTracks(clip).length) bad++;
+  console.log(bad ? 'TOUCH FAIL' : 'TOUCH OK');
+  if (bad) process.exitCode = 1;
+}
