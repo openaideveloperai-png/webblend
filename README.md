@@ -27,9 +27,9 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 
 | Type | Formats |
 |---|---|
-| 3D models | `.glb` `.gltf` (incl. Draco and meshopt compression) · `.fbx` · `.obj` + `.mtl` · `.blend` · `.dae` · `.stl` · `.ply` · `.3mf` · `.amf` · `.3ds` · `.wrl`/`.vrml` · `.vox` · `.usdz`/`.usda`/`.usdc` · `.lwo` · `.kmz` · `.vtk` · `.md2` · `.gcode` · `.drc` · `.vrm` |
+| 3D models | `.glb` `.gltf` (incl. Draco and meshopt compression) · `.fbx` · `.obj` + `.mtl` · `.blend` · `.pmx`/`.pmd` (MikuMikuDance) · `.dae` · `.stl` · `.ply` · `.3mf` · `.amf` · `.3ds` · `.wrl`/`.vrml` · `.vox` · `.usdz`/`.usda`/`.usdc` · `.lwo` · `.kmz` · `.vtk` · `.md2` · `.gcode` · `.drc` · `.vrm` |
 | Point clouds | `.pcd` · `.xyz` · `.ply` |
-| Animation only | `.bvh` · `.fbx`/`.glb` with no mesh (applied to the selected character) · `.json` clips exported from this app |
+| Animation only | `.bvh` · `.vmd` (MMD dances) · `.fbx`/`.glb` with no mesh (applied to the selected character) · `.json` clips exported from this app |
 | 2D → 3D | `.svg` (extruded) · `.png` `.jpg` `.webp` `.gif` `.bmp` `.tga` (image planes) |
 | Archives | `.zip` (nested zips too) and whole folders |
 | Textures | png, jpg, webp, gif, bmp, tga, dds (BC1–BC5, BC7), ktx2 (ktx2 needs internet) |
@@ -50,6 +50,12 @@ Supported:
 - Mirror and Subdivision Surface modifiers (subdivision matches Blender's result)
 
 Not supported (export to glTF from Blender for these): other modifiers, geometry nodes, curves/text objects, linked library data, procedural shader textures, and some constraint types (Child Of, Armature, Transformation…; when a rig uses these, you pose the bones that move the mesh directly).
+
+### MikuMikuDance (MMD)
+
+- `.pmx` and `.pmd` models open directly: drop the model together with its texture files (or the whole folder / a zip). Leg IK, toe IK and "D" bones work like in MMD, facial morphs become shape keys, and Japanese file and bone names are fine. Physics (hair/skirt rigid bodies) isn't simulated.
+- `.vmd` motions: select a character and drop the `.vmd`. On MMD characters (`.pmx`, `.pmd`, or MMD models converted to `.blend`/`.glb`/`.fbx`) bones and facial expressions are matched by name; on other humanoids (Mixamo, VRM, the demo mannequin…) the dance is retargeted.
+- MMD characters exported to `.glb`/`.fbx` lose their IK setup; WebBlend rebuilds the leg IK and D bones from the standard bone names.
 
 ### Rigs from MMD, games and Rigify
 
@@ -129,4 +135,5 @@ node tools/e2e-ai.cjs                                                # Claude in
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
 node tools/e2e-mmd.cjs test-assets/mmd ./out                         # MMD-style .blend zip and Blender-exported .glb
+node tools/e2e-mmdfiles.cjs <pmx folder> <pmd folder> <dance.vmd> ./out  # real MMD files (bring your own)
 ```

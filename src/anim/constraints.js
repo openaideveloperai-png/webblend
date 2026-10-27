@@ -152,8 +152,10 @@ const SOLVE = {
   },
 
   // MMD "append" (付与): add a share of another bone's rotation / movement
-  INHERIT(it) {
+  INHERIT(it, ctx) {
     const { owner: o, target: t, c } = it;
+    // a clip that keys this bone already holds its final pose (baked exports)
+    if (ctx.animated && ctx.animated.has(o.uuid)) return;
     const r = c.ratio ?? 1;
     if (c.rotate) {
       const tq = t.isBone ? basisQ(t, Q2) : Q2.copy(t.quaternion);
@@ -210,13 +212,24 @@ const SOLVE = {
     const tip = c.useTail ? owner : owner.parent;
     const eff = new THREE.Vector3(0, c.useTail ? boneLength(owner) : 0, 0);
     // effector expressed on the last chain bone
-    const effOn = (b) => (b === owner ? eff : owner.position.clone());
+    const effOn = (b) => {
+      if (b === owner) return eff;
+      if (owner.parent === b) return owner.position.clone();
+      b.updateWorldMatrix(true, false);
+      return b.worldToLocal(worldP(owner, new THREE.Vector3()));
+    };
     const goal = targetPoint(target, 0, new THREE.Vector3());
     const pole = it.pole ? targetPoint(it.pole, 0, new THREE.Vector3()) : null;
     const last = chain[chain.length - 1];
     void tip;
+    let hint = pole;
+    if (!hint && c.poleForward && ctx.root) {
+      ctx.root.updateWorldMatrix(true, false);
+      const fwd = new THREE.Vector3(0, 0, 1).transformDirection(ctx.root.matrixWorld);
+      hint = worldP(chain[0], new THREE.Vector3()).addScaledVector(fwd, 1000);
+    }
     if (chain.length === 1) aim(last, effOn(last), goal);
-    else if (chain.length === 2) twoBone(chain[0], chain[1], effOn(last), goal, pole);
+    else if (chain.length === 2) twoBone(chain[0], chain[1], effOn(last), goal, hint);
     else ccd(chain, last, effOn(last), goal, Math.min(c.iterations || 40, 40));
     if (saved) chain.forEach((b, i) => { b.quaternion.copy(saved[i].slerp(b.quaternion, c.influence)); });
   },
@@ -292,7 +305,80 @@ function aim(b, effLocal, goal) {
   enforceDOF(b);
 }
 
+// Two bones where the middle one is a hinge (knee/elbow with IK locks or
+// limits): pick the hinge angle that gives exactly the needed reach, aim the
+// upper bone, then swivel so the knee stays near its current direction (or
+// toward the pole / hint).
+function hingeTwoBone(upper, middle, effLocal, goal, hint, free) {
+  const ik = middle.userData.ik;
+  const axis = AXES[free];
+  const rq = restQ(middle, new THREE.Quaternion());
+  const lo = ik.limit[free] ? ik.min[free] : -Math.PI, hi = ik.limit[free] ? ik.max[free] : Math.PI;
+  const hip = worldP(upper, new THREE.Vector3());
+  const kneeBase = worldP(middle, new THREE.Vector3());
+  upper.updateWorldMatrix(true, false);
+  const s = V3.setFromMatrixScale(upper.matrixWorld).x || 1;
+  const want = goal.distanceTo(hip) / s;
+  const e = new THREE.Vector3(), q = new THREE.Quaternion(), aq = new THREE.Quaternion();
+  const reach = (th) => {
+    q.copy(rq).multiply(aq.setFromAxisAngle(axis, th));
+    return e.copy(effLocal).multiply(middle.scale).applyQuaternion(q).add(middle.position).length() - want;
+  };
+  // current hinge angle (prefer the solution closest to it)
+  E1.setFromQuaternion(basisQ(middle, Q3), 'ZYX');
+  const cur = [E1.x, E1.y, E1.z][free];
+  const N = 72;
+  let best = null, bestScore = Infinity, fallback = lo, fallbackErr = Infinity;
+  let prevT = lo, prevF = reach(lo);
+  for (let i = 1; i <= N; i++) {
+    const t = lo + ((hi - lo) * i) / N;
+    const f = reach(t);
+    if (Math.abs(prevF) < fallbackErr) { fallbackErr = Math.abs(prevF); fallback = prevT; }
+    if (Math.abs(f) < fallbackErr) { fallbackErr = Math.abs(f); fallback = t; }
+    if ((prevF <= 0 && f >= 0) || (prevF >= 0 && f <= 0)) {
+      let a = prevT, b = t, fa = prevF;
+      for (let k = 0; k < 30; k++) {
+        const m = (a + b) / 2, fm = reach(m);
+        if ((fa <= 0 && fm <= 0) || (fa >= 0 && fm >= 0)) { a = m; fa = fm; } else b = m;
+      }
+      const root = (a + b) / 2;
+      const score = Math.abs(root - cur);
+      if (score < bestScore) { bestScore = score; best = root; }
+    }
+    prevT = t; prevF = f;
+  }
+  const th = best ?? fallback; // out of reach: as close as the limits allow
+  middle.quaternion.copy(rq).multiply(aq.setFromAxisAngle(axis, th));
+  // aim the upper bone so the effector lies on the line to the goal
+  middle.updateWorldMatrix(true, false);
+  const effW = middle.localToWorld(effLocal.clone());
+  const toE = effW.sub(hip), toG = goal.clone().sub(hip);
+  if (toE.lengthSq() > 1e-14 && toG.lengthSq() > 1e-14) rotateWorld(upper, Q4.setFromUnitVectors(toE.normalize(), toG.clone().normalize()));
+  // swivel around the hip -> goal line
+  if (toG.lengthSq() > 1e-14) {
+    const ax = toG.normalize();
+    const knee = worldP(middle, new THREE.Vector3()).sub(hip);
+    const ref = (hint ? hint.clone() : kneeBase).sub(hip);
+    knee.addScaledVector(ax, -knee.dot(ax));
+    ref.addScaledVector(ax, -ref.dot(ax));
+    if (knee.lengthSq() > 1e-12 && ref.lengthSq() > 1e-12) {
+      knee.normalize(); ref.normalize();
+      const ang = Math.atan2(knee.clone().cross(ref).dot(ax), knee.dot(ref));
+      if (Math.abs(ang) > 1e-6) rotateWorld(upper, Q4.setFromAxisAngle(ax, ang));
+    }
+  }
+}
+
+function hingeIndex(b) {
+  const ik = b.userData.ik;
+  if (!ik) return -1;
+  const free = [0, 1, 2].filter((k) => !ik.lock[k] && !(ik.limit[k] && Math.abs(ik.max[k] - ik.min[k]) < 1e-4));
+  return free.length === 1 ? free[0] : -1;
+}
+
 function twoBone(upper, middle, effLocal, goal, pole) {
+  const hingeK = hingeIndex(middle);
+  if (hingeK >= 0) { hingeTwoBone(upper, middle, effLocal, goal, pole, hingeK); return; }
   const a = worldP(upper, new THREE.Vector3());
   const b = worldP(middle, new THREE.Vector3());
   middle.updateWorldMatrix(false, false);
@@ -386,7 +472,8 @@ export class ConstraintSolver {
       return m.get(name) || m.get(sanitize(name)) || null;
     };
     const resolve = (owner, obj, sub) => {
-      let node = obj ? (objByName.get(obj) || objByName.get(sanitize(obj))) : null;
+      if (!obj) return sub ? boneIn(armatureOf(owner), sub) : null; // same skeleton (MMD files)
+      let node = objByName.get(obj) || objByName.get(sanitize(obj));
       if (!node && obj) {
         // target is this armature, but the object was renamed on import
         node = armatureOf(owner);
@@ -407,9 +494,14 @@ export class ConstraintSolver {
         const it = { owner: b, c, target, pole: null, chain: [] };
         if (c.type === 'IK') {
           if (c.pole) it.pole = resolve(b, c.pole, c.poleSub);
-          let o = c.useTail ? b : b.parent;
-          const max = c.chain > 0 ? c.chain : 255;
-          while (o && o.isBone && it.chain.length < max) { it.chain.unshift(o); o = o.parent; }
+          if (c.links && c.links.length) {
+            // explicit chain, listed from the effector up (MMD)
+            it.chain = c.links.map((n) => resolve(b, '', n)).filter(Boolean).reverse();
+          } else {
+            let o = c.useTail ? b : b.parent;
+            const max = c.chain > 0 ? c.chain : 255;
+            while (o && o.isBone && it.chain.length < max) { it.chain.unshift(o); o = o.parent; }
+          }
           it.restTarget = target.isBone ? null : { p: target.position.clone(), q: target.quaternion.clone() };
         }
         this.items.push(it);
@@ -418,7 +510,8 @@ export class ConstraintSolver {
     this.order = this.sortItems();
     this.driven = new Map(); // bone -> bones driving its rotation
     for (const it of this.items) {
-      const full = it.c.type === 'COPY_TRANSFORMS' || (it.c.type === 'COPY_ROTATION' && ((it.c.flag ?? 7) & 7) === 7);
+      const full = it.c.type === 'COPY_TRANSFORMS' || (it.c.type === 'COPY_ROTATION' && ((it.c.flag ?? 7) & 7) === 7)
+        || (it.c.type === 'INHERIT' && it.c.rotate && Math.abs(Math.abs(it.c.ratio ?? 1) - 1) < 1e-3);
       if (full && it.c.influence > 0.99 && it.target.isBone) {
         if (!this.driven.has(it.owner)) this.driven.set(it.owner, []);
         this.driven.get(it.owner).push(it.target);
@@ -488,17 +581,15 @@ export class ConstraintSolver {
     let ikMotion = false;
     if (animated) for (const t of this.ikTargets) if (animated.has(t.uuid)) { ikMotion = true; break; }
     const ctx = {
+      animated,
+      root: this.root,
       engaged: (it) => {
         const t = it.target;
         if (ikMotion) return true;
         for (let p = t.parent; p && p.isBone; p = p.parent) if (animated && animated.has(p.uuid) && !isAncestorOf(p, it.owner)) return true;
         const r = t.userData.rest;
-        if (r) {
-          if (t.position.distanceToSquared(V3.fromArray(r.p)) > 1e-10) return true;
-          if (1 - Math.abs(t.quaternion.dot(Q3.fromArray(r.q))) > 1e-8) return true;
-          return false;
-        }
-        if (it.restTarget) return t.position.distanceToSquared(it.restTarget.p) > 1e-10 || 1 - Math.abs(t.quaternion.dot(it.restTarget.q)) > 1e-8;
+        if (r) return moved(t, V3.fromArray(r.p), Q3.fromArray(r.q));
+        if (it.restTarget) return moved(t, it.restTarget.p, it.restTarget.q);
         return true;
       },
     };
@@ -523,6 +614,14 @@ export class ConstraintSolver {
 }
 
 function isAncestorOf(a, b) { for (let p = b.parent; p; p = p.parent) if (p === a) return true; return false; }
+
+// has a handle been moved away from its rest pose? (tolerant of float32 data)
+function moved(o, p, q) {
+  const tol = 1e-5 * Math.max(1, p.length());
+  if (Math.abs(o.position.x - p.x) > tol || Math.abs(o.position.y - p.y) > tol || Math.abs(o.position.z - p.z) > tol) return true;
+  const d = Math.abs(o.quaternion.dot(q)) / Math.max(1e-12, o.quaternion.length() * q.length());
+  return d < 1 - 1e-7;
+}
 
 function snap(o, out) {
   if (!out) return { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() };

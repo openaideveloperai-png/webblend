@@ -565,6 +565,7 @@ export function retargetClip(srcRig, clip, dstRig, opts = {}) {
     times.push(t);
     mixer.setTime(t);
     srcRig.root.updateMatrixWorld(true);
+    if (srcRig.afterEvaluate) srcRig.afterEvaluate(clip);
     srcRootInv.copy(srcRig.root.matrixWorld).invert();
     // source deltas in char space
     const deltas = {};

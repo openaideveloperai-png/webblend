@@ -151,12 +151,13 @@ async function open(page, files) {
     const thigh = h && h.map.leftUpperLeg;
     const measure = () => { let s = 0; const v = new thigh.position.constructor(); for (const mesh of sk) { for (let i = 0; i < mesh.geometry.attributes.position.count; i += 7) { mesh.getVertexPosition(i, v); s += v.z + v.y; } } return s; };
     const before = thigh ? measure() : 0;
-    if (thigh) { thigh.rotateX(-0.9); thigh.updateMatrixWorld(true); for (const mesh of sk) mesh.skeleton.update(); }
+    if (thigh) { thigh.rotateX(-0.9); a.tick(0); for (const mesh of sk) mesh.skeleton.update(); }
     const after = thigh ? measure() : 0;
-    return { humanoid: !!h, thigh: thigh && thigh.name, joints: m.joints.bones.map((b) => b.name), shown, moved: Math.abs(after - before) };
+    return { humanoid: !!h, thigh: thigh && thigh.name, joints: m.joints.bones.map((b) => b.name), shown, moved: Math.abs(after - before), constraints: m.constraints ? m.constraints.count : 0 };
   });
-  ok('GLB: humanoid found, legs mapped to the deforming D bones', g.humanoid && g.thigh === '左足D', g.thigh);
-  ok('GLB: bone dots on deforming bones, unweighted control bones hidden', g.joints.includes('左足D') && !g.joints.includes('左足'), JSON.stringify(g.joints));
+  ok('GLB: MMD leg IK and D bones rebuilt from bone names', g.constraints >= 8, g.constraints);
+  ok('GLB: humanoid found, legs mapped to the control bones', g.humanoid && g.thigh === '左足', g.thigh);
+  ok('GLB: bone dots on control bones and IK handles, D bones hidden', g.joints.includes('左足') && g.joints.includes('左足ＩＫ') && !g.joints.includes('左足D'), JSON.stringify(g.joints));
   ok('GLB: rigid body meshes hidden by name', !g.shown.some((n) => /rigid/i.test(n)), JSON.stringify(g.shown));
   ok('GLB: posing the thigh deforms the mesh', g.moved > 0.01, g.moved.toFixed(3));
   await page.evaluate(() => window.webblend.viewport.frameAll());

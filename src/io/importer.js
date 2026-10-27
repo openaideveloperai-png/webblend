@@ -29,16 +29,17 @@ import { importBlend } from './blend/blendimport.js';
 import { createDracoLoader } from './draco.js';
 import { VFS } from './vfs.js';
 import { optimizeTextures, textureFromBytes, AnyImageLoader } from './textures.js';
+import { parsePMX, parsePMD, buildMMD, parseVMD, buildTemplateSkeleton, vmdTemplateClip } from './mmd.js';
 import { extOf, stripExt, baseName } from '../core/util.js';
 
-export const MODEL_EXTS = new Set(['glb', 'gltf', 'fbx', 'obj', 'dae', 'stl', 'ply', '3mf', 'amf', '3ds', 'wrl', 'vrml', 'vox', 'usdz', 'usda', 'usdc', 'usd', 'lwo', 'kmz', 'pcd', 'xyz', 'vtk', 'vtp', 'bvh', 'md2', 'gcode', 'drc', 'svg', 'blend', 'json', 'vrm']);
+export const MODEL_EXTS = new Set(['glb', 'gltf', 'fbx', 'obj', 'dae', 'stl', 'ply', '3mf', 'amf', '3ds', 'wrl', 'vrml', 'vox', 'usdz', 'usda', 'usdc', 'usd', 'lwo', 'kmz', 'pcd', 'xyz', 'vtk', 'vtp', 'bvh', 'md2', 'gcode', 'drc', 'svg', 'blend', 'json', 'vrm', 'pmx', 'pmd', 'vmd']);
 export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tga', 'dds', 'avif']);
 export const ACCEPT = [...MODEL_EXTS, ...IMAGE_EXTS, 'zip', 'mtl', 'bin'].map((e) => '.' + e).join(',');
 
 const UNSUPPORTED = {
   max: '3ds Max scene files', ma: 'Maya ASCII files', mb: 'Maya binary files', c4d: 'Cinema 4D files', skp: 'SketchUp files',
   '3dm': 'Rhino files', step: 'STEP CAD files', stp: 'STEP CAD files', iges: 'IGES CAD files', igs: 'IGES CAD files', ifc: 'IFC BIM files',
-  x: 'DirectX .x files', lxo: 'Modo files', ztl: 'ZBrush files', spp: 'Substance files', hip: 'Houdini files', mmd: 'MMD files', pmx: 'MMD (PMX) files', pmd: 'MMD (PMD) files',
+  x: 'DirectX .x files', lxo: 'Modo files', ztl: 'ZBrush files', spp: 'Substance files', hip: 'Houdini files',
   rar: 'RAR archives', '7z': '7-Zip archives',
 };
 
@@ -232,10 +233,10 @@ export class Importer {
     const stems = new Set(primaries.filter((e) => e.ext === 'glb').map((e) => stripExt(e.key)));
     const filtered = primaries.filter((e) => !(e.ext === 'gltf' && stems.has(stripExt(e.key))));
     // order: models with meshes first, animation sources (bvh/json) last
-    const rank = (e) => (e.ext === 'bvh' || e.ext === 'json' ? 2 : 0);
+    const rank = (e) => (e.ext === 'bvh' || e.ext === 'json' || e.ext === 'vmd' ? 2 : 0);
     filtered.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
     // the same model in several formats (goatchan.blend + mesh/goatchan.fbx): load the best one
-    const PREF = ['blend', 'glb', 'vrm', 'gltf', 'fbx', 'dae', 'usdz', 'usdc', 'usda', 'usd', 'obj', '3ds', 'lwo', 'ply', 'stl', '3mf', 'amf', 'wrl', 'vrml', 'kmz', 'drc'];
+    const PREF = ['blend', 'pmx', 'pmd', 'glb', 'vrm', 'gltf', 'fbx', 'dae', 'usdz', 'usdc', 'usda', 'usd', 'obj', '3ds', 'lwo', 'ply', 'stl', '3mf', 'amf', 'wrl', 'vrml', 'kmz', 'drc'];
     const skipped = [];
     const byStem = new Map();
     for (const e of filtered) {
@@ -254,7 +255,7 @@ export class Importer {
       for (let i = filtered.length - 1; i >= 0; i--) if (drop.has(filtered[i])) filtered.splice(i, 1);
     }
     // next to a real model, a .json is probably a config/data file: try it, but quietly
-    if (filtered.some((e) => e.ext !== 'json' && e.ext !== 'bvh')) for (const e of filtered) if (e.ext === 'json') e.optional = true;
+    if (filtered.some((e) => e.ext !== 'json' && e.ext !== 'bvh' && e.ext !== 'vmd')) for (const e of filtered) if (e.ext === 'json') e.optional = true;
     const images = all.filter((e) => IMAGE_EXTS.has(e.ext));
     const unsupported = all.filter((e) => UNSUPPORTED[e.ext]);
     return { primaries: filtered, images, unsupported, skipped };
@@ -501,6 +502,43 @@ export class Importer {
         animations = res.animations;
         warnings.push(...res.warnings);
         info = res.info;
+        break;
+      }
+      case 'pmx': case 'pmd': {
+        const buf = await readBuf(entry.blob);
+        const data = ext === 'pmx' ? parsePMX(buf) : parsePMD(buf);
+        const maxTex = this.app.settings.maxTexture();
+        const q = this.app.settings.get('quality');
+        const res = await buildMMD(data, {
+          maxMorphs: q === 'potato' ? 24 : q === 'low' ? 48 : 128,
+          loadTexture: async (p) => {
+            const rel = String(p).replace(/\\/g, '/');
+            const e = vfs.find(rel, entry.path) || vfs.find(baseName(rel), entry.path);
+            if (!e) { if (!/^toon\d+\.bmp$/i.test(baseName(rel))) missing.add(baseName(rel)); return null; }
+            try { return await textureFromBytes(new Uint8Array(await e.blob.arrayBuffer()), e.name, maxTex); } catch { unreadable.add(baseName(rel)); return null; }
+          },
+        });
+        root = res.root;
+        warnings.push(...res.warnings);
+        info = res.info;
+        break;
+      }
+      case 'vmd': {
+        // a dance / motion: played on a standard MMD skeleton, then applied to
+        // the target model by bone name, or retargeted to other humanoids
+        const vmd = parseVMD(await readBuf(entry.blob));
+        if (!vmd.bones.size && !vmd.morphs.size) throw new Error('This .vmd file has no bone or face animation (camera motions aren\'t supported)');
+        const t = buildTemplateSkeleton();
+        root = t.root;
+        root.userData.vmd = vmd;
+        const clip = vmdTemplateClip(vmd, t.bones, name);
+        if (!clip.tracks.length) {
+          // face-only motion: give it a tiny track so it counts as animation
+          clip.tracks.push(new THREE.NumberKeyframeTrack(`${root.uuid}.visible`, [0, Math.max(vmd.frames, 1) / 30], [1, 1]));
+          clip.resetDuration();
+        }
+        animations = [clip];
+        kind = 'skeleton';
         break;
       }
       case 'json': {

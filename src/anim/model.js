@@ -5,6 +5,7 @@ import { JointHelper } from '../core/joints.js';
 import { uid } from '../core/util.js';
 import { clipWithUuids, bumpClip, parseTrack } from './clips.js';
 import { ConstraintSolver, hasConstraints } from './constraints.js';
+import { addMMDConstraints } from '../io/mmd.js';
 
 const LOOPS = { repeat: THREE.LoopRepeat, once: THREE.LoopOnce, pingpong: THREE.LoopPingPong };
 
@@ -44,6 +45,8 @@ export class Model {
     this.nodeCount = 0;
     this.root.traverse(() => { this.nodeCount++; });
     this.constraints = null;
+    // MMD rigs that lost their IK / D-bone setup on export get it back
+    if (this.bones.length && !hasConstraints(this.bones)) addMMDConstraints(this.bones);
     if (this.bones.length && hasConstraints(this.bones)) {
       let incomplete = false;
       this.root.traverse((o) => { if (o.userData.constraintsIncomplete) incomplete = true; });
@@ -146,7 +149,8 @@ export class Model {
     const box = new THREE.Box3();
     // bones give a good size for characters in bind pose
     if (this.skinned.length) {
-      for (const s of this.skinned) { s.geometry.computeBoundingBox(); box.union(s.geometry.boundingBox.clone().applyMatrix4(s.matrixWorld)); }
+      // base shape only: shape keys can push vertices far away
+      for (const s of this.skinned) { const pa = s.geometry.attributes.position; if (pa) box.union(new THREE.Box3().setFromBufferAttribute(pa).applyMatrix4(s.matrixWorld)); }
     }
     if (box.isEmpty()) box.setFromObject(this.root, false);
     if (box.isEmpty() && this.bones.length) for (const b of this.bones) box.expandByPoint(new THREE.Vector3().setFromMatrixPosition(b.matrixWorld));

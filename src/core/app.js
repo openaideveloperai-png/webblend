@@ -8,6 +8,8 @@ import { Viewport } from './viewport.js';
 import { Model, disposeObject } from '../anim/model.js';
 import { setKey, snapshotClip, restoreClip, findTrackIndex, hasKeyAt, deleteKeys, clipInfo, PROPS, propDesc, bumpClip, clipWithUuids } from '../anim/clips.js';
 import { detectHumanoid, retargetClip } from '../anim/humanoid.js';
+import { ConstraintSolver, hasConstraints } from '../anim/constraints.js';
+import { vmdModelClip, vmdMorphTracks } from '../io/mmd.js';
 import { ikChain, solveIK } from '../anim/ik.js';
 import { AIAssistant } from '../anim/ai.js';
 import { Importer, unsupportedMessage } from '../io/importer.js';
@@ -571,8 +573,35 @@ export class App extends Emitter {
       const bones = [];
       srcRoot.traverse((o) => { if (o.isBone) bones.push(o); });
       srcRig = detectHumanoid(srcRoot, bones);
+      // sources with IK / constraints (MMD motions): solve them while sampling
+      if (srcRig && hasConstraints(bones)) {
+        const solver = new ConstraintSolver(srcRoot, bones);
+        srcRig.afterEvaluate = (clip) => {
+          if (!clip._animSet) clip._animSet = new Set(clip.tracks.map((t) => t.name.slice(0, t.name.indexOf('.'))));
+          solver.solve(clip._animSet);
+          srcRoot.updateMatrixWorld(true);
+        };
+      }
     }
+    const vmd = srcRoot && srcRoot.userData.vmd;
     for (const clip of clips) {
+      if (vmd) {
+        // MMD motion: by bone name onto MMD rigs, otherwise retarget to a humanoid
+        let out = null, how = '';
+        const direct = vmdModelClip(vmd, model.root, clip.name);
+        if (direct && (direct.matched / direct.total >= 0.3 || direct.core >= 0.6)) { out = direct.clip; how = `MMD bones matched (${direct.matched}/${direct.total})`; }
+        else if (srcRig && model.humanoid) {
+          out = retargetClip(srcRig, clip, model.humanoid, { name: clip.name });
+          out.tracks.push(...vmdMorphTracks(vmd, model.root));
+          out.resetDuration();
+          how = 'retargeted';
+        } else if (direct) { out = direct.clip; how = `${direct.matched} of ${direct.total} bones matched`; }
+        if (out && out.tracks.length) {
+          added.push(model.addClip(out, { play: false, warnDropped: false }));
+          added[added.length - 1].how = how;
+        }
+        continue;
+      }
       // how many tracks bind directly?
       const direct = clipWithUuids(clip, model.root);
       const ratio = clip.tracks.length ? direct.tracks.length / clip.tracks.length : 0;

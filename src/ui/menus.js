@@ -25,7 +25,7 @@ export function openFolder(app) {
 
 export function openAnimationFor(app, model) {
   const inp = document.getElementById('anim-input');
-  inp.accept = '.fbx,.glb,.gltf,.bvh,.json,.dae,.blend,.zip';
+  inp.accept = '.fbx,.glb,.gltf,.bvh,.vmd,.json,.dae,.blend,.zip';
   inp.value = '';
   inp.onchange = async () => {
     if (model) app.select(model.root, model);
