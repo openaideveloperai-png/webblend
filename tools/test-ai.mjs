@@ -37,7 +37,7 @@ console.log('spec ->', built.results.map(r => `${r.model.name}:${r.clip.name}:${
   const hb = mModel.humanoid.map.rightHand;
   const evalAt = (clip, t) => { const mx = new THREE.AnimationMixer(man); mx.clipAction(clip).play(); mx.setTime(t); man.updateMatrixWorld(true); const p = hb.getWorldPosition(new THREE.Vector3()); mx.stopAllAction(); mx.uncacheRoot(man); return p; };
   const legTracks = (clip) => clip.tracks.filter((t) => /Leg|Foot|Toe/.test(man.getObjectByProperty('uuid', t.name.split('.')[0])?.name || '') && t.times.length > 1 && t.values.some((v, i) => Math.abs(v - t.values[i % 4]) > 1e-4));
-  for (const p of ['put hand on her lap while shes standing dont touch legs or anything', 'hands on hips', 'right hand on her head']) {
+  for (const p of ['put hand on her lap while shes standing dont touch legs or anything', 'hands on hips', 'right hand on her head', 'cross her arms', 'hands behind her head', 'cover her eyes', 'facepalm', 'hand on her neck', 'touch her ear']) {
     const r = ai.runOffline(p);
     const clip = r.results[0].clip;
     const moved = legTracks(clip).length;

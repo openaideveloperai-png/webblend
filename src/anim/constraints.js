@@ -227,20 +227,37 @@ const SOLVE = {
     o.scale.lerp(sc, c.influence);
   },
 
-  LIMIT_ROTATION(it) {
+  LIMIT_ROTATION(it, ctx) {
+    // a limit on a bone of an IK chain belongs to that IK: it runs just before
+    // the IK solve (Blender's order), and not at all while the chain is posed by hand
+    if (it.ikOwner && !it.runNow) return;
     const { owner: o, c } = it;
     const order = ORDER[c.eulerOrder] || 'ZYX';
-    const q = basisQ(o, Q1);
-    E1.setFromQuaternion(q, order);
-    const keys = ['x', 'y', 'z'];
-    let changed = false;
-    for (let k = 0; k < 3; k++) {
-      if (!(c.flag & (1 << k))) continue;
-      const v = THREE.MathUtils.clamp(E1[keys[k]], c.min[k], c.max[k]);
-      if (v !== E1[keys[k]]) { E1[keys[k]] = v; changed = true; }
+    const clampE = () => {
+      const keys = ['x', 'y', 'z'];
+      let changed = false;
+      for (let k = 0; k < 3; k++) {
+        if (!(c.flag & (1 << k))) continue;
+        const v = THREE.MathUtils.clamp(E1[keys[k]], c.min[k], c.max[k]);
+        if (v !== E1[keys[k]]) { E1[keys[k]] = v; changed = true; }
+      }
+      return changed;
+    };
+    if (isLocal(c.ownerSpace) || !o.isBone) {
+      const q = basisQ(o, Q1);
+      E1.setFromQuaternion(q, order);
+      if (!clampE()) return;
+      setBasisQ(o, q.clone().slerp(Q2.setFromEuler(E1), c.influence));
+      return;
     }
-    if (!changed) return;
-    setBasisQ(o, q.clone().slerp(Q2.setFromEuler(E1), c.influence));
+    // pose space = relative to the armature; world = Blender's world
+    let S;
+    if (c.ownerSpace === 'WORLD' && ctx) S = new THREE.Quaternion().setFromRotationMatrix(ctx.blenderWorld());
+    else { const arm = armatureOf(o); S = arm ? worldQ(arm, new THREE.Quaternion()) : new THREE.Quaternion(); }
+    const q = S.clone().invert().multiply(worldQ(o, Q1));
+    E1.setFromQuaternion(q, order);
+    if (!clampE()) return;
+    setWorldQ(o, S.multiply(q.clone().slerp(Q2.setFromEuler(E1), c.influence)));
   },
 
   DAMPED_TRACK(it) { track(it, c => c.track ?? 1); },
@@ -266,6 +283,8 @@ const SOLVE = {
     if (!ctx.engaged(it)) return;
     const { owner, target, c, chain } = it;
     if (!chain.length) return;
+    // limits on the chain bones set the pose the IK starts from
+    if (it.limits) for (const l of it.limits) { l.runNow = true; SOLVE.LIMIT_ROTATION(l, ctx); l.runNow = false; }
     const saved = c.influence < 1 ? chain.map((b) => b.quaternion.clone()) : null;
     const tip = c.useTail ? owner : owner.parent;
     const eff = new THREE.Vector3(0, c.useTail ? boneLength(owner) : 0, 0);
@@ -373,7 +392,10 @@ function hingeTwoBone(upper, middle, effLocal, goal, hint, free) {
   const rq = restQ(middle, new THREE.Quaternion());
   const lo = ik.limit[free] ? ik.min[free] : -Math.PI, hi = ik.limit[free] ? ik.max[free] : Math.PI;
   const hip = worldP(upper, new THREE.Vector3());
-  const kneeBase = worldP(middle, new THREE.Vector3());
+  // the hinge axis before solving: kept where it is when there's no pole
+  // (Blender's solver turns the chain the least it can)
+  const hingeW = () => axis.clone().applyQuaternion(rq).applyQuaternion(worldQ(upper, Q3));
+  const hinge0 = hingeW();
   upper.updateWorldMatrix(true, false);
   const s = V3.setFromMatrixScale(upper.matrixWorld).x || 1;
   const want = goal.distanceTo(hip) / s;
@@ -412,16 +434,23 @@ function hingeTwoBone(upper, middle, effLocal, goal, hint, free) {
   const effW = middle.localToWorld(effLocal.clone());
   const toE = effW.sub(hip), toG = goal.clone().sub(hip);
   if (toE.lengthSq() > 1e-14 && toG.lengthSq() > 1e-14) rotateWorld(upper, Q4.setFromUnitVectors(toE.normalize(), toG.clone().normalize()));
-  // swivel around the hip -> goal line
+  // swivel around the hip -> goal line: knee toward the pole / hint, or the
+  // hinge axis back where it was
   if (toG.lengthSq() > 1e-14) {
     const ax = toG.normalize();
-    const knee = worldP(middle, new THREE.Vector3()).sub(hip);
-    const ref = (hint ? hint.clone() : kneeBase).sub(hip);
-    knee.addScaledVector(ax, -knee.dot(ax));
+    let cur, ref;
+    if (hint) {
+      cur = worldP(middle, new THREE.Vector3()).sub(hip);
+      ref = hint.clone().sub(hip);
+    } else {
+      cur = hingeW();
+      ref = hinge0.clone();
+    }
+    cur.addScaledVector(ax, -cur.dot(ax));
     ref.addScaledVector(ax, -ref.dot(ax));
-    if (knee.lengthSq() > 1e-12 && ref.lengthSq() > 1e-12) {
-      knee.normalize(); ref.normalize();
-      const ang = Math.atan2(knee.clone().cross(ref).dot(ax), knee.dot(ref));
+    if (cur.lengthSq() > 1e-12 && ref.lengthSq() > 1e-12) {
+      cur.normalize(); ref.normalize();
+      const ang = Math.atan2(cur.clone().cross(ref).dot(ax), cur.dot(ref));
       if (Math.abs(ang) > 1e-6) rotateWorld(upper, Q4.setFromAxisAngle(ax, ang));
     }
   }
@@ -568,6 +597,14 @@ export class ConstraintSolver {
         this.items.push(it);
       }
     }
+    // rotation limits on IK chain bones go with their IK (see LIMIT_ROTATION)
+    for (const ik of this.items) {
+      if (ik.c.type !== 'IK') continue;
+      const chain = new Set(ik.chain);
+      for (const l of this.items) {
+        if (l.c.type === 'LIMIT_ROTATION' && !l.ikOwner && chain.has(l.owner)) { l.ikOwner = ik; (ik.limits || (ik.limits = [])).push(l); }
+      }
+    }
     this.order = this.sortItems();
     this.driven = new Map(); // bone -> bones driving its rotation
     for (const it of this.items) {
@@ -637,8 +674,9 @@ export class ConstraintSolver {
   // animated: Set of node uuids that playing clips animate
   solve(animated) {
     // a motion that keys any IK handle is an IK motion (MMD dances): all IK on.
-    // Otherwise IK only engages when its handle is moved, so FK motions
-    // (AI, retargeted clips) aren't pinned by handles sitting at rest.
+    // Otherwise IK engages when its handle is moved, or when nobody has posed
+    // the chain (like Blender at rest); FK motions (AI, retargeted clips) and
+    // bones rotated by hand aren't pinned by handles sitting at rest.
     let ikMotion = false;
     if (animated) for (const t of this.ikTargets) if (animated.has(t.uuid)) { ikMotion = true; break; }
     const zup = this.zup;
@@ -648,7 +686,7 @@ export class ConstraintSolver {
       blenderWorld: () => { if (zup) { zup.updateWorldMatrix(true, false); return zup.matrixWorld.clone(); } this.root.updateWorldMatrix(true, false); return this.root.matrixWorld.clone(); },
       engaged: (it) => {
         const t = it.target;
-        if (ikMotion) return true;
+        if (ikMotion || it.unposed) return true;
         for (let p = t.parent; p && p.isBone; p = p.parent) if (animated && animated.has(p.uuid) && !isAncestorOf(p, it.owner)) return true;
         const r = t.userData.rest;
         if (r) return moved(t, V3.fromArray(r.p), Q3.fromArray(r.q));
@@ -657,6 +695,15 @@ export class ConstraintSolver {
       },
     };
     this.restoreBase();
+    // chains nobody animates or has rotated (checked before any constraint runs)
+    for (const it of this.order) {
+      if (it.c.type !== 'IK') continue;
+      it.unposed = it.chain.length > 0 && it.chain.every((b) => {
+        if (animated && animated.has(b.uuid)) return false;
+        const r = b.userData.rest;
+        return !!r && !moved(b, V3.fromArray(r.p), Q3.fromArray(r.q));
+      });
+    }
     for (const it of this.order) {
       if (!(it.c.influence > 0)) continue;
       const fn = SOLVE[it.c.type];

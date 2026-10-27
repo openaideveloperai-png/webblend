@@ -320,6 +320,9 @@ export class HumanoidRig {
       this.handAxes[side] = { f: f.clone().applyQuaternion(inv), n: n.clone().applyQuaternion(inv), palmLen };
     }
     this._spots = null;
+    this._scan = null;
+    this._skullTop = undefined;
+    this._eyes = undefined;
     // direction of each limb in character space (rest)
     this.restDirChar = {};
     for (const k of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm', 'leftUpperLeg', 'leftLowerLeg', 'rightUpperLeg', 'rightLowerLeg', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot']) {
@@ -362,22 +365,42 @@ export class HumanoidRig {
       return { sp, f };
     };
     let { sp, f } = body(spec);
-    // spots out of reach (knees, low on the thighs): lean forward, push the hips back and bend the knees
+    this.lastLean = 0;
+    const defOf = (t) => SPOTS[SPOT_ALIAS[t.spot] || t.spot];
+    // spots on the legs (thigh) slide up toward the hip when the arm can't
+    // reach them, instead of bending the whole body over
+    for (const side of touches) {
+      const k = side + 'Hand';
+      const def = defOf(spec[k].touch);
+      if (!def || !def.slide) continue;
+      let t = spec[k].touch;
+      for (let i = 0; i < 4; i++) {
+        const short = this.touchShortfall(side, t, f);
+        if (short <= 0) break;
+        const off = t.offset ? t.offset.clone() : new THREE.Vector3();
+        off.y += Math.min(short / this.hipHeight * 1.05 + 0.005, 0.5);
+        t = { ...t, offset: off };
+      }
+      if (t !== spec[k].touch) spec = { ...spec, [k]: { ...spec[k], touch: t } };
+    }
+    // spots out of reach that you bend down for (knees): bend at the hips and
+    // waist, push the hips back and bend the knees
     if (touches.length) {
       for (let lean = 1; lean <= 10; lean++) {
-        const short = Math.max(...touches.map((side) => this.touchShortfall(side, spec[side + 'Hand'].touch, f)));
+        const short = Math.max(...touches.map((side) => (defOf(spec[side + 'Hand'].touch) || {}).lean ? this.touchShortfall(side, spec[side + 'Hand'].touch, f) : 0));
         if (short <= 0) break;
         const rot = (k) => (spec[k] && spec[k].rot) || [0, 0, 0];
         const hp = spec.hips && spec.hips.pos ? spec.hips.pos.clone() : new THREE.Vector3();
-        hp.y -= 0.018; hp.z -= 0.02;
+        hp.y -= 0.024; hp.z -= 0.012;
         spec = {
           ...spec,
-          spine: { ...(spec.spine || {}), rot: [rot('spine')[0] + 6, rot('spine')[1], rot('spine')[2]] },
-          chest: { ...(spec.chest || {}), rot: [rot('chest')[0] + 4, rot('chest')[1], rot('chest')[2]] },
-          hips: { ...(spec.hips || {}), pos: hp, rot: [rot('hips')[0] + 3, rot('hips')[1], rot('hips')[2]] },
+          spine: { ...(spec.spine || {}), rot: [rot('spine')[0] + 4, rot('spine')[1], rot('spine')[2]] },
+          chest: { ...(spec.chest || {}), rot: [rot('chest')[0] + 2, rot('chest')[1], rot('chest')[2]] },
+          hips: { ...(spec.hips || {}), pos: hp, rot: [rot('hips')[0] + 4, rot('hips')[1], rot('hips')[2]] },
           plantFeet: true,
         };
         ({ sp, f } = body(spec));
+        this.lastLean = lean;
       }
     }
     const extra = {};
@@ -517,6 +540,7 @@ export class HumanoidRig {
     const g = this.touchGoal(side, touch, first);
     if (!g) return {};
     const { palm, fing, wrist } = g;
+    (this.lastTouch || (this.lastTouch = {}))[side] = { contact: g.contact.clone(), palm: palm.clone() };
     const w = THREE.MathUtils.clamp(touch.weight, 0, 1);
     const ax = this.handAxes[side];
     const hb = this.map[side + 'Hand'], ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'];
@@ -549,9 +573,33 @@ export class HumanoidRig {
     const ul = this.map[side + 'UpperLeg'], ll = this.map[side + 'LowerLeg'], ft = this.map[side + 'Foot'];
     if (!ul || !ll || !ft) return {};
     const hip = first.curP.get(ul);
-    const goal = this.rest.get(ft).pos.clone();
-    const l1 = this.rest.get(ll).pos.distanceTo(this.rest.get(ul).pos), l2 = this.rest.get(ft).pos.distanceTo(this.rest.get(ll).pos);
-    const { joint: knee, end } = this.twoBoneJoint(hip, goal, l1, l2, this.charToModel(new THREE.Vector3(0, 0, 1)));
+    const H0 = this.rest.get(ul).pos, K0 = this.rest.get(ll).pos, F0 = this.rest.get(ft).pos;
+    const goal = F0.clone();
+    const l1 = K0.distanceTo(H0), l2 = F0.distanceTo(K0);
+    // which way the knee bends: the way it does at rest (some rigs have slightly
+    // backward knees), turning toward the front as the hips drop and the knee
+    // has to bend more. So a standing pose keeps the legs exactly as they were.
+    const hb = this.map.hips;
+    const pelvis = hb && first.cur.get(hb) ? first.cur.get(hb).clone().multiply(this.rest.get(hb).Wq.clone().invert()) : new THREE.Quaternion();
+    const fwd = this.charToModel(new THREE.Vector3(0, 0, 1)).applyQuaternion(pelvis);
+    let hint = fwd;
+    const line0 = F0.clone().sub(H0).normalize();
+    const off0 = K0.clone().sub(H0);
+    off0.addScaledVector(line0, -off0.dot(line0));
+    const dir = goal.clone().sub(hip);
+    if (off0.length() > 1e-4 * (l1 + l2) && dir.lengthSq() > 1e-12) {
+      dir.normalize();
+      const perp = (v) => v.clone().addScaledVector(dir, -v.dot(dir));
+      const a = perp(off0.normalize().applyQuaternion(pelvis)), b = perp(fwd);
+      if (a.lengthSq() > 1e-10 && b.lengthSq() > 1e-10) {
+        a.normalize(); b.normalize();
+        let t = THREE.MathUtils.clamp((F0.distanceTo(H0) - goal.distanceTo(hip)) / (0.06 * (l1 + l2)), 0, 1);
+        t = t * t * (3 - 2 * t);
+        const ang = Math.atan2(new THREE.Vector3().crossVectors(a, b).dot(dir), a.dot(b));
+        hint = a.applyAxisAngle(dir, ang * t);
+      }
+    }
+    const { joint: knee, end } = this.twoBoneJoint(hip, goal, l1, l2, hint);
     const toChar = (v) => v.clone().applyQuaternion(this.Finv);
     return {
       [side + 'UpperLeg']: { dir: toChar(knee.clone().sub(hip).normalize()) },
@@ -584,20 +632,66 @@ export class HumanoidRig {
     const neckY = upOf(P('neck') || P('head')) || chestY + 0.3;
     const headY = upOf(P('head')) || neckY + 0.1;
     const shX = Math.abs(latOf(P('leftUpperArm')) - latOf(P('rightUpperArm'))) / 2 || 0.25;
-    const headTop = headY + Math.max(0.18, (headY - neckY) * 2.2);
-    const kneeY = upOf(P(side + 'LowerLeg')) || -0.5;
-    const shY = (upOf(P('leftUpperArm')) + upOf(P('rightUpperArm'))) / 2 || neckY - 0.05;
-    const ctx = { m, legY, legX, chestY, neckY, headY, headTop, shX, shY, kneeY, side };
-    const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top', depth (fallback), z?}
-    // cast a ray at the body to find its surface there
     const charPt = (x, y, z) => hips.clone().add(this.charToModel(new THREE.Vector3(x, y, z)).multiplyScalar(hh));
+    const fwdOf = (p) => (p ? p.clone().sub(hips).dot(this.fwd) / hh : 0);
+    // top of the skull, measured on the mesh (hair ignored) so big-headed
+    // characters get their face found; skeleton estimate when there's no mesh
+    if (this._skullTop === undefined) {
+      this._skullTop = null;
+      const hp = P('head');
+      if (hp) {
+        const zH = fwdOf(hp);
+        let best = null;
+        for (const dz of [0, 0.04, -0.04]) {
+          const h = this.surfaceHit(charPt(0, upOf(hp) + 3, zH + dz), this.charToModel(new THREE.Vector3(0, -1, 0)).normalize(), 'face');
+          const y = h ? upOf(h.point) : null;
+          if (y !== null && y > upOf(hp) + 0.04 && y < upOf(hp) + 1.2 && (best === null || y > best)) best = y;
+        }
+        this._skullTop = best;
+      }
+    }
+    const headTop = this._skullTop ?? headY + Math.max(0.18, (headY - neckY) * 2.2);
+    const kneeY = upOf(P(side + 'LowerLeg')) || -0.5;
+    const hipX = Math.abs(latOf(P(side + 'UpperLeg'))) || legX;
+    const kneeX = P(side + 'LowerLeg') ? Math.abs(latOf(P(side + 'LowerLeg'))) : hipX;
+    const shY = (upOf(P('leftUpperArm')) + upOf(P('rightUpperArm'))) / 2 || neckY - 0.05;
+    // eyes: from eye bones when the rig has them
+    if (this._eyes === undefined) {
+      this._eyes = null;
+      const eyes = [];
+      if (this.map.head) this.map.head.traverse((o) => { if (o.isBone && o !== this.map.head && EYE_RE.test(o.name) && !NOT_EYE_RE.test(o.name) && sideOf(words(o.name))) eyes.push(this.rest.get(o).pos); });
+      if (eyes.length >= 2) this._eyes = { y: eyes.reduce((a, p) => a + upOf(p), 0) / eyes.length, x: eyes.reduce((a, p) => a + Math.abs(latOf(p)), 0) / eyes.length };
+    }
+    const headH = headTop - headY;
+    let eyeY = this._eyes ? this._eyes.y : headY + headH * 0.45;
+    if (!(eyeY > headY + headH * 0.15 && eyeY < headTop - headH * 0.1)) eyeY = headY + headH * 0.45;
+    let eyeX = this._eyes ? this._eyes.x : headH * 0.18;
+    if (!(eyeX > headH * 0.05 && eyeX < headH * 0.45)) eyeX = headH * 0.18;
+    const ctx = { m, legY, legX, hipX, kneeX, chestY, neckY, headY, headTop, eyeY, eyeX, shX, shY, kneeY, side };
+    const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top', depth (fallback), z?}
+    const region = def.region || g.region || 'torso';
+    // depth is measured from the body part the spot sits on (heads and knees
+    // are often forward of the hips)
+    const refKey = this.map[def.ref(side)] ? def.ref(side) : 'hips';
+    const z0 = fwdOf(this.rest.get(this.map[refKey]).pos);
+    const gz = (g.z ?? 0) + z0;
+    // cast rays at the body to find its surface there
     const dirs = { front: [0, 0, -1], back: [0, 0, 1], side: [-m, 0, 0], top: [0, -1, 0] };
     const dc = new THREE.Vector3(...dirs[g.from]);
-    const startC = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -3);
-    let hit = this.surfaceHit(charPt(startC.x, startC.y, startC.z), this.charToModel(dc).normalize(), g.region || 'torso');
-    // ignore hits far from where that body part should be (ray slipped past it)
-    const expected = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -(g.depth ?? 0.12));
-    if (hit && hit.point.clone().sub(charPt(expected.x, expected.y, expected.z)).length() > 0.3 * hh) hit = null;
+    const expected = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -(g.depth ?? 0.12));
+    const expectedM = charPt(expected.x, expected.y, expected.z);
+    // two directions across the ray, to try nearby rays when one slips past
+    const u = g.from === 'side' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+    const w = new THREE.Vector3().crossVectors(dc, u).normalize();
+    let hit = null, bestD = Infinity;
+    for (const [a, b] of [[0, 0], [0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03], [0.06, 0], [-0.06, 0]]) {
+      const st = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -3).addScaledVector(u, a).addScaledVector(w, b);
+      const h = this.surfaceHit(charPt(st.x, st.y, st.z), this.charToModel(dc).normalize(), region);
+      // ignore hits far from where that body part should be (ray slipped past it)
+      const d = h ? h.point.distanceTo(expectedM) : Infinity;
+      if (d < 0.3 * hh && d < bestD) { hit = h; bestD = d; }
+      if (hit && a === 0 && b === 0) break;
+    }
     let point, normalC = null;
     if (hit) {
       point = hit.point;
@@ -605,10 +699,9 @@ export class HumanoidRig {
       if (normalC.dot(dc) > 0) normalC.negate();
     } else {
       // no mesh hit: estimate from the skeleton
-      const surf = new THREE.Vector3(g.x, g.y, g.z ?? 0).addScaledVector(dc, -(g.depth ?? 0.12));
-      point = charPt(surf.x, surf.y, surf.z);
+      point = expectedM.clone();
     }
-    point.add(this.charToModel(normalC || dc.clone().negate()).multiplyScalar(0.006 * hh)); // rest on the skin
+    point.add(this.charToModel(normalC || dc.clone().negate()).multiplyScalar(((def.standoff ? def.standoff(m) : 0) + 0.006) * hh)); // rest on the skin
     // palm: face the surface (blend of the measured normal and the usual hand pose)
     const palm = def.palm(m).normalize();
     if (normalC) palm.lerp(normalC.clone().negate(), 0.5).normalize();
@@ -626,17 +719,32 @@ export class HumanoidRig {
 
   // first body-surface hit along a ray (model space), ignoring arms/hands (and hair unless asked)
   surfaceHit(origin, dir, region) {
-    const meshes = [];
-    this.root.traverse((o) => { if ((o.isSkinnedMesh || o.isMesh) && !o.userData.helper) { let v = true; for (let p = o; p; p = p.parent) if (!p.visible) v = false; if (v) meshes.push(o); } });
-    if (!meshes.length) return null;
-    const arm = new Set();
-    for (const k of ['leftShoulder', 'rightShoulder', 'leftUpperArm', 'rightUpperArm']) {
-      const b = this.map[k];
-      if (b) b.traverse((o) => { if (o.isBone) arm.add(o); });
+    if (!this._scan) {
+      // what counts as body: skinned meshes and parts riding on bones (not props
+      // standing around in the scene)
+      const meshes = [];
+      let skinned = false;
+      this.root.traverse((o) => { if (o.isSkinnedMesh) skinned = true; });
+      this.root.traverse((o) => {
+        if (!(o.isSkinnedMesh || o.isMesh) || o.userData.helper) return;
+        let v = true, onBone = false;
+        for (let p = o; p; p = p.parent) { if (!p.visible) v = false; if (p !== o && p.isBone) onBone = true; }
+        if (v && (o.isSkinnedMesh || onBone || !skinned)) meshes.push(o);
+      });
+      const arm = new Set();
+      for (const k of ['leftUpperArm', 'rightUpperArm']) {
+        const b = this.map[k];
+        if (b) b.traverse((o) => { if (o.isBone) arm.add(o); });
+      }
+      const head = new Set(), hair = new Set();
+      if (this.map.head) this.map.head.traverse((o) => { if (o.isBone) head.add(o); });
+      for (const b of head) if (b !== this.map.head && HAIR_RE.test(b.name)) b.traverse((o) => { if (o.isBone) hair.add(o); });
+      this._scan = { meshes, arm, head, hair };
     }
-    const head = new Set();
-    if (this.map.head) this.map.head.traverse((o) => { if (o.isBone) head.add(o); });
-    const okBone = (b) => b && !arm.has(b) && (region === 'head' ? head.has(b) : !head.has(b));
+    const { meshes, arm, head, hair } = this._scan;
+    if (!meshes.length) return null;
+    // 'head': anything on the head (hair too); 'face': the head without hair; 'torso': the rest
+    const okBone = (b) => b && !arm.has(b) && (region === 'head' ? head.has(b) : region === 'face' ? head.has(b) && !hair.has(b) : !head.has(b));
     // measure in the rest pose
     const saved = this.bones.map((b) => [b, b.position.clone(), b.quaternion.clone()]);
     for (const b of this.bones) { const r = this.rest.get(b); b.quaternion.copy(r.Lq); b.position.copy(r.Lp); }
@@ -752,22 +860,35 @@ export class HumanoidRig {
 // units) and which way to look for the surface. palm/fingers/hint are the wanted
 // palm normal (pointing into the body), finger direction and elbow direction.
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
+// eye bones (not brows, lids or highlights)
+const EYE_RE = /eye|目|瞳/i;
+const NOT_EYE_RE = /brow|lash|lid|light|眉|まぶた|ハイライト|^(con|mch|ctrl)[._]/i;
+// hair-like bones (romaji, Japanese, English)
+const HAIR_RE = /hair|kami|ahoge|bang|fringe|ponytail|twintail|tail_?hair|髪|アホ毛|あほ毛|もみあげ|ポニ|ツイン|おさげ/i;
+
 export const SPOTS = {
   lap: { label: 'lap (below the belly)', ref: () => 'hips', at: (c) => ({ x: c.m * c.legX * 0.35, y: c.legY + 0.02, from: 'front', depth: 0.12 }), palm: () => V(0, -0.35, -1), fingers: (m) => V(-m * 0.5, -0.85, 0.15), hint: (m) => V(m * 0.85, -0.35, -0.45) },
   belly: { label: 'belly', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.42, from: 'front', depth: 0.15 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.9, -0.3, 0), hint: (m) => V(m * 0.9, -0.4, -0.3) },
   chest: { label: 'chest', ref: () => 'chest', at: (c) => ({ x: c.m * c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.6, 0.75, 0), hint: (m) => V(m * 0.7, -0.7, 0) },
   heart: { label: 'heart (left side of the chest)', ref: () => 'chest', at: (c) => ({ x: c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.5, 0.8, 0), hint: (m) => V(m * 0.6, -0.8, 0) },
   hip: { label: 'hip (side of the waist)', ref: () => 'hips', at: (c) => ({ x: c.m * 0.2, y: c.legY + 0.14, from: 'side', depth: 0.06 }), palm: (m) => V(-m, 0, 0), fingers: () => V(0, -0.45, 0.9), hint: (m) => V(m, 0, -0.35) },
-  thigh: { label: 'front of the thigh', ref: (s) => s + 'UpperLeg', at: (c) => ({ x: c.m * c.legX, y: c.legY - 0.2, from: 'front', depth: 0.08 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.15, -1, 0.1), hint: (m) => V(m * 0.6, -0.2, -0.75) },
-  knee: { label: 'knee', ref: (s) => s + 'LowerLeg', at: (c) => ({ x: c.m * c.legX, y: c.kneeY + 0.02, from: 'front', depth: 0.07 }), palm: () => V(0, -0.6, -0.8), fingers: () => V(0, -0.7, 0.7), hint: (m) => V(m * 0.8, 0.2, -0.3) },
+  thigh: { label: 'front of the thigh', slide: true, ref: (s) => s + 'UpperLeg', at: (c) => ({ x: c.m * (c.hipX + (c.kneeX - c.hipX) * 0.35), y: c.legY + (c.kneeY - c.legY) * 0.35, from: 'front', depth: 0.08 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.15, -1, 0.1), hint: (m) => V(m * 0.6, -0.2, -0.75) },
+  knee: { label: 'knee', lean: true, ref: (s) => s + 'LowerLeg', at: (c) => ({ x: c.m * c.kneeX, y: c.kneeY + 0.02, from: 'front', depth: 0.07 }), palm: () => V(0, -0.6, -0.8), fingers: () => V(0, -0.7, 0.7), hint: (m) => V(m * 0.8, 0.2, -0.3) },
   back: { label: 'lower back (behind the back)', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.25, from: 'back', depth: 0.11 }), palm: () => V(0, 0, 1), fingers: (m) => V(-m * 0.75, -0.6, 0), hint: (m) => V(m * 0.6, -0.4, -0.8) },
   head: { label: 'top of the head', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * 0.03, y: c.headTop - 0.06, z: 0, from: 'top', depth: 0.06 }), palm: () => V(0, -1, 0), fingers: (m) => V(-m * 0.8, 0, 0.5), hint: (m) => V(m, 0.5, 0) },
-  face: { label: 'mouth / face', ref: () => 'head', region: 'head', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.28, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
-  cheek: { label: 'cheek', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * 0.06, y: c.headY + (c.headTop - c.headY) * 0.32, z: 0.03, from: 'side', depth: 0.02 }), palm: (m) => V(-m, 0, -0.2), fingers: () => V(0, 1, 0.15), hint: (m) => V(m * 0.4, -0.9, 0.2) },
-  chin: { label: 'chin (resting the chin on the hand)', ref: () => 'head', region: 'head', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.12, from: 'front', depth: 0.08 }), palm: () => V(0, 0.6, -0.8), fingers: (m) => V(-m * 0.5, 0.5, 0.6), hint: (m) => V(m * 0.3, -0.9, 0.3) },
+  face: { label: 'mouth / face', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.28, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
+  cheek: { label: 'cheek', ref: () => 'head', region: 'face', at: (c) => ({ x: c.m * 0.06, y: c.headY + (c.headTop - c.headY) * 0.32, z: 0.03, from: 'side', depth: 0.02 }), palm: (m) => V(-m, 0, -0.2), fingers: () => V(0, 1, 0.15), hint: (m) => V(m * 0.4, -0.9, 0.2) },
+  chin: { label: 'chin (resting the chin on the hand)', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.12, from: 'front', depth: 0.08 }), palm: () => V(0, 0.6, -0.8), fingers: (m) => V(-m * 0.5, 0.5, 0.6), hint: (m) => V(m * 0.3, -0.9, 0.3) },
+  forehead: { label: 'forehead', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.eyeY + (c.headTop - c.eyeY) * 0.45, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.85, 0.5, 0), hint: (m) => V(m * 0.6, -0.6, 0.4) },
+  eyes: { label: 'eyes (covering them)', ref: () => 'head', region: 'face', at: (c) => ({ x: c.m * c.eyeX, y: c.eyeY, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.35, 0.95, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
+  ear: { label: 'ear (side of the head)', ref: () => 'head', region: 'face', at: (c) => ({ x: c.m * c.eyeX, y: c.eyeY - (c.eyeY - c.headY) * 0.25, z: -0.02, from: 'side', depth: 0.05 }), palm: (m) => V(-m, 0, 0), fingers: () => V(0, 1, 0.1), hint: (m) => V(m * 0.7, -0.6, 0.1) },
+  backOfHead: { label: 'back of the head (hands behind the head)', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * c.eyeX * 0.6, y: c.eyeY, from: 'back', depth: 0.1 }), palm: () => V(0, 0, 1), fingers: (m) => V(-m * 0.85, 0.5, 0), hint: (m) => V(m, 0.35, 0.15) },
+  neck: { label: 'neck (front)', ref: () => 'neck', at: (c) => ({ x: c.m * 0.01, y: c.neckY + (c.headY - c.neckY) * 0.5, from: 'front', depth: 0.05 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.45, 0), hint: (m) => V(m * 0.6, -0.8, 0.2) },
+  crossed: { label: 'arms crossed (hand tucked at the other arm)', ref: () => 'chest', at: (c) => ({ x: -c.m * c.shX * 0.75, y: c.chestY - (c.chestY - c.legY) * 0.12 + c.m * 0.02, from: 'front', depth: 0.15 }), standoff: (m) => (m < 0 ? 0.06 : 0), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.9, 0.1, -0.3), hint: (m) => V(m * 0.7, -0.6, 0.35) },
   shoulder: { label: 'the other shoulder', ref: () => 'chest', at: (c) => ({ x: -c.m * c.shX * 0.6, y: c.shY, from: 'top', depth: 0.04 }), palm: () => V(0, -1, 0.1), fingers: (m) => V(-m * 0.3, -0.2, -0.9), hint: (m) => V(m * 0.3, -0.6, 0.7) },
 };
 export const SPOT_ALIAS = {
+  brow: 'forehead', eye: 'eyes', ears: 'ear', backofhead: 'backOfHead', nape: 'backOfHead', throat: 'neck', crossedarms: 'crossed', arms: 'crossed',
   lowerbelly: 'lap', underbelly: 'lap', abdomen: 'belly', stomach: 'belly', tummy: 'belly', waist: 'hip', hips: 'hip', side: 'hip',
   breast: 'chest', heart: 'heart', mouth: 'face', lips: 'face', jaw: 'chin', leg: 'thigh', thighs: 'thigh', knees: 'knee', lowerback: 'back', behind: 'back',
 };

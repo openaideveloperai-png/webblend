@@ -11,7 +11,7 @@ import { BlendFile, StructView } from './blendfile.js';
 
 const OB_EMPTY = 0, OB_MESH = 1, OB_LAMP = 10, OB_CAMERA = 11, OB_ARMATURE = 25;
 const PARBONE = 7;
-const MOD_MIRROR = 5, MOD_ARMATURE = 8, MOD_SUBSURF = 1;
+const MOD_MIRROR = 5, MOD_ARMATURE = 8, MOD_SUBSURF = 1, MOD_FLUID = 56;
 
 // CustomData types (3.x-4.x)
 const CD_MDEFORMVERT = 2, CD_PROP_INT32 = 11, CD_MLOOPUV = 16, CD_PROP_FLOAT3 = 48, CD_PROP_FLOAT2 = 49, CD_PROP_BOOL = 50;
@@ -938,7 +938,10 @@ export async function importBlend(arrayBuffer, opts = {}) {
     node.quaternion.copy(dq).multiply(q);
     node.scale.set(size[0] * dscale[0], size[1] * dscale[1], size[2] * dscale[2]);
     node.userData.blend = { type, rotmode };
-    const hidden = vis ? (!vis.inScene.has(ob.offset) || vis.isHidden(ob)) : !!((ob.get('restrictflag') || 0) & 1);
+    let hidden = vis ? (!vis.inScene.has(ob.offset) || vis.isHidden(ob)) : !!((ob.get('restrictflag') || 0) & 1);
+    // shown only as a wireframe / box in Blender (simulation domains, guides),
+    // or a fluid simulation object: not something to draw solid
+    if (!hidden && type === OB_MESH && ((ob.get('dt') ?? 5) <= 2 || [...bf.listBase(ob.get('modifiers'), 'ModifierData')].some((m) => m.get('type') === MOD_FLUID))) hidden = true;
     nodes.set(ob.offset, { ob, node, attach: node, type, hidden });
   }
 
@@ -1701,7 +1704,10 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
       const pick = best(imagesFeeding(g, colorSock, stack), -5);
       if (pick) {
         const tex = await textureFor(pick, THREE.SRGBColorSpace);
-        if (tex) { mat.map = tex; mat.color.setRGB(1, 1, 1); colorDone = true; mat.userData.mapNode = pick.info; }
+        if (tex) { mat.map = tex; mat.color.setRGB(1, 1, 1); mat.userData.mapNode = pick.info; }
+        // found the color image; if its file is missing, don't grab some other
+        // image of the material (a lightmap or mask) in its place
+        colorDone = true;
       }
     }
   }

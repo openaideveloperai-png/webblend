@@ -163,8 +163,17 @@ function hasBones(root) {
   return found;
 }
 
+// mesh parts named like body parts (or physics helpers from a rig)
+const BODY_PART = /(^|[^a-z])(head|hair|face|body|arm|leg|tail|ear|eye|torso|hand|foot)([^a-z]|$)|頭|髪|顔|腕|足|体|尻尾/i;
+function looksLikeCharacter(root, helperCount) {
+  if (helperCount >= 3) return true;
+  let parts = 0;
+  root.traverse((o) => { if (o.isMesh && (BODY_PART.test(o.name || '') || BODY_PART.test(o.parent ? o.parent.name || '' : ''))) parts++; });
+  return parts >= 3;
+}
+
 // Put static models on the ground, centered.
-const HELPER_MESH = /^(rigid_?bod(y|ies)|rigid[_ .]|rb[_ .]|collider|collision|ucx_|ubx_|usp_|ucp_|mmd_tools_rigid)/i;
+const HELPER_MESH = /^(rigid_?bod(y|ies)|rigid[_ .]|rb[_ .]|collider|collision|ucx_|ubx_|usp_|ucp_|mmd_tools_rigid)|^(rb|cl)(?=[\u3040-\u30ff\u3400-\u9fff])|^[^.]{0,8}trg[._]|^rigidbody_bone/i;
 function hideHelperMeshes(root) {
   let n = 0;
   root.traverse((o) => {
@@ -612,6 +621,10 @@ export class Importer {
     const animationOnly = !!root && !hasMesh(root) && animations.length > 0;
     const notes = unitNote ? [unitNote] : [];
     if (helperCount) notes.push(`${helperCount} physics/collision helper object${helperCount > 1 ? 's are' : ' is'} hidden (show ${helperCount > 1 ? 'them' : 'it'} from the Scene list)`);
+    // a character saved without its skeleton can only move as one piece
+    if (root && kind !== 'animation' && !hasBones(root) && looksLikeCharacter(root, helperCount)) {
+      notes.push('This file has no skeleton (it was saved without its bones), so the character can only be moved as a whole, not posed or animated by the AI. Open the original .blend / .pmx / .vrm instead; saving from WebBlend keeps the bones.');
+    }
     if (kind === 'animation') return { root: null, animations, warnings, notes, format: ext, name, kind, animationOnly: true };
     return { root, animations, warnings, notes, format: ext, name, kind, animationOnly, hasBones: root ? hasBones(root) : false, info };
   }

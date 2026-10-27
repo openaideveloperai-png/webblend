@@ -36,20 +36,22 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 
 FBX, BVH and DAE files in centimeters are converted to meters automatically.
 
+A character file saved without its skeleton (some exporters write only the posed meshes) can be moved but not posed; WebBlend says so when you open it. Open the original `.blend` / `.pmx` / `.vrm` instead, or save from WebBlend, which keeps the bones. Physics helper meshes in such files (`RB…`, `CL…`, rigid bodies) are hidden.
+
 ### About `.blend` files
 
 `.blend` files are read directly, with no Blender install needed. Tested with Blender 4.2 and 5.2 files, compressed or not; files from Blender 2.8+ should work.
 
 Supported:
 - Meshes with n-gons, UVs, smooth/flat shading and multiple materials
-- Principled BSDF colors and image textures, also inside node groups (MMD and other toon shaders). Textures can be packed into the file, or sit next to it / in the same zip (png, jpg, bmp, tga, dds including BC7, webp)
+- Principled BSDF colors and image textures, also inside node groups (MMD and other toon shaders), emission/lightmap textures (premultiplied by their alpha like Blender does), alpha-masked decals, and normal maps behind Bump nodes. Textures can be packed into the file, or sit next to it / in the same zip (png, jpg, bmp, tga, dds including BC7, webp). Missing texture files are listed by name when you open the file
 - Object hierarchy, bone parenting, empties, cameras and (optionally) lights
-- Objects hidden in Blender (hidden objects or collections, rigid bodies, cages) stay hidden; the Scene list tucks them away
+- Objects hidden in Blender (hidden objects or collections, rigid bodies, cages) stay hidden, and so do objects Blender only draws as a wireframe or box, like smoke/fluid simulation domains; the Scene list tucks them away
 - Armatures with skin weights, shape keys, and actions, including Blender 4.4+ layered actions
-- Bone constraints, live: Copy Rotation/Location/Scale/Transforms, IK (chain length, pole, knee limits), Damped Track, Track To, Stretch To, Limit Rotation. MMD rigs (control bones driving "D" bones, leg IK) pose and play like in Blender
+- Bone constraints, live: Copy Rotation/Location/Scale/Transforms, IK (chain length, pole, knee limits), Damped Track, Track To, Stretch To, Child Of, Limit Rotation/Location/Scale (local, pose or world space). MMD rigs (control bones driving "D" bones, leg IK) pose and play like in Blender. IK chains that nobody has posed rest exactly as Blender shows them; rotate a chain bone yourself (or play a motion that does) and that chain switches to plain FK so your pose wins
 - Mirror and Subdivision Surface modifiers (subdivision matches Blender's result)
 
-Not supported (export to glTF from Blender for these): other modifiers, geometry nodes, curves/text objects, linked library data, procedural shader textures, and some constraint types (Child Of, Armature, Transformation…; when a rig uses these, you pose the bones that move the mesh directly).
+Not supported (export to glTF from Blender for these): other modifiers, geometry nodes, curves/text objects, linked library data, procedural shader textures, simulations (cloth, fluid, rigid body physics), and some constraint types (Armature, Transformation, Action, Spline IK…; when a rig uses these, you pose the bones that move the mesh directly). Shrinkwrap, Floor and similar small helper constraints are skipped quietly.
 
 ### MikuMikuDance (MMD)
 
@@ -75,7 +77,7 @@ Only the bones that move the mesh (plus the control bones and IK handles that dr
 Open the **AI** tab (or the AI button at the top) and describe what you want:
 
 - `walk`, `run fast`, `jump then wave`, `walk and wave with the left hand`, `dance like crazy`, `sneak`, `sit down`, `nod twice`, `cheer`
-- Hands on the body: `put her hand on her lap while standing`, `hands on hips`, `left hand on her chest and right hand on her head`, `hands behind her back`, `hand on chin`, `hands on knees`. The app measures the character's own body, so the palm lands on that spot (lap, belly, chest, heart, hip, thigh, knee, lower back, head, face, cheek, chin, other shoulder) and the hand turns to lie flat. Standing poses keep the feet planted and the legs still; for spots out of reach (knees) the body leans to get there.
+- Hands on the body: `put her hand on her lap while standing`, `hands on hips`, `left hand on her chest and right hand on her head`, `hands behind her back`, `hand on chin`, `hands on knees`, `cross her arms`, `hands behind her head`, `cover her eyes`, `cover ears`, `facepalm`, `hand on her neck`, `touch her ear`. The app scans the character's own mesh (its proportions, where the face, chest, thighs and knees really are, hair ignored), so the palm lands on that spot (lap, belly, chest, heart, hip, thigh, knee, lower back, head, back of the head, forehead, eyes, ear, face, cheek, chin, neck, other shoulder, arms crossed) and the hand turns to lie flat. Standing poses keep the feet planted and the legs still. If the arms are too short for a spot on the thigh, the hand rests as low as it reaches instead of bending over; only knees make the character bend down (mostly at the hips).
 - `make everything bounce`, `spin slowly on the x axis`, `float`, `grow then pulse`, `rainbow colors`
 - On creatures and rigs with tails or tentacles: `wiggle`, `slow sway`
 
@@ -85,6 +87,8 @@ Short requests like these are handled instantly by the built-in motion engine, w
 - In the **downloaded file**, add an Anthropic API key under Settings → AI. The key stays in your browser and is only sent to `api.anthropic.com`. It's forgotten when you close the tab unless you tick "Remember on this device". The default model is Claude Opus 5.5; Sonnet 5.5 and Haiku 5.5 are faster options.
 
 The built-in motions work on any humanoid rig, so the same "walk" fits a Mixamo character, a VRoid model, or the demo mannequin.
+
+Claude gets a map of each character: how tall each body part is, which bone is which part (Japanese bone names translated to English), what moving each bone carries along (rotating a thigh moves the whole leg, so it bends knees with the knee setting instead), and the extra bones it can key, grouped as hair, ears, eyes, face, tail, fingers, clothes and so on. The Scene list also shows an English translation next to Japanese names, and its filter searches both.
 
 ## Performance and low-memory PCs (4 GB)
 
@@ -138,6 +142,7 @@ node tools/e2e-formats.cjs test-assets/zoo ./out                     # every imp
 node tools/e2e-ai.cjs                                                # Claude integrations with mocked responses
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
+node tools/test-pose-truth.mjs rig.blend truth.json                # any rig vs Blender (truth from tools/blender/pose_truth.py)
 node tools/e2e-mmd.cjs test-assets/mmd ./out                         # MMD-style .blend zip and Blender-exported .glb
 node tools/e2e-mmdfiles.cjs <pmx folder> <pmd folder> <dance.vmd> ./out  # real MMD files (bring your own)
 ```

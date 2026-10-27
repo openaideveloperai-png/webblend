@@ -4,6 +4,8 @@
 //    pose system. Uses the viewer's claude.ai account when hosted as an artifact
 //    (window.claude "sample" capability), or the user's API key in a local copy.
 import * as THREE from 'three';
+import { translateName, nameWithTranslation } from '../core/jp.js';
+import { describeBody } from './bodymap.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
 import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS } from './humanoid.js';
@@ -76,10 +78,14 @@ export function parseModifiers(text) {
 const SPOT_WORDS = [
   ['lower belly', 'lap'], ['lower stomach', 'lap'], ['lower tummy', 'lap'], ['under belly', 'lap'], ['underbelly', 'lap'], ['lap', 'lap'],
   ['belly', 'belly'], ['stomach', 'belly'], ['tummy', 'belly'], ['abdomen', 'belly'], ['waist', 'hip'], ['hips', 'hip'], ['hip', 'hip'],
-  ['heart', 'heart'], ['chest', 'chest'], ['breasts', 'chest'], ['breast', 'chest'], ['lower back', 'back'], ['back', 'back'],
-  ['top of head', 'head'], ['top of her head', 'head'], ['top of his head', 'head'], ['head', 'head'], ['mouth', 'face'], ['lips', 'face'], ['face', 'face'],
+  ['heart', 'heart'], ['chest', 'chest'], ['breasts', 'chest'], ['breast', 'chest'],
+  ['back of head', 'backOfHead'], ['back of her head', 'backOfHead'], ['back of his head', 'backOfHead'], ['back of the head', 'backOfHead'],
+  ['top of head', 'head'], ['top of her head', 'head'], ['top of his head', 'head'], ['forehead', 'forehead'], ['brow', 'forehead'],
+  ['head', 'head'], ['mouth', 'face'], ['lips', 'face'], ['face', 'face'], ['eyes', 'eyes'], ['eye', 'eyes'], ['ears', 'ear'], ['ear', 'ear'],
+  ['neck', 'neck'], ['throat', 'neck'],
   ['cheek', 'cheek'], ['cheeks', 'cheek'], ['chin', 'chin'], ['jaw', 'chin'], ['shoulder', 'shoulder'], ['shoulders', 'shoulder'],
   ['thighs', 'thigh'], ['thigh', 'thigh'], ['legs', 'thigh'], ['leg', 'thigh'], ['knees', 'knee'], ['knee', 'knee'],
+  ['lower back', 'back'], ['back', 'back'],
 ];
 const SPOT_RE = SPOT_WORDS.map(([w]) => w.replace(/ /g, '\\s+')).join('|');
 const TOUCH_RE = new RegExp(`\\b(?:(left|right|both|one|two|her|his|their|the|a)\\s+)?(hands?|palms?|arms?)\\b(.{0,40}?)\\b(on|onto|over|against|at|to|under|below|beneath|behind|across|touching|touch)\\s+(?:(?:her|his|their|the|its|my|your|own|each|other)\\s+)*(${SPOT_RE})\\b`, 'gi');
@@ -96,12 +102,41 @@ export function parseTouches(text) {
     let spot = (SPOT_WORDS.find(([w]) => w === word) || [])[1];
     if (!spot) continue;
     if ((m[4] === 'under' || m[4] === 'below' || m[4] === 'beneath') && spot === 'belly') spot = 'lap';
-    if (m[4] === 'behind' && spot !== 'head') spot = 'back';
+    if (m[4] === 'behind') spot = spot === 'head' || spot === 'neck' || spot === 'backOfHead' ? 'backOfHead' : 'back';
     const sideWord = m[1] || (/\b(left|right)\b/.exec(m[3]) || [])[1];
     const plural = /s$/.test(m[2]) || sideWord === 'both' || sideWord === 'two';
     const sides = sideWord === 'left' ? ['left'] : sideWord === 'right' ? ['right'] : plural ? ['left', 'right'] : ['right'];
-    for (const side of sides) touches.push({ side, spot });
+    for (const side of sides) touches.push({ side, spot, at: m.index });
   }
+  // poses said without "hand on ...": arms crossed, covering the eyes...
+  const idiom = (re, spot, sides) => {
+    re.lastIndex = 0;
+    let mm;
+    while ((mm = re.exec(t))) {
+      if (NEGATION.test(t.slice(Math.max(0, mm.index - 30), mm.index))) continue;
+      const sideWord = (/\b(left|right)\b/.exec(mm[0]) || [])[1];
+      for (const side of sideWord ? [sideWord] : sides) touches.push({ side, spot, at: mm.index });
+    }
+  };
+  idiom(/\b(cross(es|ed|ing)?|fold(s|ed|ing)?)\s+(?:(?:her|his|their|the|its|both)\s+)*arms\b|\barms\s+(crossed|folded)\b/g, 'crossed', ['left', 'right']);
+  idiom(/\b(cover(s|ed|ing)?|hid(e|es|ing))\s+(?:(?:her|his|their|the|its|both|left|right)\s+)*eyes?\b|\bpeek-?a-?boo\b/g, 'eyes', ['left', 'right']);
+  idiom(/\b(cover(s|ed|ing)?|plug(s|ged|ging)?)\s+(?:(?:her|his|their|the|its|both)\s+)*ears\b/g, 'ear', ['left', 'right']);
+  idiom(/\b(cover(s|ed|ing)?)\s+(?:(?:her|his|their|the|its)\s+)*mouth\b|\b(gasp(s|ed|ing)?|yawn(s|ed|ing)?)\b/g, 'face', ['right']);
+  idiom(/\bface-?palm(s|ed|ing)?\b/g, 'forehead', ['right']);
+  // "touch her ear", "scratch his head", "rub her belly": one hand
+  {
+    const re = new RegExp(`\\b(?:touch(?:es|ed|ing)?|scratch(?:es|ed|ing)?|rub(?:s|bed|bing)?|pat(?:s|ted|ting)?|hold(?:s|ing)?|clutch(?:es|ed|ing)?|grab(?:s|bed|bing)?)\\s+(?:(?:her|his|their|the|its|my|your|own|left|right)\\s+)*(${SPOT_RE})\\b`, 'g');
+    let mm;
+    while ((mm = re.exec(t))) {
+      if (NEGATION.test(t.slice(Math.max(0, mm.index - 30), mm.index))) continue;
+      const spot = (SPOT_WORDS.find(([w]) => w === mm[1].replace(/\s+/g, ' ')) || [])[1];
+      if (!spot || touches.some((x) => x.spot === spot && x.at !== undefined && Math.abs(x.at - mm.index) < 40)) continue;
+      const sideWord = (/\b(left|right)\b/.exec(mm[0]) || /^\s+(?:with|using)\s+(?:(?:her|his|their|the|its|my|your)\s+)?(left|right)\b/.exec(t.slice(mm.index + mm[0].length)) || [])[1];
+      touches.push({ side: sideWord || 'right', spot, at: mm.index });
+    }
+  }
+  idiom(/\b(thinking|thinker)\s+pose\b|\bchin\s+(on|in)\s+(?:(?:her|his|their|the|a)\s+)*hand\b/g, 'chin', ['right']);
+  touches.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   // later mentions win for the same hand
   const bySide = {};
   for (const x of touches) bySide[x.side] = x.spot;
@@ -136,7 +171,8 @@ export function isSimplePrompt(text) {
   const p = parsePrompt(text);
   if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length || s.touch.touch)) return false;
   const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
-  const motionWords = new Set(['hand', 'hands', 'palm', 'palms', 'arm', 'arms', 'put', 'place', 'rest', 'resting', 'touch', 'touching', 'over', 'onto', 'under', 'below', 'behind', 'against', 'other', 'own', 'top', 'lower', 'pose', 'posing', 'still']);
+  const motionWords = new Set(['hand', 'hands', 'palm', 'palms', 'arm', 'arms', 'put', 'place', 'rest', 'resting', 'touch', 'touching', 'over', 'onto', 'under', 'below', 'behind', 'against', 'other', 'own', 'top', 'lower', 'pose', 'posing', 'still',
+    'cross', 'crosses', 'crossed', 'crossing', 'fold', 'folds', 'folded', 'folding', 'cover', 'covers', 'covered', 'covering', 'hide', 'hides', 'hiding', 'plug', 'plugs', 'facepalm', 'facepalms', 'gasp', 'gasps', 'yawn', 'yawns', 'thinking', 'thinker', 'peekaboo']);
   for (const [w] of SPOT_WORDS) for (const part of w.split(/\s+/)) motionWords.add(part);
   for (const t of [HUMANOID, OBJECT, CHAIN]) for (const m of Object.values(t)) for (const w of m.words) for (const part of w.split(/\s+/)) motionWords.add(part);
   const unknown = words.filter((w) => !FILLER.has(w) && !motionWords.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
@@ -249,7 +285,9 @@ export class AIAssistant {
           const key = base ? base.key : 'still';
           const touch = { ...step.touch.touch };
           if (key === 'sit') for (const sd of ['left', 'right']) if (touch[sd] === 'lap') touch[sd] = 'thigh';
-          const where = Object.entries(touch).map(([sd, sp]) => `${sd} hand on ${SPOTS[sp] ? SPOTS[sp].label.replace(/ \(.*\)/, '') : sp}`).join(', ');
+          const BOTH = { crossed: 'arms crossed', eyes: 'covering the eyes', ear: 'covering the ears', backOfHead: 'hands behind the head', hip: 'hands on hips', lap: 'hands on lap' };
+          const where = touch.left && touch.left === touch.right && BOTH[touch.left] ? BOTH[touch.left]
+            : Object.entries(touch).map(([sd, sp]) => (sp === 'crossed' ? `${sd} arm crossed` : `${sd} hand on ${SPOTS[sp] ? SPOTS[sp].label.replace(/ \(.*\)/, '') : sp}`)).join(', ');
           const still = HUMANOID[key].still || key === 'still';
           segs.push(bakeHumanoid(rig, key, { ...opts, touch, lockLegs: step.touch.lockLegs || still, duration: opts.duration || (HUMANOID[key].loop ? Math.max(3, HUMANOID[key].cycle) : undefined), name: (base ? HUMANOID[key].label + ' + ' : '') + where.charAt(0).toUpperCase() + where.slice(1) }));
           continue;
@@ -318,10 +356,14 @@ export class AIAssistant {
       const h = m.humanoid;
       const type = h ? 'humanoid character (use humanoidKeys / humanoid presets)' : m.bones.length ? `rigged model with ${m.bones.length} bones (use boneKeys)` : m.root.isLight ? 'light' : m.root.isCamera ? 'camera' : 'object (use objectKeys / object presets)';
       let s = `- "${m.name}": ${type}; size ${m.size.toFixed(2)} units`;
-      if (!h && m.bones.length) s += `; bones: ${m.bones.slice(0, 50).map((b) => b.name).join(', ')}${m.bones.length > 50 ? ', …' : ''}`;
+      if (!h && m.bones.length) {
+        const list = (m.poseBones && m.poseBones.length ? m.poseBones : m.bones);
+        s += `; bones${list.some((b) => translateName(b.name)) ? ' (Japanese names translated)' : ''}: ${list.slice(0, 60).map((b) => nameWithTranslation(b.name)).join(', ')}${list.length > 60 ? ', …' : ''}`;
+      }
       if (m.clips.length) s += `; existing clips: ${m.clips.map((c) => c.clip.name).join(', ')}`;
       if (app.selection.model === m) s += ' [SELECTED]';
       lines.push(s);
+      if (h) { try { const b = describeBody(m); if (b) lines.push(b); } catch (e) { console.warn('body map', e); } }
     }
     return lines.join('\n') || '(empty scene)';
   }
@@ -609,8 +651,17 @@ USER REQUEST: ${prompt}`;
 }
 
 function findBone(model, name) {
-  const n = String(name).toLowerCase();
-  return model.bones.find((b) => b.name.toLowerCase() === n) || model.bones.find((b) => b.name.toLowerCase().endsWith(n) || b.name.toLowerCase().replace(/^.*[:|]/, '') === n) || null;
+  const raw = String(name || '').trim();
+  // the AI may copy "足.L (leg (thigh).L)" or just the translation
+  const bare = raw.replace(/\s*\(.*\)\s*$/, '');
+  for (const c of [raw, bare]) {
+    const n = c.toLowerCase();
+    const b = model.bones.find((x) => x.name === c) || model.bones.find((x) => x.name.toLowerCase() === n);
+    if (b) return b;
+  }
+  const n = bare.toLowerCase(), nr = raw.toLowerCase();
+  return model.bones.find((b) => { const t = translateName(b.name); return t && (t.toLowerCase() === nr || t.toLowerCase() === n); })
+    || model.bones.find((b) => b.name.toLowerCase().endsWith(n) || b.name.toLowerCase().replace(/^.*[:|]/, '') === n) || null;
 }
 
 export function parseJSONLoose(text) {
