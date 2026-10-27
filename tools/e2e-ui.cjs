@@ -178,6 +178,30 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   await page.keyboard.press('w');
   ok('W switches back to the move tool after fly mode', await page.evaluate(() => window.webblend.gizmoMode === 'translate'));
 
+  // auto-key: a new key keeps the pose on screen (no jump back to the T-pose)
+  const ak = await page.evaluate(async () => {
+    const a = window.webblend; a.clearScene(); a.addMannequin();
+    const m = a.models[0];
+    for (const e of [...m.clips]) m.removeClip(e);
+    a.setSetting('autoKey', true);
+    const wait = () => new Promise((res) => setTimeout(res, 120));
+    const H = m.humanoid.map;
+    const rot = async (bone, frame, ang) => {
+      a.setTime(frame / 30); await wait();
+      a.select(bone, m); a.setGizmoMode('rotate');
+      a.emit('gizmo:start'); bone.rotateZ(ang); a.emit('gizmo:change');
+      const want = bone.quaternion.clone();
+      a.emit('gizmo:end'); await wait();
+      return +bone.quaternion.angleTo(want).toFixed(3);
+    };
+    const r = [await rot(H.rightUpperArm, 0, 0.8), await rot(H.rightLowerArm, 20, 0.6), await rot(H.rightUpperArm, 40, -0.5), await rot(H.rightLowerArm, 50, -0.4)];
+    a.setTime(0); await wait();
+    const at0 = +H.rightUpperArm.quaternion.angleTo(m.rest.get(H.rightUpperArm).q).toFixed(2);
+    a.setSetting('autoKey', false);
+    return { r, at0 };
+  });
+  ok('auto-key: re-keying a bone keeps the new pose (no snap back to the T-pose)', ak.r.every((x) => x < 0.01) && Math.abs(ak.at0 - 0.8) < 0.02, JSON.stringify(ak));
+
   ok('no console errors', errors.length === 0, errors.slice(0, 5).join(' | '));
   await page.screenshot({ path: path.join(OUT, 'ui.png') });
   await browser.close();

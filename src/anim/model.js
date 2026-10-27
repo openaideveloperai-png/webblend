@@ -238,7 +238,13 @@ export class Model {
 
   rebuildAction(entry) {
     const time = entry.action ? entry.action.time : 0;
+    // stopping an action makes three.js put its bones back where they were when
+    // first animated (often the T-pose); keep the pose on screen instead, and
+    // have the new keys evaluated on the next frame
+    let keep = null;
     if (entry.action) {
+      keep = [];
+      this.root.traverse((o) => keep.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone(), o.morphTargetInfluences ? o.morphTargetInfluences.slice() : null]));
       entry.action.stop();
       this.mixer.uncacheAction(entry.clip, this.root);
     }
@@ -252,6 +258,13 @@ export class Model {
     a.time = time;
     entry.action = a;
     if (entry.playing) a.play();
+    if (keep) {
+      for (const [o, p, q, sc, mi] of keep) {
+        o.position.copy(p); o.quaternion.copy(q); o.scale.copy(sc);
+        if (mi && o.morphTargetInfluences) for (let i = 0; i < mi.length; i++) o.morphTargetInfluences[i] = mi[i];
+      }
+    }
+    if (this.app) { this.app.needsEval = true; this.app.viewport?.requestRender(); }
   }
 
   rebuildClip(clip) {
