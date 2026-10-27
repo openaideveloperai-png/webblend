@@ -123,6 +123,31 @@ export class Model {
     return true;
   }
 
+  // nodes added after loading (props, effects): give them a rest pose and count them
+  adopt(node) {
+    node.traverse((o) => {
+      this.rest.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone(), m: o.morphTargetInfluences ? o.morphTargetInfluences.slice() : null, v: o.visible });
+      if ((o.isMesh || o.isPoints || o.isLine) && !this.meshes.includes(o)) this.meshes.push(o);
+    });
+    this.recount();
+  }
+
+  forget(node) {
+    node.traverse((o) => {
+      this.rest.delete(o);
+      const i = this.meshes.indexOf(o);
+      if (i >= 0) this.meshes.splice(i, 1);
+    });
+    this.recount();
+  }
+
+  recount() {
+    this.nodeCount = 0;
+    this.root.traverse(() => { this.nodeCount++; });
+    this._uuids = null;
+    this.app?.emit?.('scenegraph', this);
+  }
+
   captureRest() {
     this.rest = new Map();
     this.root.traverse((o) => {

@@ -6,6 +6,8 @@
 import * as THREE from 'three';
 import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
+import { buildProp, presetSpec, findPresetIn, findStyleIn, PROP_PRESETS } from '../scene/props.js';
+import { attachProp, detachProp, bakeHoldClip, heldProps, recoilOf } from './props-anim.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
 import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS } from './humanoid.js';
@@ -144,6 +146,29 @@ export function parseTouches(text) {
   return { touch: Object.keys(bySide).length ? bySide : null, lockLegs };
 }
 
+// "make a gun and shoot 3 times", "give her a rifle", "aim", "drop the gun"
+const NUMW = { once: 1, one: 1, a: 1, twice: 2, two: 2, three: 3, thrice: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, twelve: 12, twenty: 20 };
+export function parsePropRequest(text) {
+  const t = ' ' + String(text || '').toLowerCase().replace(/[’']/g, "'") + ' ';
+  const preset = findPresetIn(t);
+  const make = !!preset && /\b(make|makes|create|build|give|gives|add|spawn|generate|model|craft|equip|hand her|hand him|arm|get|with|holding|hold|carry|carrying|wield|wielding|draw|pull out|take out)\b/.test(t);
+  const negShoot = /\b(don'?t|do not|not|never|no)\s+(shoot|fire)/.test(t);
+  const shootWord = !negShoot && /\b(shoot|shoots|shooting|shot|shots|fire|fires|firing|blast|blasting|pew|unload|unloads|spray|spraying|burst|open fire)\b/.test(t);
+  let count = null;
+  const m = t.match(/\b(\d+|once|twice|thrice|one|two|three|four|five|six|seven|eight|nine|ten|twelve|twenty)\s*(times|time|shots|shot|rounds|round|bullets|bullet|x)?\b/);
+  if (m && (m[2] || /^(once|twice|thrice)$/.test(m[1]))) count = Number(m[1]) || NUMW[m[1]] || null;
+  const auto = /\b(full auto|full-auto|automatic|spray|spraying|unload|unloads|mag dump|empty the mag|machine gun)\b/.test(t);
+  const burst = /\bburst\b/.test(t);
+  const aim = /\b(aim|aims|aiming|point (the|her|his|their)? ?(gun|weapon|rifle|pistol))\b/.test(t);
+  const hold = /\b(hold|holds|holding|carry|carries|carrying|wield|wielding|draw|equip)\b/.test(t);
+  const drop = /\b(drop|drops|remove|delete|put away|holster|get rid of|throw away|lose)\b.{0,20}\b(gun|weapon|pistol|rifle|sword|knife|prop|it|shotgun|katana|bat|smg|sniper)\b/.test(t);
+  const swing = /\b(slash|slashes|slashing|swing|swings|swinging|attack|attacks|attacking|strike|strikes|chop|chops|cut|cuts|stab|stabs|hit|hits|combo)\b/.test(t);
+  const side = /\b(left hand|left-handed|in (her|his|their|the) left)\b/.test(t) ? 'left' : 'right';
+  const style = findStyleIn(t);
+  const any = make || shootWord || aim || drop || (swing && !!preset);
+  return any ? { preset, make, shoot: shootWord, swing, count, auto, burst, aim, hold, drop, side, style } : null;
+}
+
 export function parsePrompt(text) {
   const clean = String(text || '').toLowerCase().replace(/[“”"]/g, '').trim();
   const stepTexts = clean.split(/\s*(?:,?\s*\bthen\b|,?\s*\bafter that\b|,?\s*\bfollowed by\b|;|->|→|\band then\b)\s*/).filter(Boolean);
@@ -268,6 +293,8 @@ export class AIAssistant {
 
   // Offline: returns {results:[{model, clip}], message, understood}
   runOffline(prompt) {
+    const pr = parsePropRequest(prompt);
+    if (pr) { const r = this.runProps(pr, prompt); if (r) return r; }
     const parsed = parsePrompt(prompt);
     const targets = this.resolveTargets(parsed.target);
     if (!targets.length) return { results: [], message: 'Select a model first (click it in the viewport or the Scene list), or add one from the Add menu.', understood: false };
@@ -334,6 +361,49 @@ export class AIAssistant {
     }
     const msg = results.map((r) => `Made "${r.clip.name}" (${r.clip.duration.toFixed(1)}s) on ${r.model.name}.`).join(' ') + (notes.length ? ' ' + notes.join(' ') : '');
     return { results, message: understood ? msg : `I didn't fully understand that, so ${msg.charAt(0).toLowerCase() + msg.slice(1)} Try words like: walk, run, jump, wave, dance, bounce, spin, float.`, understood };
+  }
+
+  // props offline: make / hold / aim / shoot / drop
+  runProps(pr, prompt) {
+    const app = this.app;
+    const targets = this.resolveTargets('selected').filter((t) => t.object === t.model.root || t.object.isSkinnedMesh || t.object.isBone);
+    const holder = targets.map((t) => t.model).find((m) => m.humanoid && m.adopt) || (app.models || []).find((m) => m.humanoid && m.adopt && (!app.selection.model || app.selection.model === m));
+    const results = [], props = [], notes = [];
+    if (!holder) {
+      if (!pr.make || !app.addModel) return null;
+      // nobody to hold it: put it in the scene on its own
+      const prop = buildProp(presetSpec(pr.preset, { style: pr.style }));
+      const m = app.addModel(prop, { name: prop.name, kind: 'prop' });
+      return { results, props: [{ model: m, prop, standalone: true }], message: `Made a ${prop.name.toLowerCase()} (${PROP_PRESETS[pr.preset] ? 'built-in model' : 'model'}). Add or select a character and say "shoot" to use it.`, understood: true };
+    }
+    if (pr.drop && !pr.make) {
+      const held = heldProps(holder);
+      for (const p of held) app.removeProp ? app.removeProp(holder, p) : detachProp(holder, p);
+      return { results, props: [], message: held.length ? `Took the ${held.map((p) => p.name.toLowerCase()).join(' and ')} away from ${holder.name}.` : `${holder.name} isn't holding anything.`, understood: true };
+    }
+    let prop = heldProps(holder).find((p) => p.userData.hold.side === pr.side) || heldProps(holder)[0];
+    const wantKey = pr.preset || (pr.shoot && !prop ? 'pistol' : null);
+    if (wantKey && (pr.make || !prop || (prop.userData.prop.preset !== wantKey && pr.preset))) {
+      for (const p of heldProps(holder).filter((x) => x.userData.hold.side === pr.side)) app.removeProp ? app.removeProp(holder, p) : detachProp(holder, p);
+      prop = buildProp(presetSpec(wantKey, { style: pr.style }));
+      if (app.giveProp) app.giveProp(holder, prop, pr.side); else attachProp(holder, prop, pr.side);
+      props.push({ model: holder, prop });
+    }
+    if (!prop) return null;
+    const P = prop.userData.prop;
+    const melee = P.kind === 'melee';
+    let shots = 0;
+    if (pr.shoot && !melee) {
+      const rate = recoilOf(prop).rate;
+      shots = pr.count || (pr.auto ? 15 : pr.burst ? 3 : P.auto ? 8 : rate < 1.5 ? 2 : 3);
+      if (pr.burst && P.auto) shots = Math.max(3, Math.min(shots, 5));
+    }
+    const swings = melee && (pr.swing || pr.shoot) ? (pr.count || 2) : 0;
+    const { clip } = bakeHoldClip(holder, prop, { shots, swings, aim: pr.aim, name: shots ? `Shoot ${prop.name.toLowerCase()} ×${shots}` : swings ? `Swing ${prop.name.toLowerCase()} ×${swings}` : pr.aim ? `${melee ? 'Guard' : 'Aim'} ${prop.name.toLowerCase()}` : `Hold ${prop.name.toLowerCase()}` });
+    results.push({ model: holder, clip, loop: !shots && !swings && !pr.aim });
+    if (pr.swing && !melee && !pr.shoot) notes.push(`(Say "shoot" to fire it.)`);
+    const made = props.length ? `Made a ${prop.name.toLowerCase()} and put it in ${holder.name}'s ${pr.side} hand. ` : '';
+    return { results, props, message: made + `Made "${clip.name}" (${clip.duration.toFixed(1)}s)${shots ? ' with muzzle flash, tracers, recoil and casings' : ''}.` + (notes.length ? ' ' + notes.join(' ') : ''), understood: true };
   }
 
   isLoop(clip) {

@@ -172,6 +172,8 @@ export function initOutliner(app, ui) {
 
   search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); render(); });
   app.on('models', render);
+  let sgPending = false;
+  app.on('scenegraph', () => { if (sgPending) return; sgPending = true; requestAnimationFrame(() => { sgPending = false; render(); }); });
   app.on('clips', render);
   app.on('selection', (s) => { if (s.object) expandTo(s.object); render(); });
   // keyboard: up/down through rows when the tree has focus

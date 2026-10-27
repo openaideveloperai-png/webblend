@@ -8,6 +8,7 @@ import { Viewport } from './viewport.js';
 import { Model, disposeObject } from '../anim/model.js';
 import { setKey, snapshotClip, restoreClip, findTrackIndex, hasKeyAt, deleteKeys, clipInfo, PROPS, propDesc, bumpClip, clipWithUuids } from '../anim/clips.js';
 import { detectHumanoid, retargetClip } from '../anim/humanoid.js';
+import { attachProp, detachProp, propOf, restoreFX } from '../anim/props-anim.js';
 import { ConstraintSolver, hasConstraints } from '../anim/constraints.js';
 import { vmdModelClip, vmdMorphTracks } from '../io/mmd.js';
 import { ikChain, solveIK } from '../anim/ik.js';
@@ -547,6 +548,58 @@ export class App extends Emitter {
     } else {
       this.editClip(model, entry, (clip) => setKey(clip, model.root, obj, prop, t, propDesc(prop).get(obj), this.keyEps()), 'Insert key');
     }
+  }
+
+  // Put a prop (gun, sword...) in a character's hand; undoable
+  giveProp(model, prop, side = 'right') {
+    attachProp(model, prop, side);
+    this.needsEval = true;
+    this.viewport.requestRender();
+    this.history.push({
+      label: 'Give prop',
+      undo: () => { detachProp(model, prop); this.needsEval = true; this.viewport.requestRender(); },
+      redo: () => { attachProp(model, prop, side); this.needsEval = true; this.viewport.requestRender(); },
+    });
+    return prop;
+  }
+
+  removeProp(model, prop) {
+    const side = prop.userData.hold ? prop.userData.hold.side : 'right';
+    if (this.selection.object && propOf(this.selection.object) === prop) this.select(model.root, model);
+    // clips made for this prop go with it; other clips lose their keys on its parts
+    const uuids = new Set();
+    prop.traverse((o) => uuids.add(o.uuid));
+    model.root.traverse((o) => { if (o.userData.owner === prop.uuid) o.traverse((c) => uuids.add(c.uuid)); });
+    const removed = model.clips.filter((e) => e.clip.userData && e.clip.userData.prop === prop.uuid);
+    const stripped = [];
+    let fx = [];
+    const take = () => {
+      stripped.length = 0;
+      for (const e of model.clips) {
+        if (removed.includes(e)) continue;
+        const keep = e.clip.tracks.filter((t) => !uuids.has(t.name.slice(0, t.name.indexOf('.'))));
+        if (keep.length !== e.clip.tracks.length) { stripped.push([e, e.clip.tracks]); e.clip.tracks = keep; model.rebuildAction(e); }
+      }
+      for (const e of removed) model.removeClip(e);
+      fx = detachProp(model, prop);
+      this.emit('clips', model);
+      this.needsEval = true;
+      this.viewport.requestRender();
+    };
+    take();
+    this.history.push({
+      label: 'Remove prop',
+      undo: () => {
+        attachProp(model, prop, side);
+        restoreFX(model, fx);
+        for (const [e, tracks] of stripped) { e.clip.tracks = tracks; model.rebuildAction(e); }
+        for (const e of removed) { model.clips.push(e); model.rebuildAction(e); }
+        this.emit('clips', model);
+        this.needsEval = true;
+        this.viewport.requestRender();
+      },
+      redo: take,
+    });
   }
 
   // Add a generated / imported clip, make it the one playing

@@ -65,11 +65,18 @@ export function initAIPanel(app, ui) {
     return added;
   };
 
-  const actions = (added, prompt, offline) => {
+  const actions = (added, prompt, offline, props = []) => {
     const row = h('div', { class: 'msg-actions' });
-    if (added.length) {
-      row.append(h('button', { class: 'btn sm', onclick: () => { app.setTime(0); app.play(); } }, icon('play'), 'Replay'));
-      row.append(h('button', { class: 'btn sm ghost', onclick: () => { for (const a of added) a.model.removeClip(a.entry); app.needsEval = true; app.viewport.requestRender(); row.remove(); } }, icon('trash'), 'Remove'));
+    if (added.length || props.length) {
+      if (added.length) row.append(h('button', { class: 'btn sm', onclick: () => { app.setTime(0); app.play(); } }, icon('play'), 'Replay'));
+      row.append(h('button', { class: 'btn sm ghost', onclick: () => {
+        for (const a of added) if (a.model.clips.includes(a.entry)) a.model.removeClip(a.entry);
+        for (const p of props) {
+          if (p.standalone) { if (app.models.includes(p.model)) app.removeModel ? app.removeModel(p.model) : null; }
+          else if (p.prop.parent) app.removeProp(p.model, p.prop);
+        }
+        app.needsEval = true; app.viewport.requestRender(); row.remove();
+      } }, icon('trash'), 'Remove'));
     }
     if (offline && (ai.sample || app.settings.apiKey)) row.append(h('button', { class: 'btn sm ghost', onclick: () => run(prompt, true) }, icon('sparkle'), 'Ask Claude instead'));
     return row;
@@ -86,8 +93,8 @@ export function initAIPanel(app, ui) {
     if (useOffline) {
       const r = ai.runOffline(prompt);
       const added = applyResults(r.results);
-      const el = msg('bot', r.message, r.results.length ? '' : 'err');
-      el.append(actions(added, prompt, true));
+      const el = msg('bot', r.message, r.results.length || (r.props && r.props.length) ? '' : 'err');
+      el.append(actions(added, prompt, true, r.props || []));
       return;
     }
     busy = new AbortController();

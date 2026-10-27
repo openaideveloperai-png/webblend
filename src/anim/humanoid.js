@@ -320,6 +320,7 @@ export class HumanoidRig {
       this.handAxes[side] = { f: f.clone().applyQuaternion(inv), n: n.clone().applyQuaternion(inv), palmLen };
     }
     this._spots = null;
+    this._fingers = null;
     this._scan = null;
     this._skullTop = undefined;
     this._eyes = undefined;
@@ -347,7 +348,7 @@ export class HumanoidRig {
   solve(specIn) {
     let spec = specIn;
     const touches = ['left', 'right'].filter((s) => spec[s + 'Hand'] && spec[s + 'Hand'].touch && spec[s + 'Hand'].touch.weight > 0 && this.map[s + 'UpperArm'] && this.map[s + 'LowerArm'] && this.map[s + 'Hand']);
-    if (!touches.length && !spec.plantFeet) return this.solveFK(spec).out;
+    if (!touches.length && !spec.plantFeet && !spec.hold) return this.solveFK(spec).out;
     const merge = (base, extra) => {
       const m = { ...base };
       for (const [k, v] of Object.entries(extra)) m[k] = { ...(base[k] || {}), ...v, rot: k.endsWith('Hand') || k.endsWith('Foot') ? undefined : (base[k] || {}).rot };
@@ -404,8 +405,18 @@ export class HumanoidRig {
       }
     }
     const extra = {};
-    for (const side of touches) Object.assign(extra, this.touchSpec(side, spec[side + 'Hand'].touch, f));
-    return this.solveFK(merge(sp, extra)).out;
+    const held = spec.hold && this.map.rightHand && this.map.leftHand ? spec.hold : null;
+    for (const side of touches) {
+      if (held && (side === held.side || (held.support > 0 && side !== held.side))) continue; // hands busy holding
+      Object.assign(extra, this.touchSpec(side, spec[side + 'Hand'].touch, f));
+    }
+    if (held) Object.assign(extra, this.holdSpec(held, f));
+    const out = this.solveFK(merge(sp, extra)).out;
+    if (held) {
+      this.curlFingers(out, held.side, held.curl ?? 1);
+      if (held.support > 0) this.curlFingers(out, held.side === 'right' ? 'left' : 'right', 0.75 * held.support);
+    }
+    return out;
   }
 
   solveFK(spec) {
@@ -541,31 +552,217 @@ export class HumanoidRig {
     if (!g) return {};
     const { palm, fing, wrist } = g;
     (this.lastTouch || (this.lastTouch = {}))[side] = { contact: g.contact.clone(), palm: palm.clone() };
-    const w = THREE.MathUtils.clamp(touch.weight, 0, 1);
+    return this.reachSpec(side, wrist, this.handFrame(side, fing, palm), g.hint, touch.weight, first);
+  }
+
+  // hand world rotation (model space) that puts the fingers along `fing` and the palm facing `palm`
+  handFrame(side, fing, palm) {
     const ax = this.handAxes[side];
-    const hb = this.map[side + 'Hand'], ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'];
-    const shoulder = first.curP.get(ua);
-    // segment lengths between the canonical joints (twist bones may sit in between)
-    const l1 = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos), l2 = this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
-    const { joint: elbow, end } = this.twoBoneJoint(shoulder, wrist, l1, l2, g.hint);
-    // hand orientation: rest finger/palm axes -> wanted ones
-    const restW = this.rest.get(hb).Wq;
+    const restW = this.rest.get(this.map[side + 'Hand']).Wq;
     const f0 = ax.f.clone().applyQuaternion(restW), n0 = ax.n.clone().applyQuaternion(restW);
     const basis = (f, n) => new THREE.Matrix4().makeBasis(f, n, new THREE.Vector3().crossVectors(f, n));
     const R = new THREE.Quaternion().setFromRotationMatrix(basis(fing, palm).multiply(basis(f0, n0).transpose()));
-    let handW = R.multiply(restW);
+    return R.multiply(restW);
+  }
+
+  // spec overrides that bring one hand's wrist to `wrist` with world rotation
+  // `handW` (both model space), elbow toward `hint`; weight blends with the FK pose
+  reachSpec(side, wrist, handW, hint, weight, first) {
+    const w = THREE.MathUtils.clamp(weight ?? 1, 0, 1);
+    const hb = this.map[side + 'Hand'], ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'];
+    if (!hb || !ua || !la) return {};
+    const shoulder = first.curP.get(ua);
+    // segment lengths between the canonical joints (twist bones may sit in between)
+    const l1 = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos), l2 = this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
+    const { joint: elbow, end } = this.twoBoneJoint(shoulder, wrist, l1, l2, hint);
     // blend with the pose from the regular params while easing in / out
     const fkDir = (b) => this.rest.get(b).dirLocal.clone().applyQuaternion(first.cur.get(b)).normalize();
     const mix = (fk, ik) => fk.clone().lerp(ik, w).normalize();
     const upDir = mix(fkDir(ua), elbow.clone().sub(shoulder).normalize());
     const loDir = mix(fkDir(la), end.clone().sub(elbow).normalize());
-    if (w < 1) handW = first.cur.get(hb).clone().slerp(handW, w);
+    let hw = handW.clone();
+    if (w < 1) hw = first.cur.get(hb).clone().slerp(hw, w);
     const toChar = (v) => v.clone().applyQuaternion(this.Finv);
     return {
       [side + 'UpperArm']: { dir: toChar(upDir), twist: 0 },
-      [side + 'LowerArm']: { dir: toChar(loDir), bend: undefined, twistToward: { q: handW, share: 0.5 } },
-      [side + 'Hand']: { worldRot: handW },
+      [side + 'LowerArm']: { dir: toChar(loDir), bend: undefined, twistToward: { q: hw, share: 0.5 } },
+      [side + 'Hand']: { worldRot: hw },
     };
+  }
+
+  // ---- holding a prop (gun, sword...) attached to a hand bone
+  // hold: { side, offsetP, offsetQ (prop in the hand's frame, model units), k (model
+  // units per meter), anchors (prop meters), style 'pistol'|'rifle'|'melee',
+  // aim 0-1, yaw, pitch (deg), kick {back (m), up (deg)}, support 0-1, curl 0-1 }
+  propTransform(hold, first) {
+    const side = hold.side;
+    const k = hold.k || 1;
+    const hh = this.hipHeight;
+    const P = (key) => first.curP.get(this.map[key]);
+    // aim relative to where the character stands (hips), so a bladed stance
+    // (torso turned) doesn't swing the gun off target
+    const hipsB = this.map.hips;
+    const hd = first.cur.get(hipsB).clone().multiply(this.rest.get(hipsB).Wq.clone().invert());
+    const hdUp = this.up.clone().applyQuaternion(hd);
+    const yawOnly = new THREE.Quaternion().setFromUnitVectors(hdUp, this.up).multiply(hd); // drop pitch/roll
+    const toM = (x, y, z) => this.charToModel(new THREE.Vector3(x, y, z)).applyQuaternion(yawOnly);
+    const yaw = (hold.yaw || 0) * D2R, pitch = (hold.pitch || 0) * D2R;
+    const fwd = toM(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)).normalize();
+    const up0 = toM(0, 1, 0);
+    const A = hold.anchors || {};
+    const anchor = (name) => (A[name] ? new THREE.Vector3(A[name].x, A[name].y, A[name].z).multiplyScalar(k) : null);
+    const ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'], hb = this.map[side + 'Hand'];
+    const armLen = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos) + this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
+    const shL = P('leftUpperArm'), shR = P('rightUpperArm');
+    const mid = shL.clone().add(shR).multiplyScalar(0.5);
+    const lat = toM(1, 0, 0);
+    let Rp, at, pivotName;
+    const frame = (z, yHint) => {
+      const y = yHint.clone().addScaledVector(z, -yHint.dot(z)).normalize();
+      const x = new THREE.Vector3().crossVectors(y, z);
+      return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+    };
+    if (hold.style === 'rifle' && anchor('stock')) {
+      // butt in the shoulder pocket, just inside the shooting shoulder
+      const sh = side === 'right' ? shR : shL;
+      at = sh.clone().addScaledVector(lat, (side === 'right' ? 1 : -1) * 0.07 * hh).addScaledVector(up0, -0.03 * hh).addScaledVector(fwd, 0.02 * hh);
+      Rp = frame(fwd, up0);
+      pivotName = 'stock';
+    } else if (hold.style === 'melee') {
+      const sgn = side === 'right' ? -1 : 1; // toward the holding side
+      const guardAt = mid.clone().addScaledVector(fwd, 0.45 * armLen).addScaledVector(up0, -0.12 * hh).addScaledVector(lat, sgn * 0.04 * hh);
+      const guardUp = up0.clone().multiplyScalar(0.8).addScaledVector(fwd, 0.6).normalize();
+      at = guardAt;
+      let bladeUp = guardUp;
+      const sw = hold.swing;
+      if (sw && sw.amount > 0) {
+        // a slash: wound up over the shoulder -> through the front -> past the other hip
+        const dir = sw.back ? -1 : 1;
+        const pts = [
+          { p: mid.clone().addScaledVector(lat, sgn * dir * 0.22 * hh).addScaledVector(up0, 0.10 * hh).addScaledVector(fwd, 0.15 * armLen), b: up0.clone().multiplyScalar(0.85).addScaledVector(lat, sgn * dir * 0.3).addScaledVector(fwd, -0.45).normalize() },
+          { p: mid.clone().addScaledVector(fwd, 0.85 * armLen).addScaledVector(up0, -0.08 * hh), b: fwd.clone().multiplyScalar(0.95).addScaledVector(up0, 0.3).normalize() },
+          { p: mid.clone().addScaledVector(lat, -sgn * dir * 0.18 * hh).addScaledVector(up0, -0.38 * hh).addScaledVector(fwd, 0.45 * armLen), b: fwd.clone().multiplyScalar(0.55).addScaledVector(up0, -0.55).addScaledVector(lat, -sgn * dir * 0.6).normalize() },
+        ];
+        const ph = THREE.MathUtils.clamp(sw.phase, 0, 1);
+        const u = ph < 0.5 ? ph * 2 : (ph - 0.5) * 2;
+        const [a, b] = ph < 0.5 ? [pts[0], pts[1]] : [pts[1], pts[2]];
+        const swingAt = a.p.clone().lerp(b.p, u);
+        const swingUp = a.b.clone().lerp(b.b, u).normalize();
+        at = guardAt.clone().lerp(swingAt, sw.amount);
+        bladeUp = guardUp.clone().lerp(swingUp, sw.amount).normalize();
+      }
+      // blade along +Y, edge leading (+Z)
+      let edge = fwd.clone().addScaledVector(bladeUp, -fwd.dot(bladeUp));
+      if (edge.lengthSq() < 1e-6) edge = up0.clone().negate().addScaledVector(bladeUp, up0.dot(bladeUp));
+      edge.normalize();
+      Rp = frame(edge, bladeUp);
+      pivotName = 'grip';
+    } else {
+      // pistol: both arms out, the gun on the line of sight
+      const two = hold.support > 0;
+      at = mid.clone().addScaledVector(fwd, (two ? 0.98 : 1.04) * armLen).addScaledVector(up0, 0.0 * hh);
+      if (!two) at.addScaledVector(lat, (side === 'right' ? -1 : 1) * 0.08 * hh);
+      Rp = frame(fwd, up0);
+      pivotName = 'grip';
+    }
+    const pivot = anchor(pivotName) || new THREE.Vector3();
+    // recoil: muzzle up around the grip, pushed back
+    if (hold.kick && (hold.kick.up || hold.kick.back)) {
+      const xAxis = new THREE.Vector3(1, 0, 0).applyQuaternion(Rp);
+      const gripW = at.clone().add((anchor('grip') || pivot).clone().sub(pivot).applyQuaternion(Rp));
+      const q = new THREE.Quaternion().setFromAxisAngle(xAxis, -(hold.kick.up || 0) * D2R);
+      at.sub(gripW).applyQuaternion(q).add(gripW);
+      Rp = q.multiply(Rp);
+      at.addScaledVector(fwd, -(hold.kick.back || 0) * k);
+    }
+    const Pp = at.clone().sub(pivot.clone().applyQuaternion(Rp));
+    return { Pp, Rp, fwd, up: up0, lat, anchor };
+  }
+
+  holdSpec(hold, first) {
+    const side = hold.side, other = side === 'right' ? 'left' : 'right';
+    const m = side === 'right' ? -1 : 1; // character x of the holding side
+    const out = {};
+    const aim = THREE.MathUtils.clamp(hold.aim ?? 0, 0, 1);
+    const support = THREE.MathUtils.clamp(hold.support ?? 0, 0, 1);
+    if (aim <= 0 && support <= 0) return out;
+    const g = this.propTransform(hold, first);
+    const { Pp, Rp } = g;
+    // holding hand: exact, through the attachment offset
+    const oQ = new THREE.Quaternion(hold.offsetQ.x, hold.offsetQ.y, hold.offsetQ.z, hold.offsetQ.w);
+    const oP = new THREE.Vector3(hold.offsetP.x, hold.offsetP.y, hold.offsetP.z);
+    const handW = Rp.clone().multiply(oQ.clone().invert());
+    const wrist = Pp.clone().sub(oP.clone().applyQuaternion(handW));
+    const hintM = (x, y, z) => this.charToModel(new THREE.Vector3(x, y, z));
+    const hintMain = hold.style === 'rifle' ? hintM(m * 1, -0.25, -0.2) : hold.style === 'melee' ? hintM(m * 0.6, -1, 0) : hintM(m * 0.35, -1, -0.1);
+    if (aim > 0) Object.assign(out, this.reachSpec(side, wrist, handW, hintMain, aim, first));
+    // support hand on the prop's support anchor
+    const sup = g.anchor('support');
+    if (support > 0 && sup) {
+      const contact = Pp.clone().add(sup.clone().applyQuaternion(Rp));
+      const toW = (v) => new THREE.Vector3(v[0], v[1], v[2]).applyQuaternion(Rp).normalize();
+      const mo = -m; // other side's x sign
+      let palm, fing;
+      if (hold.style === 'rifle') { palm = toW([-0.25 * mo, 0.95, 0.1]); fing = toW([-0.85 * mo, 0.35, 0.35]); }
+      else if (hold.style === 'melee') { palm = toW([-mo * 0.9, 0, 0.4]); fing = toW([-0.4 * mo, -0.2, 0.9]); }
+      else { palm = toW([-0.9 * mo, 0.35, 0.1]); fing = toW([-0.45 * mo, -0.8, 0.35]); }
+      fing.addScaledVector(palm, -fing.dot(palm)).normalize();
+      const ax = this.handAxes[other];
+      const w2 = contact.clone().addScaledVector(palm, -0.22 * ax.palmLen).addScaledVector(fing, -0.55 * ax.palmLen);
+      const hintSup = hold.style === 'rifle' ? hintM(-m * 0.3, -1, 0.1) : hintM(-m * 0.35, -1, -0.1);
+      Object.assign(out, this.reachSpec(other, w2, this.handFrame(other, fing, palm), hintSup, support, first));
+    }
+    // look down the sights
+    if (aim > 0 && hold.style !== 'melee') {
+      const add = (k, r) => { out[k] = { rot: r } };
+      if (hold.style === 'rifle') { add('neck', [6 * aim, m * -4 * aim, m * 6 * aim]); add('head', [6 * aim, 0, m * 4 * aim]); }
+      else { add('neck', [2 * aim, 0, 0]); }
+    }
+    return out;
+  }
+
+  // curl the finger bones of one hand around a grip (thumb left alone)
+  curlFingers(out, side, amount) {
+    if (!(amount > 0)) return;
+    const list = this.fingerList(side);
+    for (const fgr of list) {
+      const o = out.get(fgr.bone);
+      if (!o) continue;
+      o.q = o.q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(fgr.axis, fgr.angle * amount));
+    }
+  }
+
+  fingerList(side) {
+    if (!this._fingers) this._fingers = {};
+    if (this._fingers[side]) return this._fingers[side];
+    const hb = this.map[side + 'Hand'];
+    const ax = this.handAxes && this.handAxes[side];
+    const list = [];
+    if (hb && ax) {
+      const restW = this.rest.get(hb).Wq;
+      // curl axis: turns finger direction toward the palm
+      const axisW = new THREE.Vector3().crossVectors(ax.f, ax.n).normalize().applyQuaternion(restW);
+      const walk = (b, depth) => {
+        for (const c of b.children) {
+          if (!c.isBone || !this.rest.has(c)) continue;
+          const ws = words(c.name);
+          const flat = ws.join('');
+          if (/(ik|helper|dummy|twist|tip|end|nub|guide|target)/.test(flat)) continue;
+          const finger = FINGER.test(flat);
+          if (finger && !/thumb/.test(flat)) {
+            const base = ws.includes('0') || /metacarpal|carpal/.test(flat);
+            const deg = /index/.test(flat) ? 52 : 72;
+            const angle = (base ? 0.25 : depth === 0 ? 0.9 : 1) * deg * D2R;
+            const axis = axisW.clone().applyQuaternion(this.rest.get(c).Wq.clone().invert()).normalize();
+            list.push({ bone: c, axis, angle });
+          }
+          if (finger || depth === 0) walk(c, depth + (finger ? 1 : 0));
+        }
+      };
+      walk(hb, 0);
+    }
+    this._fingers[side] = list;
+    return list;
   }
 
   // keep a foot where it stands at rest (legs bend to follow the hips)
@@ -821,8 +1018,10 @@ export class HumanoidRig {
     for (const [b, vals] of qTracks) {
       // skip bones that never move
       if (!used.has(b) && !opts.allBones) {
+        // keep it if it ever leaves its rest pose (a held grip doesn't change over time)
+        const rq = this.rest.get(b).Lq;
         let moved = false;
-        for (let i = 4; i < vals.length && !moved; i++) if (Math.abs(vals[i] - vals[i % 4]) > 1e-5) moved = true;
+        for (let i = 0; i < vals.length && !moved; i += 4) if (Math.abs(vals[i] * rq.x + vals[i + 1] * rq.y + vals[i + 2] * rq.z + vals[i + 3] * rq.w) < 1 - 1e-8) moved = true;
         if (!moved) continue;
       }
       tracks.push(new THREE.QuaternionKeyframeTrack(b.uuid + '.quaternion', times, vals));
@@ -980,6 +1179,7 @@ export function paramsToSpec(p) {
     spec[side + 'Foot'] = { rot: [p[s + 'FootPitch'], 0, 0] };
   }
   if (p.plantFeet) spec.plantFeet = true;
+  if (p.hold) spec.hold = p.hold;
   return spec;
 }
 
