@@ -94,6 +94,7 @@ export function initMenus(app, ui) {
       { label: 'Right view', kbd: '3', action: () => app.viewport.setView('right') },
       { label: 'Top view', kbd: '7', action: () => app.viewport.setView('top') },
       { label: 'Perspective', kbd: '5', action: () => app.viewport.setView('persp') },
+      { label: app.viewport.fly.on ? 'Leave fly mode' : 'Fly mode (WASD)', icon: 'fly', kbd: '`', action: () => app.viewport.fly.toggle() },
       ...app.models.filter((m) => m.root.isCamera).map((m) => ({ label: `Look through "${m.name}"`, icon: 'camera', kbd: '0', action: () => app.lookThrough(m) })),
       { sep: true },
       { label: (app.settings.get('showGrid') ? 'Hide' : 'Show') + ' grid', action: () => app.setSetting('showGrid', !app.settings.get('showGrid')) },
@@ -116,7 +117,7 @@ export function initMenus(app, ui) {
   ui.allMenus = () => [
     { header: 'File' }, ...defs.File().slice(0, 6),
     { header: 'Add' }, ...defs.Add().filter((i) => i.label && i.label !== 'Image or model from file…').slice(0, 12),
-    { header: 'View' }, ...defs.View().slice(0, 2),
+    { header: 'View' }, ...defs.View().slice(0, 2), defs.View().find((i) => i.icon === 'fly'),
     { sep: true },
     { label: 'Settings…', icon: 'gear', action: () => ui.openSettings() },
   ];
@@ -146,6 +147,8 @@ export function initMenus(app, ui) {
   vbtn('frame', 'Frame everything (Shift+F)', () => app.viewport.frameAll());
   vbtn('target', 'Frame selected (F)', () => app.selection.object && app.viewport.frameObject(app.selection.object));
   vbtn('bone', 'Show / hide bones', () => app.setSetting('showSkeleton', !app.settings.get('showSkeleton')));
+  const flyBtn = vbtn('fly', 'Fly mode: move with WASD (`)', () => app.viewport.fly.toggle());
+  app.on('fly', (on) => { flyBtn.classList.toggle('on', on); flyBtn.setAttribute('aria-pressed', String(on)); });
   vbtn('image', 'Screenshot', () => screenshot(app));
 
   document.getElementById('btn-add-quick').append(icon('plus'));

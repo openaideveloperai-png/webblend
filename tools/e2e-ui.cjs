@@ -120,6 +120,64 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   await dl.saveAs(vp);
   ok('records a WebM video', fs.statSync(vp).size > 2000, fs.statSync(vp).size + ' bytes');
 
+  // bone dots stay small on screen when the camera is very close
+  const dots = await page.evaluate(() => {
+    const a = window.webblend;
+    a.clearScene(); const m = a.addMannequin();
+    for (const e of m.clips) m.setPlaying(e, false);
+    m.resetPose();
+    const vp = a.viewport;
+    const hand = m.humanoid.map.leftHand;
+    const p = hand.getWorldPosition(hand.position.clone());
+    vp.orbit.target.copy(p);
+    vp.camera.position.copy(p).add(new p.constructor(0, 0, 0.12));
+    vp.camera.near = 0.001; vp.camera.updateProjectionMatrix(); vp.orbit.update();
+    a.tick(0);
+    // on-screen radius of each dot in pixels
+    const h = vp.renderer.domElement.clientHeight;
+    const pm = m.joints.points, M = new pm.matrix.constructor(), pos = p.clone(), q = vp.camera.quaternion.clone(), sc = p.clone();
+    let maxPx = 0;
+    for (let i = 0; i < pm.count; i++) {
+      pm.getMatrixAt(i, M); M.decompose(pos, q, sc);
+      const depth = pos.clone().sub(vp.camera.position).dot(vp.camera.getWorldDirection(p.clone()));
+      if (depth <= 0.002) continue;
+      const px = sc.x / (2 * depth * Math.tan(vp.camera.fov * Math.PI / 360) / h);
+      maxPx = Math.max(maxPx, px);
+    }
+    return { maxPx, size: m.joints.size };
+  });
+  ok('bone dots stay small when zoomed in close', dots.maxPx > 0.5 && dots.maxPx <= 9, JSON.stringify(dots));
+
+  // fly mode: ` toggles, WASD moves the camera without switching gizmo tools
+  await page.evaluate(() => { const a = window.webblend; a.viewport.frameAll(); a.setGizmoMode('rotate'); });
+  await page.click('#viewport canvas', { position: { x: 5, y: 300 } });
+  await page.keyboard.press('Backquote');
+  const fly0 = await page.evaluate(() => ({ on: window.webblend.viewport.fly.on, pos: window.webblend.viewport.camera.position.toArray(), hud: !document.querySelector('.fly-hud').hidden }));
+  await page.keyboard.down('KeyW');
+  await page.waitForTimeout(600);
+  await page.keyboard.up('KeyW');
+  await page.keyboard.down('KeyE');
+  await page.waitForTimeout(300);
+  await page.keyboard.up('KeyE');
+  const fly1 = await page.evaluate(() => ({ pos: window.webblend.viewport.camera.position.toArray(), mode: window.webblend.gizmoMode, orbit: window.webblend.viewport.orbit.enabled }));
+  const moved = Math.hypot(fly1.pos[0] - fly0.pos[0], fly1.pos[1] - fly0.pos[1], fly1.pos[2] - fly0.pos[2]);
+  ok('fly mode turns on with ` and shows its hint', fly0.on && fly0.hud);
+  ok('W / E move the camera (gizmo tool unchanged, orbit off)', moved > 0.1 && fly1.pos[1] > fly0.pos[1] && fly1.mode === 'rotate' && !fly1.orbit, JSON.stringify({ moved: moved.toFixed(2), mode: fly1.mode }));
+  // right-drag looks around
+  const q0 = await page.evaluate(() => window.webblend.viewport.camera.quaternion.toArray());
+  const box = await (await page.$('#viewport canvas')).boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down({ button: 'right' });
+  await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2 + 30, { steps: 6 });
+  await page.mouse.up({ button: 'right' });
+  const q1 = await page.evaluate(() => window.webblend.viewport.camera.quaternion.toArray());
+  ok('right-drag looks around in fly mode', Math.abs(q0[1] - q1[1]) + Math.abs(q0[0] - q1[0]) > 0.05, JSON.stringify([q0.map((v) => +v.toFixed(2)), q1.map((v) => +v.toFixed(2))]));
+  await page.keyboard.press('Escape');
+  const fly2 = await page.evaluate(() => ({ on: window.webblend.viewport.fly.on, orbit: window.webblend.viewport.orbit.enabled, hud: !document.querySelector('.fly-hud').hidden }));
+  ok('Esc leaves fly mode and orbiting works again', !fly2.on && fly2.orbit && !fly2.hud, JSON.stringify(fly2));
+  await page.keyboard.press('w');
+  ok('W switches back to the move tool after fly mode', await page.evaluate(() => window.webblend.gizmoMode === 'translate'));
+
   ok('no console errors', errors.length === 0, errors.slice(0, 5).join(' | '));
   await page.screenshot({ path: path.join(OUT, 'ui.png') });
   await browser.close();

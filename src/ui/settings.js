@@ -19,6 +19,7 @@ export const SHORTCUTS = [
   ['← / →', 'Previous / next frame'], ['↑ / ↓', 'Next / previous keyframe'], ['Shift+← / →', 'Start / end'],
   ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / redo'], ['Ctrl+C / Ctrl+V', 'Copy / paste pose (keys when timeline focused)'], ['Ctrl+D', 'Duplicate model'],
   ['Del', 'Delete selected keys, or the selected model'], ['P', 'Select parent'], ['H', 'Hide / show model'], ['Esc', 'Deselect'],
+  ['`', 'Fly mode: WASD move, E/Q up/down, right-drag look, Shift faster, wheel speed, Esc exits'],
   ['1 / 3 / 7 / 5', 'Front / right / top / perspective view'], ['0', 'Look through camera'], ['Ctrl+O', 'Open files'], ['Ctrl+E', 'Export GLB'],
   ['Timeline', 'Drag keys to retime · double-click to key · right-click for curves · Ctrl+wheel to zoom'],
 ];
@@ -62,6 +63,7 @@ export function openSettings(app, ui, section) {
   const view = sec('viewport', 'Viewport',
     toggle('showGrid', 'Grid'), toggle('showAxes', 'Axis gizmo'), toggle('showSkeleton', 'Show bones (click the dots to pose)'),
     toggle('showAllBones', 'Also show helper bones (end bones, IK and constraint helpers)'),
+    select('jointSize', 'Bone dot size', [['auto', 'Automatic'], ['small', 'Small'], ['medium', 'Medium'], ['large', 'Large (touch)']]),
     select('pickMode', 'Clicking selects', [['object', 'The part under the mouse'], ['model', 'The whole model']]),
     (() => { const c = h('input', { type: 'color', value: s.get('bgColor') }); c.addEventListener('input', () => app.setSetting('bgColor', c.value)); return h('div', { class: 'field' }, h('label', {}, 'Background'), c); })(),
     toggle('importLights', 'Import lights from .blend files'),

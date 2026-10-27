@@ -176,6 +176,35 @@ function boot() {
   };
   if (app.settings.get('showStats')) ui.toggleStats(true);
 
+  // fly mode: hint bar, speed readout, and arrow buttons on touch screens
+  {
+    const vpEl = document.getElementById('viewport');
+    const speed = h('b', {}, '');
+    const touch = matchMedia('(pointer: coarse)').matches;
+    const exit = h('button', { class: 'btn small', onclick: () => app.viewport.fly.disable() }, 'Exit');
+    const hud = h('div', { class: 'fly-hud', hidden: true, role: 'status' },
+      h('span', { class: 'fly-title' }, icon('fly'), 'Fly mode'),
+      touch
+        ? h('span', {}, 'Drag to look · arrows to move')
+        : h('span', {}, h('kbd', {}, 'W A S D'), ' move · ', h('kbd', {}, 'E'), '/', h('kbd', {}, 'Q'), ' up/down · right-drag look · ', h('kbd', {}, 'Shift'), ' fast · wheel speed'),
+      h('span', { class: 'fly-speed' }, 'speed ', speed), exit);
+    const pad = h('div', { class: 'fly-pad', hidden: true });
+    const padBtn = (code, label, cls) => {
+      const b = h('button', { class: 'fly-key ' + cls, 'aria-label': label }, label);
+      const up = () => { app.viewport.fly.press(code, false); b.classList.remove('down'); };
+      b.addEventListener('pointerdown', (e) => { e.preventDefault(); b.setPointerCapture?.(e.pointerId); app.viewport.fly.press(code, true); b.classList.add('down'); });
+      b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up); b.addEventListener('lostpointercapture', up);
+      b.addEventListener('contextmenu', (e) => e.preventDefault());
+      pad.append(b);
+    };
+    padBtn('KeyW', '▲', 'k-fwd'); padBtn('KeyA', '◀', 'k-left'); padBtn('KeyS', '▼', 'k-back'); padBtn('KeyD', '▶', 'k-right');
+    padBtn('KeyE', 'Up', 'k-up'); padBtn('KeyQ', 'Down', 'k-down');
+    vpEl.append(hud, pad);
+    const showSpeed = (v) => { speed.textContent = (v || app.settings.get('flySpeed') || 1).toFixed(2).replace(/\.?0+$/, '') + '×'; };
+    app.on('flyspeed', showSpeed);
+    app.on('fly', (on) => { hud.hidden = !on; pad.hidden = !on || !touch; vpEl.classList.toggle('flying', on); showSpeed(); });
+  }
+
   // ------------------------------------------------------------ panels
   initMenus(app, ui);
   initOutliner(app, ui);
@@ -285,6 +314,7 @@ function boot() {
         if (app.selection.model) { handled(); if (app.selection.object === app.selection.model.root) app.removeModel(app.selection.model); else app.deleteKeysAt(); }
         return;
       case '?': handled(); ui.shortcuts(); return;
+      case '`': handled(); app.viewport.fly.toggle(); return;
       default: break;
     }
     if (e.altKey && kl === 'k') { handled(); app.deleteKeysAt(); return; }

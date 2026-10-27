@@ -33,6 +33,7 @@ const s = (d, extra = '') => `<svg viewBox="0 0 16 16" fill="none" stroke="curre
 
 export const ICONS = {
   dot: s('<circle cx="8" cy="8" r="2"/>'),
+  fly: s('<rect x="6" y="2.5" width="4" height="4" rx="1"/><rect x="1.5" y="9" width="4" height="4" rx="1"/><rect x="6" y="9" width="4" height="4" rx="1"/><rect x="10.5" y="9" width="4" height="4" rx="1"/>'),
   move: s('<path d="M8 1.5v13M1.5 8h13M8 1.5 6 3.5M8 1.5l2 2M8 14.5l-2-2M8 14.5l2-2M1.5 8l2-2M1.5 8l2 2M14.5 8l-2-2M14.5 8l-2 2"/>'),
   rotate: s('<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2v3h-3"/>'),
   scale: s('<rect x="2" y="7" width="7" height="7" rx="1"/><path d="M9 7l5-5M10 2h4v4"/>'),

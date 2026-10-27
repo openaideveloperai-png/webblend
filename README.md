@@ -67,6 +67,7 @@ Only the bones that move the mesh (plus the control bones and IK handles that dr
 2. Pose it: **W** move, **E** rotate, **R** scale. On characters, click the bone dots.
 3. Press **K** to set a keyframe at the current frame. Move the playhead (click the timeline ruler, or use ←/→) and pose again.
 4. Press **Space** to play. Turn on the red **Auto-key** button to record every change automatically.
+   To get in close, use **fly mode** (the keys button in the viewport corner, or the ` key) and move with W A S D like in a game. Bone dots stay small on screen however close you get; change their size in Settings → Viewport.
 5. Use the **Animations** tab to add more clips, mix them, change speed, or copy a clip from another character.
 
 ## AI assistant
@@ -105,6 +106,7 @@ The built-in motions work on any humanoid rig, so the same "walk" fits a Mixamo 
 | Ctrl+C / Ctrl+V | Copy/paste pose (keys, when the timeline has focus) |
 | Ctrl+D · Del | Duplicate model · delete keys or model |
 | 1 / 3 / 7 / 5 · 0 | Front / right / top / perspective · look through camera |
+| ` | Fly mode: W A S D move, E / Q up / down, right-drag look, Shift faster, mouse wheel sets speed, Esc exits |
 | P · H · Esc | Select parent · hide model · deselect |
 
 ## Saving your work

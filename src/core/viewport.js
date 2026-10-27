@@ -2,6 +2,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { FlyMode } from './fly.js';
 import { ViewHelper } from 'three/examples/jsm/helpers/ViewHelper.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { PerfMonitor, QUALITY_LEVELS } from './settings.js';
@@ -231,8 +232,9 @@ export class Viewport {
     const gh = this.gizmo.getHelper();
     gh.userData.helper = true;
     this.scene.add(gh);
+    this.fly = new FlyMode(this);
     this.gizmo.addEventListener('dragging-changed', (e) => {
-      this.orbit.enabled = !e.value;
+      this.orbit.enabled = !e.value && !this.fly.on;
       this.interacting = e.value;
       this.app.emit(e.value ? 'gizmo:start' : 'gizmo:end');
     });
@@ -393,15 +395,17 @@ export class Viewport {
     if (cap && elapsed < 1000 / cap - 2) return;
     const playing = this.app.transport.playing;
     const animatingHelper = this.viewHelper && this.viewHelper.animating;
-    const active = playing || this.dirty || this.continuous > 0 || animatingHelper;
+    const flying = this.fly && this.fly.moving();
+    const active = playing || this.dirty || this.continuous > 0 || animatingHelper || flying;
     this.last = now;
     if (!active) { this.perf.frame(now, elapsed, false); return; }
     const dt = Math.min(elapsed / 1000, 0.1);
     if (animatingHelper) { this.viewHelper.update(dt); if (!this.viewHelper.animating) this.orbit.update(); }
+    if (flying) this.fly.update(dt);
     this.app.tick(dt);
     this.render();
     this.dirty = false;
-    this.perf.frame(now, elapsed, playing || this.interacting || this.continuous > 0);
+    this.perf.frame(now, elapsed, playing || this.interacting || this.continuous > 0 || flying);
     this.app.emit('frame', dt);
   }
 

@@ -19,6 +19,8 @@ export const DEFAULTS = {
   showGrid: true,
   showSkeleton: true,
   showAllBones: false,
+  jointSize: 'auto', // auto | small | medium | large
+  flySpeed: 1,
   showStats: false,
   showAxes: true,
   fps: 30,
