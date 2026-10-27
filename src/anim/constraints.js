@@ -169,6 +169,64 @@ const SOLVE = {
     }
   },
 
+  // Child Of: follow the target as if parented to it (with Blender's "set inverse" matrix)
+  CHILD_OF(it, ctx) {
+    const { owner: o, target: t, c } = it;
+    t.updateWorldMatrix(true, false);
+    o.updateWorldMatrix(true, false);
+    const res = new THREE.Matrix4().copy(t.matrixWorld);
+    if (it.inverse) {
+      // inverse is stored in Blender world space: convert to this scene's world
+      const RW = ctx.blenderWorld();
+      res.multiply(RW.clone().multiply(it.inverse).multiply(RW.clone().invert()));
+    }
+    res.multiply(o.matrixWorld);
+    if (o.parent) { o.parent.updateWorldMatrix(true, false); res.premultiply(new THREE.Matrix4().copy(o.parent.matrixWorld).invert()); }
+    const p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+    res.decompose(p, q, sc);
+    o.position.lerp(p, c.influence);
+    o.quaternion.slerp(q, c.influence);
+    o.scale.lerp(sc, c.influence);
+  },
+
+  LIMIT_LOCATION(it, ctx) {
+    const { owner: o, c } = it;
+    const clampV = (v) => {
+      const out = v.clone();
+      for (let k = 0; k < 3; k++) {
+        let x = out.getComponent(k);
+        if (c.flag & (1 << (2 * k))) x = Math.max(x, c.min[k]);
+        if (c.flag & (2 << (2 * k))) x = Math.min(x, c.max[k]);
+        out.setComponent(k, x);
+      }
+      return out;
+    };
+    if (isLocal(c.ownerSpace)) {
+      const cur = basisP(o, new THREE.Vector3());
+      setBasisP(o, cur.clone().lerp(clampV(cur), c.influence));
+      return;
+    }
+    // world / pose space: limits are in Blender's world coordinates
+    const RW = ctx.blenderWorld();
+    const inv = RW.clone().invert();
+    const w = worldP(o, new THREE.Vector3());
+    const b = w.clone().applyMatrix4(inv);
+    const nb = b.clone().lerp(clampV(b), c.influence);
+    setWorldP(o, nb.applyMatrix4(RW));
+  },
+
+  LIMIT_SCALE(it) {
+    const { owner: o, c } = it;
+    const sc = o.scale.clone();
+    for (let k = 0; k < 3; k++) {
+      let x = sc.getComponent(k);
+      if (c.flag & (1 << (2 * k))) x = Math.max(x, c.min[k]);
+      if (c.flag & (2 << (2 * k))) x = Math.min(x, c.max[k]);
+      sc.setComponent(k, x);
+    }
+    o.scale.lerp(sc, c.influence);
+  },
+
   LIMIT_ROTATION(it) {
     const { owner: o, c } = it;
     const order = ORDER[c.eulerOrder] || 'ZYX';
@@ -454,6 +512,7 @@ export class ConstraintSolver {
   constructor(root, bones) {
     this.root = root;
     this.items = [];
+    this.zup = root.getObjectByName('Z-up') || null;
     const objByName = new Map();
     root.traverse((o) => {
       if (o.isBone || !o.name) return;
@@ -489,9 +548,11 @@ export class ConstraintSolver {
     this.unresolved = 0;
     for (const b of bones) {
       for (const c of b.userData.constraints || []) {
-        const target = c.type === 'LIMIT_ROTATION' ? null : resolve(b, c.target, c.subtarget);
-        if (c.type !== 'LIMIT_ROTATION' && (!target || target === b)) { this.unresolved++; continue; }
+        const noTarget = c.type === 'LIMIT_ROTATION' || c.type === 'LIMIT_LOCATION' || c.type === 'LIMIT_SCALE';
+        const target = noTarget ? null : resolve(b, c.target, c.subtarget);
+        if (!noTarget && (!target || target === b)) { this.unresolved++; continue; }
         const it = { owner: b, c, target, pole: null, chain: [] };
+        if (c.type === 'CHILD_OF' && c.inverse && c.inverse.length === 16) it.inverse = new THREE.Matrix4().fromArray(c.inverse);
         if (c.type === 'IK') {
           if (c.pole) it.pole = resolve(b, c.pole, c.poleSub);
           if (c.links && c.links.length) {
@@ -580,9 +641,11 @@ export class ConstraintSolver {
     // (AI, retargeted clips) aren't pinned by handles sitting at rest.
     let ikMotion = false;
     if (animated) for (const t of this.ikTargets) if (animated.has(t.uuid)) { ikMotion = true; break; }
+    const zup = this.zup;
     const ctx = {
       animated,
       root: this.root,
+      blenderWorld: () => { if (zup) { zup.updateWorldMatrix(true, false); return zup.matrixWorld.clone(); } this.root.updateWorldMatrix(true, false); return this.root.matrixWorld.clone(); },
       engaged: (it) => {
         const t = it.target;
         if (ikMotion) return true;

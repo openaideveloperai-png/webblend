@@ -6,6 +6,7 @@
 // (legacy and layered/slotted) for objects, bones and shape keys.
 
 import * as THREE from 'three';
+import { premultiplyTexture } from '../textures.js';
 import { BlendFile, StructView } from './blendfile.js';
 
 const OB_EMPTY = 0, OB_MESH = 1, OB_LAMP = 10, OB_CAMERA = 11, OB_ARMATURE = 25;
@@ -849,8 +850,14 @@ export async function importBlend(arrayBuffer, opts = {}) {
 
   // ---------- materials & images
   const imageCache = new Map();
-  const getImageTexture = async (imView, colorSpace) => {
+  const getImageTexture = async (imView, colorSpace, premul = false) => {
     if (!imView) return null;
+    if (premul) {
+      // colour multiplied by alpha (see premultiplyTexture), cached separately
+      const pkey = imView.offset + ':' + colorSpace + ':pm';
+      if (!imageCache.has(pkey)) imageCache.set(pkey, getImageTexture(imView, colorSpace).then((t) => (t ? premultiplyTexture(t) : t)));
+      return imageCache.get(pkey);
+    }
     const key = imView.offset + ':' + colorSpace;
     if (imageCache.has(key)) return imageCache.get(key);
     const p = (async () => {
@@ -1032,6 +1039,7 @@ export async function importBlend(arrayBuffer, opts = {}) {
     if (!me) continue;
     let md;
     try { md = readMeshData(bf, me); } catch (e) { warnings.push(`Mesh ${me.idName()}: ${e.message}`); continue; }
+    if (!md.totpoly) continue; // only vertices / edges (curves, guides): nothing to draw
     if (!md.positions || !md.faceOffsets || !md.cornerVerts) { warnings.push(`Mesh ${me.idName()}: no face data`); continue; }
     const totcol = Math.max(me.get('totcol') || 0, ob.get('totcol') || 0);
     md.matCount = totcol;
@@ -1140,9 +1148,11 @@ export async function importBlend(arrayBuffer, opts = {}) {
     mesh.bind(skeleton, mesh.matrixWorld);
   }
   const unsupportedCons = new Set();
+  const skippedCons = new Set();
   for (const arm of armatures.values()) {
     if (!arm.pose) continue;
     const armUnsupported = new Set();
+    const armSkipped = new Set();
     for (const pc of bf.listBase(arm.pose.get('chanbase'), 'bPoseChannel')) {
       const b = arm.bones.get(pc.str('name'));
       const rest = arm.restInfo.get(pc.str('name'));
@@ -1154,7 +1164,7 @@ export async function importBlend(arrayBuffer, opts = {}) {
       b.quaternion.copy(rest.quat).multiply(q);
       b.scale.set(s[0], s[1], s[2]);
       b.userData.blendRotmode = pc.get('rotmode') ?? 0;
-      const cons = readConstraints(bf, pc, armUnsupported);
+      const cons = readConstraints(bf, pc, armUnsupported, armSkipped);
       if (cons.length) {
         b.userData.constraints = cons;
         arm.hasConstraints = true;
@@ -1177,6 +1187,7 @@ export async function importBlend(arrayBuffer, opts = {}) {
       }
       arm.node.userData.constraintArmature = true;
     }
+    for (const k of armSkipped) skippedCons.add(k);
     if (armUnsupported.size) {
       // can't reproduce this rig's behaviour: pose the deforming bones directly instead
       arm.node.userData.constraintsIncomplete = [...armUnsupported];
@@ -1354,6 +1365,7 @@ export async function importBlend(arrayBuffer, opts = {}) {
     version: (bf.version / 100).toFixed(2),
     objects: nodes.size,
     hidden: hiddenCount,
+    skippedConstraints: skippedCons.size ? [...skippedCons] : undefined,
     meshes: meshTasks.filter((e) => e.mesh).length,
     armatures: armatures.size,
     actions: animations.length,
@@ -1368,20 +1380,28 @@ const CON_TYPES = {
   2: ['TRACK_TO', 'bTrackToConstraint'], 3: ['IK', 'bKinematicConstraint'], 5: ['LIMIT_ROTATION', 'bRotLimitConstraint'],
   8: ['COPY_ROTATION', 'bRotateLikeConstraint'], 9: ['COPY_LOCATION', 'bLocateLikeConstraint'], 10: ['COPY_SCALE', 'bSizeLikeConstraint'],
   13: ['LOCKED_TRACK', 'bLockTrackConstraint'], 15: ['STRETCH_TO', 'bStretchToConstraint'], 21: ['DAMPED_TRACK', 'bDampTrackConstraint'],
-  23: ['COPY_TRANSFORMS', 'bTransLikeConstraint'],
+  23: ['COPY_TRANSFORMS', 'bTransLikeConstraint'], 1: ['CHILD_OF', 'bChildOfConstraint'], 6: ['LIMIT_LOCATION', 'bLocLimitConstraint'],
+  7: ['LIMIT_SCALE', 'bSizeLimitConstraint'],
 };
-const CON_NAMES = { 1: 'Child Of', 4: 'Follow Path', 6: 'Limit Location', 7: 'Limit Scale', 11: 'Python', 12: 'Action', 14: 'Limit Distance', 16: 'Floor', 18: 'Clamp To', 19: 'Transformation', 20: 'Shrinkwrap', 22: 'Spline IK', 24: 'Maintain Volume', 25: 'Pivot', 30: 'Armature' };
+// constraints that change how a rig works: without them, control bones would mislead
+const CON_NAMES = { 4: 'Follow Path', 12: 'Action', 18: 'Clamp To', 19: 'Transformation', 22: 'Spline IK', 25: 'Pivot', 30: 'Armature' };
+// small helpers (skin-sliding face controls, distance limits...): safe to skip
+const CON_MINOR = { 11: 'Python', 14: 'Limit Distance', 16: 'Floor', 20: 'Shrinkwrap', 24: 'Maintain Volume' };
 const CON_SPACE = { 0: 'WORLD', 1: 'LOCAL', 2: 'POSE', 3: 'LOCAL_WITH_PARENT', 4: 'POSE', 5: 'WORLD', 6: 'LOCAL' };
 
 // Plain-data description of a pose bone's constraints (stored in bone.userData).
-function readConstraints(bf, pc, unsupported) {
+function readConstraints(bf, pc, unsupported, skipped) {
   const out = [];
   for (const c of bf.listBase(pc.get('constraints'), 'bConstraint')) {
     const t = c.get('type');
     const flag = c.get('flag') || 0;
     if (flag & (512 | 4)) continue; // muted or invalid
     const def = CON_TYPES[t];
-    if (!def) { if (CON_NAMES[t]) unsupported.add(CON_NAMES[t]); continue; }
+    if (!def) {
+      if (CON_NAMES[t]) unsupported.add(CON_NAMES[t]);
+      else if (CON_MINOR[t] && skipped) skipped.add(CON_MINOR[t]);
+      continue;
+    }
     const [type, structName] = def;
     const d = bf.viewAtPtr(c.ptr('data'), structName, c.scope);
     if (!d) continue;
@@ -1410,6 +1430,15 @@ function readConstraints(bf, pc, unsupported) {
       con.poleSub = d.str('polesubtarget');
       con.poleAngle = d.get('poleangle') || 0;
       if (!con.target) continue; // IK without target (auto IK) does nothing on its own
+    } else if (type === 'CHILD_OF') {
+      con.flag = d.get('flag') || 0;
+      const inv = d.get('invmat');
+      con.inverse = inv ? (Array.isArray(inv[0]) ? inv.flat() : Array.from(inv)) : null;
+      if (!con.target && !tar) continue; // no target: does nothing in Blender either
+    } else if (type === 'LIMIT_LOCATION' || type === 'LIMIT_SCALE') {
+      con.flag = d.get('flag') || 0;
+      con.min = [d.get('xmin') || 0, d.get('ymin') || 0, d.get('zmin') || 0];
+      con.max = [d.get('xmax') || 0, d.get('ymax') || 0, d.get('zmax') || 0];
     } else if (type === 'LIMIT_ROTATION') {
       con.flag = d.get('flag') || 0;
       con.min = [d.get('xmin') || 0, d.get('ymin') || 0, d.get('zmin') || 0];
@@ -1422,7 +1451,7 @@ function readConstraints(bf, pc, unsupported) {
     } else if (type === 'STRETCH_TO') {
       con.restLength = d.get('orglength') || 0;
     }
-    if (type !== 'LIMIT_ROTATION' && !con.target) continue;
+    if (!['LIMIT_ROTATION', 'LIMIT_LOCATION', 'LIMIT_SCALE'].includes(type) && !con.target) continue;
     out.push(con);
   }
   return out;
@@ -1573,7 +1602,7 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
     const names = [...path, ...t.names];
     if (info.idname === 'ShaderNodeTexImage') {
       const image = info.n.deref('id');
-      if (image) out.push({ image, info, outName: sockName(t.node.outSock), names, depth });
+      if (image) out.push({ image, info, g: t.node.g, outName: sockName(t.node.outSock), names, depth });
       return out;
     }
     for (const s of info.inputs) {
@@ -1601,8 +1630,20 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
     for (const c of cands) { const s = scoreColor(c); if (s > ts) { ts = s; top = c; } }
     return top && ts >= min ? top : null;
   };
-  const textureFor = async (c, colorSpace) => {
-    const tex = await getImageTexture(c.image, colorSpace);
+  // is the image node's Alpha output plugged in anywhere?
+  const alphaUsed = (c) => {
+    const g = c.g || root;
+    for (const l of g.linkTo.values()) {
+      const fn = l.deref('fromnode', 'bNode'), fs = l.deref('fromsock', 'bNodeSocket');
+      if (fn && fs && fn.offset === c.info.n.offset && sockName(fs) === 'Alpha') return true;
+    }
+    return false;
+  };
+  const textureFor = async (c, colorSpace, { premul = false } = {}) => {
+    // Blender: straight-alpha images give colour * alpha when Alpha isn't used
+    const am = c.image.get('alpha_mode') ?? 0;
+    const pm = premul && am === 0 && colorSpace !== THREE.NoColorSpace && !nonColor(c.image) && !alphaUsed(c);
+    const tex = await getImageTexture(c.image, colorSpace, pm);
     if (tex) {
       const st = bf.viewAtPtr(c.info.n.ptr('storage'), 'NodeTexImage', c.info.n.scope);
       const ext = st ? st.get('extension') ?? 0 : 0;
@@ -1648,10 +1689,13 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
 
   // ----- base color
   let colorDone = false;
+  let colorLinked = false;
   if (bsdf) {
     const { g, info, stack } = bsdf;
     const colorSock = input(info, 'Base Color', 'Color', 'Diffuse Color');
     if (colorSock) {
+      const tr = trace(g, colorSock, stack);
+      colorLinked = !!(tr && tr.node);
       const v = valueOf(g, colorSock, stack);
       if (Array.isArray(v)) mat.color.setRGB(v[0], v[1], v[2]);
       const pick = best(imagesFeeding(g, colorSock, stack), -5);
@@ -1661,7 +1705,7 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
       }
     }
   }
-  if (!colorDone) {
+  if (!colorDone && (!bsdf || colorLinked)) {
     // custom/toon shaders we can't follow: use the most color-like image anywhere in the material
     const all = [];
     const scan = (g, stack, depth) => {
@@ -1690,15 +1734,22 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
 
   // ----- alpha
   const blended = (maView.get('surface_render_method') === 1) || (maView.get('blend_method') === 5);
-  const useImageAlpha = () => {
+  const useImageAlpha = async (cands) => {
     if (blended) { mat.transparent = true; mat.alphaTest = 0.05; }
-    else mat.alphaTest = 0.5;
+    else mat.alphaTest = Math.min(0.95, Math.max(0.05, maView.get('alpha_threshold') ?? 0.5));
+    // cut-out from an image while the colour is a plain value (decals): the
+    // image still has to be the map so its alpha can cut; keep the colour
+    if (!mat.map && cands && cands.length) {
+      const t = await textureFor(cands[0], THREE.SRGBColorSpace);
+      if (t) mat.map = t;
+    }
   };
   const alphaSock = input(info, 'Alpha');
   if (alphaSock) {
     const t = trace(g, alphaSock, stack);
     if (t && t.node) {
-      if (imagesFeeding(g, alphaSock, stack).length) useImageAlpha();
+      const cands = imagesFeeding(g, alphaSock, stack);
+      if (cands.length) await useImageAlpha(cands);
     } else {
       const v = t && t.sock ? defaultValue(t.sock) : null;
       if (typeof v === 'number' && v < 0.999) { mat.transparent = true; mat.opacity = v; mat.depthWrite = v > 0.5; }
@@ -1707,7 +1758,8 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
   if (alphaMix && alphaMix.fac) {
     const t = trace(alphaMix.g, alphaMix.fac, alphaMix.stack);
     if (t && t.node) {
-      if (imagesFeeding(alphaMix.g, alphaMix.fac, alphaMix.stack).length) useImageAlpha();
+      const cands = imagesFeeding(alphaMix.g, alphaMix.fac, alphaMix.stack);
+      if (cands.length) await useImageAlpha(cands);
     } else {
       const f = t && t.sock ? defaultValue(t.sock) : null;
       if (typeof f === 'number') {
@@ -1720,7 +1772,8 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
   // ----- normal map
   const normal = input(info, 'Normal');
   if (normal) {
-    const t = trace(g, normal, stack);
+    let t = trace(g, normal, stack);
+    if (t && t.node && t.node.info.idname === 'ShaderNodeBump') t = trace(t.node.g, input(t.node.info, 'Normal'), t.node.stack);
     if (t && t.node && t.node.info.idname === 'ShaderNodeNormalMap') {
       const nm = t.node;
       const imgs = imagesFeeding(nm.g, input(nm.info, 'Color'), nm.stack);
@@ -1743,7 +1796,7 @@ async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
     const v = valueOf(g, emis, stack);
     if (Array.isArray(v) && (v[0] + v[1] + v[2]) > 0) { mat.emissive.setRGB(v[0], v[1], v[2]); mat.emissiveIntensity = strength; }
     const imgs = imagesFeeding(g, emis, stack);
-    if (imgs.length) { const t = await textureFor(imgs[0], THREE.SRGBColorSpace); if (t) { mat.emissiveMap = t; mat.emissive.setRGB(1, 1, 1); mat.emissiveIntensity = strength; } }
+    if (imgs.length) { const t = await textureFor(imgs[0], THREE.SRGBColorSpace, { premul: true }); if (t) { mat.emissiveMap = t; mat.emissive.setRGB(1, 1, 1); mat.emissiveIntensity = strength; } }
   }
   if (info.idname === 'ShaderNodeEmission') {
     const c = valueOf(g, input(info, 'Color'), stack);

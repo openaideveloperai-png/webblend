@@ -180,3 +180,41 @@ export class AnyImageLoader extends THREE.Loader {
     return tex;
   }
 }
+
+// Blender multiplies an image's colour by its alpha when the shader doesn't
+// use the alpha output (straight-alpha images). Glow masks are often white
+// RGB with the shape stored in alpha, so this matters a lot for emission.
+export function premultiplyTexture(tex) {
+  const img = tex && tex.image;
+  if (!img) return tex;
+  let w = img.width || img.videoWidth || 0, h = img.height || img.videoHeight || 0;
+  let data = null;
+  if (img.data && w && h && img.data.length === w * h * 4) data = new Uint8Array(img.data);
+  else if (w && h && typeof document !== 'undefined') {
+    try {
+      const c = makeCanvas(w, h);
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      data = new Uint8Array(ctx.getImageData(0, 0, w, h).data.buffer);
+    } catch { return tex; }
+  }
+  if (!data) return tex;
+  let any = false;
+  for (let i = 3; i < data.length; i += 4) {
+    const a = data[i];
+    if (a === 255) continue;
+    any = true;
+    data[i - 3] = (data[i - 3] * a) / 255; data[i - 2] = (data[i - 2] * a) / 255; data[i - 1] = (data[i - 1] * a) / 255;
+  }
+  if (!any) return tex;
+  const t = new THREE.DataTexture(data, w, h, THREE.RGBAFormat);
+  t.flipY = tex.flipY;
+  t.colorSpace = tex.colorSpace;
+  t.wrapS = tex.wrapS; t.wrapT = tex.wrapT;
+  t.generateMipmaps = true;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.name = tex.name;
+  t.needsUpdate = true;
+  return t;
+}
