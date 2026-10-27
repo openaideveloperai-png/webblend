@@ -39,6 +39,9 @@ export const DEFAULTS = {
   aiAlwaysClaude: false,
   aiWebSearch: true,
   aiReview: true,
+  autoRotate: false,
+  showEffects: true,
+  exportPlatform: 'roblox',
   demoScene: true,
 };
 

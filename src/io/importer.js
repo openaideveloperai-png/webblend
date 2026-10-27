@@ -27,14 +27,15 @@ import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { importBlend } from './blend/blendimport.js';
 import { createDracoLoader } from './draco.js';
-import { VFS } from './vfs.js';
+import { VFS, archiveKind, ZIP_EXTS, TAR_EXTS } from './vfs.js';
+import { loadJavaModel, loadBedrockGeo, bedrockClips, loadBBModel, isBedrockGeo, isBedrockAnimation, pixelTexture } from './minecraft.js';
 import { optimizeTextures, textureFromBytes, AnyImageLoader } from './textures.js';
 import { parsePMX, parsePMD, buildMMD, parseVMD, buildTemplateSkeleton, vmdTemplateClip } from './mmd.js';
 import { extOf, stripExt, baseName } from '../core/util.js';
 
-export const MODEL_EXTS = new Set(['glb', 'gltf', 'fbx', 'obj', 'dae', 'stl', 'ply', '3mf', 'amf', '3ds', 'wrl', 'vrml', 'vox', 'usdz', 'usda', 'usdc', 'usd', 'lwo', 'kmz', 'pcd', 'xyz', 'vtk', 'vtp', 'bvh', 'md2', 'gcode', 'drc', 'svg', 'blend', 'json', 'vrm', 'pmx', 'pmd', 'vmd']);
+export const MODEL_EXTS = new Set(['glb', 'gltf', 'fbx', 'obj', 'dae', 'stl', 'ply', '3mf', 'amf', '3ds', 'wrl', 'vrml', 'vox', 'usdz', 'usda', 'usdc', 'usd', 'lwo', 'kmz', 'pcd', 'xyz', 'vtk', 'vtp', 'bvh', 'md2', 'gcode', 'drc', 'svg', 'blend', 'json', 'vrm', 'pmx', 'pmd', 'vmd', 'bbmodel']);
 export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tga', 'dds', 'avif']);
-export const ACCEPT = [...MODEL_EXTS, ...IMAGE_EXTS, 'zip', 'mtl', 'bin'].map((e) => '.' + e).join(',');
+export const ACCEPT = [...MODEL_EXTS, ...IMAGE_EXTS, ...ZIP_EXTS, ...TAR_EXTS, 'gz', 'mtl', 'bin', 'mcmeta'].map((e) => '.' + e).join(',');
 
 const UNSUPPORTED = {
   max: '3ds Max scene files', ma: 'Maya ASCII files', mb: 'Maya binary files', c4d: 'Cinema 4D files', skp: 'SketchUp files',
@@ -218,11 +219,13 @@ export class Importer {
   async buildVFS(files, onStatus) {
     const vfs = new VFS();
     for (const { path, file } of files) {
-      if (extOf(path) === 'zip') {
+      const kind = archiveKind(path);
+      if (kind) {
         onStatus?.(`Extracting ${baseName(path)}…`);
         await new Promise((r) => setTimeout(r, 30));
         const u8 = new Uint8Array(await file.arrayBuffer());
-        vfs.addZip(u8, stripExt(path));
+        vfs.addArchive(u8, path.replace(/\.(tar\.gz|[a-z0-9]+)$/i, ''), kind);
+        vfs.archives = (vfs.archives || []).concat(baseName(path));
       } else {
         vfs.add(path, file);
       }
@@ -233,11 +236,25 @@ export class Importer {
   pickPrimaries(vfs) {
     const all = vfs.list();
     const models = all.filter((e) => MODEL_EXTS.has(e.ext));
+    // Minecraft packs and mods: models live in assets/<ns>/models (Java) or *.geo.json
+    // (Bedrock / GeckoLib); everything else that's .json there is data, not a model
+    const mc = all.some((e) => /(^|\/)assets\/[^/]+\/(models|textures)\//i.test(e.key) || /\.geo\.json$/i.test(e.key));
+    for (const e of models) {
+      if (e.ext !== 'json') continue;
+      if (/\.geo\.json$/i.test(e.key) || /(^|\/)(geo|models\/entity)\/[^/]+\.json$/i.test(e.key)) e.mc = 'geo';
+      else if (/\.animation\.json$/i.test(e.key) || /(^|\/)animations\/[^/]+\.json$/i.test(e.key)) e.mc = 'anim';
+      else if (/(^|\/)assets\/[^/]+\/models\/.+\.json$/i.test(e.key)) e.mc = 'java';
+    }
     // .json is a model only if it isn't referenced as a resource; skip package.json etc.
     const primaries = models.filter((e) => {
-      if (e.ext === 'json') return !/(package|tsconfig|manifest|license)\.json$/i.test(e.name);
+      if (e.ext === 'json') {
+        if (e.mc === 'anim') return false;
+        if (mc) return e.mc === 'java' || e.mc === 'geo';
+        return !/(package|tsconfig|manifest|license)\.json$/i.test(e.name);
+      }
       return true;
     });
+    for (const e of primaries) if (e.mc === 'java') e.optional = true;
     // when a folder has both .gltf and .glb of the same thing, prefer .glb
     const stems = new Set(primaries.filter((e) => e.ext === 'glb').map((e) => stripExt(e.key)));
     const filtered = primaries.filter((e) => !(e.ext === 'gltf' && stems.has(stripExt(e.key))));
@@ -550,8 +567,49 @@ export class Importer {
         kind = 'skeleton';
         break;
       }
+      case 'bbmodel': {
+        let json;
+        try { json = JSON.parse(await readText(entry.blob)); } catch { throw new Error('This .bbmodel file is not valid JSON'); }
+        const r = await loadBBModel(json);
+        root = r.root; animations = r.animations;
+        root.name = name;
+        break;
+      }
       case 'json': {
         const text = await readText(entry.blob);
+        if (entry.mc === 'java' || entry.mc === 'geo') {
+          let json;
+          try { json = JSON.parse(text); } catch { throw new Error('not valid JSON'); }
+          if (entry.mc === 'java' && !isBedrockGeo(json)) {
+            const r = await loadJavaModel(json, entry.path, vfs);
+            if (!r.root) throw new Error(r.warnings[0] || 'not a model');
+            root = r.root; warnings.push(...r.warnings);
+            info = 'Minecraft model';
+            break;
+          }
+          if (!isBedrockGeo(json)) throw new Error('not a Bedrock / GeckoLib geometry');
+          // its texture: same name, usually in textures/entity
+          const stem = name.replace(/\.geo$/i, '');
+          const pngs = vfs.list().filter((x) => x.ext === 'png');
+          const tex = pngs.find((x) => x.name.toLowerCase() === stem.toLowerCase() + '.png' && /textures/i.test(x.key)) || pngs.find((x) => x.name.toLowerCase() === stem.toLowerCase() + '.png') || pngs.find((x) => x.name.toLowerCase().startsWith(stem.toLowerCase()) && /textures\/entity/i.test(x.key));
+          const r = await loadBedrockGeo(json, tex ? tex.blob : null, stem);
+          root = r.root;
+          if (!tex) warnings.push(`no texture named ${stem}.png found`);
+          // animations made for it: <name>.animation.json, or any animation file that moves its bones
+          const anims = vfs.list().filter((x) => x.mc === 'anim' || /\.animation\.json$/i.test(x.key));
+          const mine = anims.filter((x) => x.name.toLowerCase().startsWith(stem.toLowerCase() + '.'));
+          for (const a of mine.length ? mine : anims.slice(0, 40)) {
+            try {
+              const aj = JSON.parse(await readText(a.blob));
+              if (!isBedrockAnimation(aj)) continue;
+              const clips = bedrockClips(aj, r.bones);
+              // only animations that really drive this model's bones
+              animations.push(...clips.filter((c) => c.tracks.length >= Math.min(2, r.bones.size)));
+            } catch { /* skip */ }
+          }
+          info = 'Minecraft entity (Bedrock / GeckoLib)';
+          break;
+        }
         let json;
         try { json = JSON.parse(text); } catch { throw new Error('This .json file is not valid JSON'); }
         if (json.metadata && /Object|Scene/i.test(json.metadata.type || '')) {

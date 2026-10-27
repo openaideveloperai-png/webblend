@@ -267,6 +267,8 @@ export class App extends Emitter {
     const model = hit.model || this.modelOf(obj);
     if (!model) return;
     if (this.settings.get('pickMode') === 'model' || obj.isSkinnedMesh || obj.userData.editorOnly) obj = model.root;
+    // a trail frame or a particle: select the effect it belongs to
+    if (obj.userData.vfx) { let g = obj; while (g && g.userData.fx !== 'vfx') g = g.parent; if (!g && obj.userData.vfxGroup) g = model.root.getObjectByProperty('uuid', obj.userData.vfxGroup); if (g) obj = g; }
     // clicking the selected part again selects its parent (handy for nested models)
     if (this.selection.object === obj && obj !== model.root && obj.parent) {
       let p = obj.parent;
@@ -836,14 +838,36 @@ export class App extends Emitter {
     if (k === 'showAllBones') { for (const m of this.models) m.buildJoints(); this.select(this.selection.object, this.selection.model); }
     if (k === 'bgColor') this.viewport.renderer.setClearColor(new THREE.Color(v), 1);
     if (k === 'ikChain') this.select(this.selection.object, this.selection.model);
+    if (k === 'showEffects') this.needsEval = true;
     this.emit('settings', k, v);
     this.viewport.requestRender();
   }
 
   // ------------------------------------------------------------ importing
+  // models in a row (wrapping into a grid), each standing on the floor
+  lineUp(models) {
+    const boxes = models.map((m) => { m.root.updateMatrixWorld(true); return new THREE.Box3().setFromObject(m.root); });
+    const sizes = boxes.map((b) => (b.isEmpty() ? new THREE.Vector3(1, 1, 1) : b.getSize(new THREE.Vector3())));
+    const gap = Math.max(0.1, Math.min(...sizes.map((s) => Math.max(s.x, s.z))) * 0.3);
+    const perRow = Math.ceil(Math.sqrt(models.length * 1.5));
+    let x = 0, z = 0, rowDepth = 0, i = 0;
+    const rowW = sizes.slice(0, perRow).reduce((a, s) => a + s.x + gap, -gap);
+    models.forEach((m, k) => {
+      const b = boxes[k], s = sizes[k];
+      if (i === perRow) { i = 0; x = 0; z -= rowDepth + gap; rowDepth = 0; }
+      const c = b.isEmpty() ? new THREE.Vector3() : b.getCenter(new THREE.Vector3());
+      m.root.position.x += x + s.x / 2 - c.x - rowW / 2;
+      m.root.position.z += z - c.z;
+      if (!b.isEmpty()) m.root.position.y -= b.min.y;
+      m.root.updateMatrixWorld(true);
+      m.captureRest?.();
+      x += s.x + gap; rowDepth = Math.max(rowDepth, s.z); i++;
+    });
+  }
+
   async importFiles(files) {
     if (!files.length) return;
-    const t = this.toast('Reading files…', 'busy', 0);
+    let t = this.toast('Reading files…', 'busy', 0);
     const status = (msg) => t?.update?.(msg);
     let vfs;
     try {
@@ -853,7 +877,15 @@ export class App extends Emitter {
       this.toast(e.message, 'error', 6000);
       return;
     }
-    const { primaries, images, unsupported, skipped = [] } = this.importer.pickPrimaries(vfs);
+    let { primaries, images, unsupported, skipped = [] } = this.importer.pickPrimaries(vfs);
+    // an archive full of models (a mod .jar, an asset pack) or a huge drop: let the user pick
+    if (this.chooseModels && (primaries.length > 12 || (primaries.length > 4 && vfs.archives?.length))) {
+      t?.close?.();
+      const picked = await this.chooseModels(primaries, vfs.archives || []);
+      if (!picked || !picked.length) { vfs.revokeAll(); return; }
+      primaries = picked;
+      t = this.toast('Loading models…', 'busy', 0);
+    }
     const report = [];
     for (const u of unsupported) report.push(unsupportedMessage(u.ext));
     const loaded = [];
@@ -932,6 +964,8 @@ export class App extends Emitter {
     }
     vfs.revokeAll();
     t?.close?.();
+    // several models at once: stand them side by side instead of inside each other
+    if (newModels.length > 1 && newModels.length <= 200 && !loaded.some(({ res }) => { let w = false; res.root.traverse((o) => { if (o.userData && o.userData.webblend) w = true; }); return w; })) this.lineUp(newModels);
     if (newModels.length) {
       this.select(newModels[0].root, newModels[0]);
       this.viewport.frameAll();

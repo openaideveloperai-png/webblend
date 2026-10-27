@@ -102,6 +102,8 @@ export function initMenus(app, ui) {
       { label: (app.settings.get('showGrid') ? 'Hide' : 'Show') + ' grid', action: () => app.setSetting('showGrid', !app.settings.get('showGrid')) },
       { label: (app.settings.get('showSkeleton') ? 'Hide' : 'Show') + ' bones', icon: 'bone', action: () => app.setSetting('showSkeleton', !app.settings.get('showSkeleton')) },
       { label: (app.settings.get('showStats') ? 'Hide' : 'Show') + ' performance stats', action: () => ui.toggleStats() },
+      { label: (app.settings.get('showEffects') === false ? 'Show' : 'Hide') + ' effects (trails, particles…)', icon: 'sparkle', action: () => app.setSetting('showEffects', app.settings.get('showEffects') === false) },
+      { label: (app.settings.get('autoRotate') ? 'Stop turntable' : 'Turntable (slowly orbit the view)'), icon: 'reset', action: () => app.setSetting('autoRotate', !app.settings.get('autoRotate')) },
       { sep: true },
       { label: 'Keyboard shortcuts', icon: 'info', kbd: '?', action: () => ui.shortcuts() },
     ],

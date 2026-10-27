@@ -396,12 +396,14 @@ export class Viewport {
     const playing = this.app.transport.playing;
     const animatingHelper = this.viewHelper && this.viewHelper.animating;
     const flying = this.fly && this.fly.moving();
-    const active = playing || this.dirty || this.continuous > 0 || animatingHelper || flying;
+    const turning = this.app.settings.get('autoRotate') && this.activeCamera === this.camera && !this.interacting;
+    const active = playing || this.dirty || this.continuous > 0 || animatingHelper || flying || turning;
     this.last = now;
     if (!active) { this.perf.frame(now, elapsed, false); return; }
     const dt = Math.min(elapsed / 1000, 0.1);
     if (animatingHelper) { this.viewHelper.update(dt); if (!this.viewHelper.animating) this.orbit.update(); }
     if (flying) this.fly.update(dt);
+    if (turning) { this.orbit.autoRotate = true; this.orbit.autoRotateSpeed = 1.6; this.orbit.update(dt); } else if (this.orbit.autoRotate) this.orbit.autoRotate = false;
     this.app.tick(dt);
     this.render();
     this.dirty = false;

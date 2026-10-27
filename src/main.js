@@ -12,6 +12,7 @@ import { initAIPanel } from './ui/ai-panel.js';
 import { openSettings, SHORTCUTS } from './ui/settings.js';
 import { filesFromDataTransfer } from './io/vfs.js';
 import { exportGLB, recordVideo } from './io/export.js';
+import { chooseModels } from './ui/model-picker.js';
 import { QUALITY_LEVELS, QUALITY_PRESETS } from './core/settings.js';
 import { store, isTextInput, fmtBytes } from './core/util.js';
 import { bakeHumanoid } from './anim/motions.js';
@@ -28,6 +29,7 @@ function boot() {
     return;
   }
   window.webblend = app; // handy for debugging from the console
+  app.chooseModels = (entries, sources) => chooseModels(app, entries, sources);
   window.__exportGLB = exportGLB;
   window.__recordVideo = recordVideo;
   initToasts(app);

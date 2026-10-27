@@ -4,6 +4,7 @@ import { h, icon, clear } from './dom.js';
 import { propDesc, morphLabel } from '../anim/clips.js';
 import { rafThrottle, evalExpr } from '../core/util.js';
 import { propOf, heldProps, bakeHoldClip, attachProp } from '../anim/props-anim.js';
+import { bakeVFX, removeVFX } from '../anim/vfx.js';
 
 const R2D = THREE.MathUtils.RAD2DEG, D2R = THREE.MathUtils.DEG2RAD;
 
@@ -60,6 +61,41 @@ function numField(axis, read, write, { step = 0.01, precision = 3, onCommit } = 
   update();
   el.update = update;
   return el;
+}
+
+// edit one effect element of a clip and bake the clip's effects again
+function effectEditor(app, model, group, render, sec) {
+  const entry = model.clips.find((e) => e.clip.uuid === group.userData.vfxClip);
+  const spec = group.userData.vfxSpec || {};
+  const rebake = (change) => {
+    if (!entry) return;
+    const clip = entry.clip;
+    const before = (clip.userData.vfx || []).map((x) => ({ ...x }));
+    const after = change(before.map((x) => ({ ...x })));
+    const prop = clip.userData.prop ? model.root.getObjectByProperty('uuid', clip.userData.prop) : null;
+    const apply = (list) => {
+      if (list.length) bakeVFX(model, clip, list, { prop: prop || undefined });
+      else { removeVFX(model, clip, { keepTracks: false }); clip.userData.vfx = []; }
+      model.rebuildAction(entry);
+      app.needsEval = true; app.emit('clips', model); app.viewport.requestRender();
+    };
+    apply(after);
+    app.history.push({ label: 'Edit effect', undo: () => { apply(before); app.select(model.root, model); }, redo: () => apply(after) });
+    const again = model.root.getObjectByName('Effects')?.children.find((g) => g.name === spec.name);
+    app.select(again || model.root, model);
+    render();
+  };
+  const edit = (key) => (e) => rebake((list) => list.map((x) => (x.name === spec.name ? { ...x, [key]: e.target.value } : x)));
+  const desc = `${spec.kind === 'trail' ? 'Trail' : spec.kind === 'particles' ? `Particles (${spec.shape || 'orb'})` : `Effect mesh (${spec.shape || 'sphere'})`} · ${{ swings: 'on every swing', shots: 'on every shot', fast: 'on fast moves', times: 'at set times', range: 'for a time range', always: 'the whole clip' }[spec.when] || spec.when}${entry ? ` · in "${entry.clip.name}"` : ''}`;
+  const colorIn = (key, label) => h('div', { class: 'field' }, h('label', {}, label), h('input', { type: 'color', value: '#' + new THREE.Color(spec[key] || '#ffffff').getHexString(), onchange: edit(key), 'aria-label': label }));
+  const WHEN = { swings: 'Every swing', shots: 'Every shot', fast: 'Fast moves', always: 'Whole clip', times: 'At set times', range: 'Part of the clip' };
+  const whens = ['swings', 'shots', 'fast', 'always'].concat(['swings', 'shots', 'fast', 'always'].includes(spec.when) || !WHEN[spec.when] ? [] : [spec.when]);
+  const when = h('select', { 'aria-label': 'When', onchange: edit('when') }, ...whens.map((w) => h('option', { value: w, selected: spec.when === w || undefined }, WHEN[w])));
+  return sec('Effect · ' + spec.name,
+    h('div', { class: 'hint' }, desc + '. Made from the animation, so it follows the motion; it plays, scrubs and exports with the clip.'),
+    colorIn('color', 'Color'), colorIn('color2', 'Core'),
+    h('div', { class: 'field' }, h('label', {}, 'When'), when),
+    h('div', { class: 'btns' }, h('button', { class: 'btn sm danger', onclick: () => rebake((list) => list.filter((x) => x.name !== spec.name)) }, icon('trash'), 'Remove effect')));
 }
 
 export function initProperties(app, ui) {
@@ -139,6 +175,7 @@ export function initProperties(app, ui) {
   };
 
   const sec = (title, ...children) => h('div', { class: 'sec' }, h('div', { class: 'sec-h' }, h('span', { class: 'sec-t' }, title)), ...children);
+  const effectSection = (g, m) => effectEditor(app, m, g, render, sec);
 
   const render = () => {
     clear(root);
@@ -162,6 +199,9 @@ export function initProperties(app, ui) {
     root.append(h('div', { class: 'sec' },
       h('div', { class: 'sel-head' }, icon(obj.isBone ? 'bone' : obj === model.root && model.humanoid ? 'person' : obj.isLight ? 'light' : obj.isCamera ? 'camera' : 'mesh'), nameInput),
       h('div', { class: 'sub' }, `${typeLabel}${obj !== model.root ? ' in ' + model.name : ''}`)));
+
+    // an effect made by the AI (trail, particles...): recolor, retime or remove it
+    if (obj.userData.fx === 'vfx') { root.append(effectSection(obj, model)); return; }
 
     // transform
     const t = sec('Transform',

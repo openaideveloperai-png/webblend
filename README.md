@@ -13,6 +13,8 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 ## What it does
 
 - **Imports almost anything**, including whole folders and `.zip` archives. Textures are found automatically, even when the model file points at old paths like `C:\Users\…\wood.tga`.
+- **Opens game files and mods.** Drop a `.jar` (a Minecraft mod or resource pack), `.mcpack`, `.apk`, `.unitypackage` or similar and WebBlend unpacks it like a zip, searches every folder (hidden ones and archives inside the archive too) and lists the models it finds so you can pick which to open. Minecraft block and item models, Bedrock / GeckoLib entities with their animations and Blockbench files open directly.
+- **Effects (VFX)**: slash trails that follow the blade, sparks, petals, fire, smoke, energy waves, auras and more, made by the AI and timed to the animation. They're keyframes in the clip, so they scrub, loop and export as video.
 - **Animates with bones.** Click the dots on a character to select bones. Rotate them (E), or drag a hand or foot (W) and the arm or leg follows (IK).
 - **Animates anything else too.** Position, rotation and scale of any part, plus visibility, color, opacity, glow, shape keys, light intensity and color, and camera field of view.
 - **Timeline / dope sheet.** Scrub, drag keys to retime them, double-click to add a key, box-select, copy/paste, delete, linear/smooth/stepped curves, and drag the clip end to change its length.
@@ -22,6 +24,7 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 - **Potato mode.** Five quality levels, Potato → Ultra. The app picks one for your device and steps down automatically when it lags. You can change it any time with the quality button.
 - **Exports**: a `.glb` of the whole scene (reopen it later to keep editing), **FBX or GLB for other apps** with presets for Roblox Studio, Unity, Unreal, Blender and Godot (see below), animation clips as JSON, PNG screenshots, and WebM video of the animation.
 - **Undo/redo** for edits, keys and poses.
+- **Handy extras**: View → Turntable slowly orbits the camera to show a model off, View → Hide effects, and the export dialog opens on the platform you used last.
 
 ## Supported files
 
@@ -31,10 +34,13 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 | Point clouds | `.pcd` · `.xyz` · `.ply` |
 | Animation only | `.bvh` · `.vmd` (MMD dances) · `.fbx`/`.glb` with no mesh (applied to the selected character) · `.json` clips exported from this app |
 | 2D → 3D | `.svg` (extruded) · `.png` `.jpg` `.webp` `.gif` `.bmp` `.tga` (image planes) |
-| Archives | `.zip` (nested zips too) and whole folders |
+| Game files | Minecraft Java block / item models (`.json`, with vanilla parents like `cube_all` and flat item sprites) · Bedrock and GeckoLib entities (`.geo.json` + `.animation.json`, Molang expressions included) · Blockbench `.bbmodel` |
+| Archives | `.zip` and anything zip-based: `.jar` · `.mcpack` `.mcaddon` `.mcworld` · `.apk` `.aar` · `.pk3` · `.war` and others; `.tar` `.tgz` · `.unitypackage`; nested archives and hidden folders are searched too. Whole folders work as well. |
 | Textures | png, jpg, webp, gif, bmp, tga, dds (BC1–BC5, BC7), ktx2 (ktx2 needs internet) |
 
 FBX, BVH and DAE files in centimeters are converted to meters automatically.
+
+When a drop holds more than four models (a mod `.jar` often has dozens), a list opens with each model's name, kind and folder; search it, tick the ones you want and they're placed side by side. Data files such as recipes, blockstates and mod info are left out. Pixel-art textures stay crisp.
 
 A character file saved without its skeleton (some exporters write only the posed meshes) can be moved but not posed; WebBlend says so when you open it. Open the original `.blend` / `.pmx` / `.vrm` instead, or save from WebBlend, which keeps the bones. Physics helper meshes in such files (`RB…`, `CL…`, rigid bodies) are hidden.
 
@@ -89,6 +95,20 @@ Short requests like these are handled instantly by the built-in motion engine, w
 
 The built-in motions work on any humanoid rig, so the same "walk" fits a Mixamo character, a VRoid model, or the demo mannequin.
 
+### Effects (VFX)
+
+Ask for effects in the same sentence as the motion:
+
+- `make the character swing a dark flower pattern katana and when it swings the blade leaves a trail where it cut that then disappears`
+- `katana slash with a trail and sparks`, `swing a flaming sword with sparks`, `katana with gold flowers and petals`
+- `punch twice with a trail on the fist`, `jump and make dust when he lands`, `cast a spell with a magic circle`, `power up with an aura`
+
+Trails are swept by the real path of the blade (or the hand or foot) frame by frame, so the ribbon matches the cut, glows brightest at the edge and fades from the oldest part first. The built-in engine handles common effects offline (slash trails, sparks, petals, embers, fire, smoke, dust, lightning, energy slashes, shockwaves, auras, magic circles, hearts, confetti, snow…); "dark" or "shadow" makes an ink-coloured trail with a coloured edge.
+
+Claude can design its own effects instead of picking from a list. Each effect is a **trail**, **particles** (spark, petal, ember, flame, smoke, star, leaf, snow, heart, shard and more) or a **shape** (ring, crescent, beam, pillar, sphere, spiral, rune circle, lightning bolt…), and Claude chooses where it comes from (the blade, the tip, a hand, a foot, the head, the floor), when (each swing, each shot, whenever the point moves fast, at set times, or the whole time), colours, size, how long it lasts, speed, spread, gravity and spin. After baking, WebBlend checks every effect (does it appear at all, does it drift away from the character, go into the sky or under the floor) and shows Claude a filmstrip of the motion with the effects on, so it can fix anything that looks wrong before you see it.
+
+Select an effect (it's one row in the timeline, marked ✦) to change its colours or timing, or remove it. **View → Hide effects** hides them while you animate.
+
 ### Models made by the AI
 
 The built-in models (pistol, rifle, SMG, sniper rifle, pump shotgun, sword, katana, knife, baseball bat) are detailed procedural models: bevelled outlines, slide serrations, sights, rails, pins and grooves, with metal, polymer, rubber and wood surfaces. Blades have a real cross-section (spine, ridge line, sharp edge, curved katana tip and temper line). Add a colour (black, tan, olive, silver, gold, wood, white, red, pink, blue) and a pattern: `make a katana with gold flowers and swing it`, `an engraved silver pistol`, `pink camo rifle`. Patterns: flowers, sakura, vines, scroll engraving, damascus, camo, digital camo, hex, stripes, flames, stars, hearts, scales, dots. They work offline.
@@ -109,7 +129,7 @@ Claude gets a map of each character: how tall each body part is, which bone is w
 
 ## Export to Roblox, Unity, Unreal, Blender, Godot
 
-**File → Export for Roblox, Unity, Unreal, Blender…** Pick where it's going and the dialog sets the format and options, and shows how to import it there:
+**File → Export for Roblox, Unity, Unreal, Blender…** Pick where it's going (it remembers your choice next time) and the dialog sets the format and options, and shows how to import it there:
 
 | Platform | File | Notes |
 |---|---|---|
@@ -168,11 +188,14 @@ node tools/test-humanoid.mjs                                         # rig detec
 node tools/test-touch.mjs test-assets/assets/hero.blend              # hands placed on body spots, feet planted
 node tools/test-props.mjs                                            # built-in models, holding, aiming, shooting effects
 node tools/test-decor.mjs                                            # blades, lofts, sweeps, mirroring, patterns
+node tools/test-vfx.mjs                                              # effects: trails follow the blade, timing, presets, checks
 node tools/test-ai.mjs                                               # offline AI prompt parsing
 node tools/e2e.cjs test-assets/assets ./out                          # full app in headless Chromium
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer
 node tools/e2e-ai.cjs                                                # Claude integrations (incl. the model self-review) with mocked responses
 node tools/e2e-export.cjs ./out [python-with-bpy]                    # FBX export read back by three.js and, if given, Blender
+node tools/e2e-archives.cjs ./out                                    # .jar scan (hidden folders, nested jars), Minecraft / GeckoLib / Blockbench models
+node tools/e2e-qol.cjs                                               # effect editor, hide effects, turntable, remembered export platform
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
 node tools/test-pose-truth.mjs rig.blend truth.json                # any rig vs Blender (truth from tools/blender/pose_truth.py)

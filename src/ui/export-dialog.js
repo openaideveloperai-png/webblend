@@ -48,7 +48,8 @@ export const PLATFORMS = {
   },
 };
 
-export function openExportDialog(app, { platform = 'roblox' } = {}) {
+export function openExportDialog(app, { platform } = {}) {
+  platform = platform || (PLATFORMS[app.settings.get('exportPlatform')] ? app.settings.get('exportPlatform') : 'roblox');
   const sel = app.selection.model;
   const state = { platform, scope: sel ? 'selected' : 'all', clips: 'all', animationOnly: false };
   let opts = {};
@@ -68,7 +69,7 @@ export function openExportDialog(app, { platform = 'roblox' } = {}) {
       h('div', { class: 'sec' }, h('div', { class: 'sec-h' }, h('span', { class: 'sec-t' }, 'Where is it going?')),
         h('div', { class: 'export-platforms' }, ...Object.entries(PLATFORMS).map(([k, p]) => h('button', {
           class: 'btn' + (k === state.platform ? ' primary' : ' ghost'), 'data-platform': k, 'aria-pressed': String(k === state.platform),
-          onclick: () => { state.platform = k; resetOpts(); render(); },
+          onclick: () => { state.platform = k; app.settings.set('exportPlatform', k); resetOpts(); render(); },
         }, p.label)))),
       h('div', { class: 'sec' }, h('div', { class: 'sec-h' }, h('span', { class: 'sec-t' }, 'What')),
         h('div', { class: 'ex-row' }, sel ? radio('ex-scope', 'selected', `Selected model (${sel.name})`, state.scope, (v) => { state.scope = v; render(); }) : null,

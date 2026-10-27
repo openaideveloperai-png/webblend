@@ -757,6 +757,7 @@ export function bakeVFX(model, clip, specs, ctx = {}) {
   for (const t of tracks) clip.tracks.push(t);
   clip.userData = { ...(clip.userData || {}), vfx: list.map((s) => ({ ...s })), version: (clip.userData?.version || 0) + 1 };
   clip.resetDuration?.();
+  model._vfxCache = null;
   model.recount?.();
   return { report };
 }
@@ -778,6 +779,7 @@ export function removeVFX(model, clip, { keepTracks = true } = {}) {
   for (const g of groups) g.traverse((o) => uuids.add(o.uuid));
   const taken = groups.map((g) => [g, g.parent]);
   for (const [g, p] of taken) { p.remove(g); model.forget?.(g); }
+  model._vfxCache = null;
   if (!keepTracks) {
     clip.tracks = clip.tracks.filter((t) => !uuids.has(t.name.slice(0, t.name.indexOf('.'))));
     for (const [g] of taken) g.traverse((o) => { if (o.isMesh) { o.geometry.dispose(); [].concat(o.material).forEach((m) => m.dispose()); } });
@@ -795,13 +797,16 @@ export function restoreVFX(model, clip) {
     (p && isInside(model.root, p) ? p : effectsRoot(model)).add(g);
     model.adopt?.(g);
   }
+  model._vfxCache = null;
   delete clip.userData._vfxTaken;
 }
 function isInside(root, o) { for (let x = o; x; x = x.parent) if (x === root) return true; return false; }
 
 // Effects show only while their clip plays; a node at scale 0 is hidden (no wasted draws)
 export function syncVFX(model, playing) {
-  if (!model._vfxCache || model._vfxCacheN !== model.rest.size) {
+  // the cache is dropped whenever effects are baked, removed or restored; a node that left the
+  // model some other way (deleted, undone) also forces a rescan
+  if (!model._vfxCache || model._vfxCacheN !== model.rest.size || model._vfxCache.some((o) => !isInside(model.root, o))) {
     model._vfxCache = [];
     model.root.traverse((o) => { if (o.userData.vfx) model._vfxCache.push(o); });
     model._vfxCacheN = model.rest.size;

@@ -1,6 +1,6 @@
 // Virtual file system for dropped files, folders and zip archives.
 // Resolves texture/resource URLs referenced by model files to blob URLs.
-import { unzipSync } from 'three/examples/jsm/libs/fflate.module.js';
+import { unzipSync, gunzipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { extOf, baseName } from '../core/util.js';
 
 const MIME = {
@@ -26,6 +26,59 @@ export function normPath(p) {
 
 const JUNK = /(^|\/)(__macosx\/|\.ds_store$|thumbs\.db$|desktop\.ini$|\._)/i;
 
+// containers that are zip files inside: Java / Android / Minecraft packs, game paks, plugins
+export const ZIP_EXTS = new Set(['zip', 'jar', 'mcpack', 'mcaddon', 'mctemplate', 'mcworld', 'apk', 'aar', 'war', 'ear', 'pk3', 'pk4', 'ipa', 'xpi', 'nupkg', 'vsix', 'kra', 'sb3']);
+export const TAR_EXTS = new Set(['tar', 'tgz', 'unitypackage']);
+export function archiveKind(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.endsWith('.tar.gz')) return 'tar';
+  const e = extOf(n);
+  return ZIP_EXTS.has(e) ? 'zip' : TAR_EXTS.has(e) ? 'tar' : null;
+}
+const stripArchive = (p) => p.replace(/\.(tar\.gz|[a-z0-9]+)$/i, '');
+
+// a (possibly gzipped) tar -> {name: Uint8Array}
+function untar(u8) {
+  if (u8[0] === 0x1f && u8[1] === 0x8b) u8 = gunzipSync(u8);
+  const out = {};
+  const str = (a, b) => { let s = ''; for (let i = a; i < b && u8[i]; i++) s += String.fromCharCode(u8[i]); return s; };
+  let off = 0, longName = null;
+  while (off + 512 <= u8.length) {
+    const name = str(off, off + 100);
+    if (!name) break;
+    const size = parseInt(str(off + 124, off + 136).trim() || '0', 8) || 0;
+    const type = String.fromCharCode(u8[off + 156] || 48);
+    const prefix = str(off + 345, off + 500);
+    const data = u8.subarray(off + 512, off + 512 + size);
+    if (type === 'L') longName = new TextDecoder().decode(data).replace(/\0+$/, '');
+    else {
+      const full = longName || (prefix ? prefix + '/' + name : name);
+      longName = null;
+      if (type === '0' || type === '\0' || type === '7') out[full] = data;
+    }
+    off += 512 + Math.ceil(size / 512) * 512;
+  }
+  return out;
+}
+
+// Unity packages: <guid>/asset + <guid>/pathname -> the asset at its project path
+function unityPackage(files) {
+  const by = new Map();
+  for (const [name, data] of Object.entries(files)) {
+    const m = /^(?:\.\/)?([^/]+)\/(asset|pathname)$/.exec(name);
+    if (!m) continue;
+    if (!by.has(m[1])) by.set(m[1], {});
+    by.get(m[1])[m[2]] = data;
+  }
+  const out = {};
+  for (const { asset, pathname } of by.values()) {
+    if (!asset || !pathname) continue;
+    const p = new TextDecoder().decode(pathname).split('\n')[0].trim();
+    if (p) out[p] = asset;
+  }
+  return Object.keys(out).length ? out : files;
+}
+
 export class VFS {
   constructor() {
     this.files = new Map(); // normPath -> entry {path, name, blob, size}
@@ -47,18 +100,25 @@ export class VFS {
   }
 
   // Extract a zip (Uint8Array). Nested zips are expanded too.
-  addZip(u8, prefix = '', depth = 0) {
+  addZip(u8, prefix = '', depth = 0) { return this.addArchive(u8, prefix, 'zip', depth); }
+
+  // Extract any archive: zip-based (.zip, .jar, .mcpack, .apk...), tar / .tgz / .unitypackage.
+  // Nested archives (a jar inside a jar, as Fabric mods bundle them) open too; hidden
+  // folders are kept.
+  addArchive(u8, prefix = '', kind = 'zip', depth = 0) {
     let files;
     try {
-      files = unzipSync(u8, { filter: (f) => !JUNK.test(f.name) && !f.name.endsWith('/') });
+      files = kind === 'tar' ? unityPackage(untar(u8)) : unzipSync(u8, { filter: (f) => !JUNK.test(f.name) && !f.name.endsWith('/') });
     } catch (e) {
-      throw new Error('Could not read the zip archive (' + e.message + ')');
+      throw new Error(`Could not read the ${kind === 'tar' ? 'archive' : 'zip archive'} (${e.message})`);
     }
     const added = [];
     for (const [name, data] of Object.entries(files)) {
+      if (JUNK.test(name) || name.endsWith('/')) continue;
       const path = prefix ? prefix + '/' + name : name;
-      if (extOf(name) === 'zip' && depth < 2) {
-        added.push(...this.addZip(data, path.replace(/\.zip$/i, ''), depth + 1));
+      const inner = archiveKind(name);
+      if (inner && depth < 3) {
+        try { added.push(...this.addArchive(data, stripArchive(path), inner, depth + 1)); } catch { /* not really an archive: keep as a file */ this.add(path, new Blob([data])); }
         continue;
       }
       const e = this.add(path, new Blob([data], { type: MIME[extOf(name)] || '' }));
