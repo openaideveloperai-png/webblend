@@ -115,17 +115,31 @@ export function initTimeline(app, ui) {
     const order = new Map();
     let i = 0;
     m.root.traverse((o) => order.set(o, i++));
-    const nodes = [...info.groups.keys()];
+    // effect pieces (trail frames, particles, tracers, casings) collapse into one row per effect
+    const fxOf = (node) => {
+      if (node.userData.vfxGroup) { const g = m.root.getObjectByProperty('uuid', node.userData.vfxGroup); if (g) return g; }
+      for (let p = node; p && p !== m.root; p = p.parent) if (p.userData.fx === 'vfx' || p.userData.fx === 'Tracers' || p.userData.fx === 'Casings') return p;
+      return null;
+    };
+    const fxRows = new Map();
+    const groups = new Map();
+    for (const [node, g] of info.groups) {
+      const fx = fxOf(node);
+      if (fx) { if (!fxRows.has(fx)) fxRows.set(fx, []); fxRows.get(fx).push(...g); }
+      else groups.set(node, g);
+    }
+    const nodes = [...groups.keys()];
     const selObj = app.selection.object;
-    if (selObj && !info.groups.has(selObj) && m.rest.has(selObj)) nodes.push(selObj);
+    if (selObj && !groups.has(selObj) && !fxRows.has(selObj) && m.rest.has(selObj)) nodes.push(selObj);
     nodes.sort((a, b) => (order.get(a) ?? 1e9) - (order.get(b) ?? 1e9));
     rows.push({ type: 'summary', label: 'Summary · ' + e.clip.name });
     for (const node of nodes) {
-      const g = (info.groups.get(node) || []).slice().sort((a, b) => propOrder(a.prop) - propOrder(b.prop));
+      const g = (groups.get(node) || []).slice().sort((a, b) => propOrder(a.prop) - propOrder(b.prop));
       const open = expanded.has(node.uuid);
       rows.push({ type: 'node', node, tracks: g, open });
       if (open) for (const t of g) rows.push({ type: 'prop', node, ti: t.ti, prop: t.prop, track: t.track });
     }
+    for (const [node, g] of fxRows) rows.push({ type: 'node', node, tracks: g, open: false, fx: true });
   }
 
   function propOrder(p) {
@@ -274,14 +288,14 @@ export function initTimeline(app, ui) {
       if (r.type === 'summary') { text = r.label; color = COLORS.muted; }
       else if (r.type === 'node') {
         indent = 20;
-        if (r.tracks.length) {
+        if (r.tracks.length && !r.fx) {
           ctx.fillStyle = COLORS.muted;
           ctx.beginPath();
           if (r.open) { ctx.moveTo(8, cy - 2); ctx.lineTo(14, cy - 2); ctx.lineTo(11, cy + 2); }
           else { ctx.moveTo(9, cy - 3); ctx.lineTo(13, cy); ctx.lineTo(9, cy + 3); }
           ctx.fill();
         }
-        text = (r.node.isBone ? '◇ ' : '') + (r.node.name || r.node.type);
+        text = (r.fx ? '✦ ' : r.node.isBone ? '◇ ' : '') + (r.node.name || r.node.type);
         if (!r.tracks.length) color = COLORS.faint;
       } else { indent = 34; text = propLabel(r.node, r.prop); color = COLORS.muted; }
       ctx.fillStyle = color;
@@ -534,7 +548,7 @@ export function initTimeline(app, ui) {
     if (x < labelW) {
       const hit = rowAt(y);
       if (hit && hit.row.node) {
-        if (hit.row.type === 'node' && x < 20 && hit.row.tracks.length) { if (expanded.has(hit.row.node.uuid)) expanded.delete(hit.row.node.uuid); else expanded.add(hit.row.node.uuid); draw(); return; }
+        if (hit.row.type === 'node' && x < 20 && hit.row.tracks.length && !hit.row.fx) { if (expanded.has(hit.row.node.uuid)) expanded.delete(hit.row.node.uuid); else expanded.add(hit.row.node.uuid); draw(); return; }
         app.select(hit.row.node, m);
       }
       return;

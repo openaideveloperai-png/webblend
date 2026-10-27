@@ -1126,7 +1126,7 @@ export function findPresetIn(text) {
 
 export function findStyleIn(text) {
   const t = String(text || '').toLowerCase();
-  const map = { gold: /\b(gold|golden)\b/, silver: /\b(silver|chrome|stainless|nickel)\b/, pink: /\b(pink)\b/, red: /\b(red)\b/, blue: /\b(blue)\b/, white: /\b(white|arctic)\b/, wood: /\b(wood|wooden)\b/, od: /\b(od|olive|green)\b/, tan: /\b(tan|fde|sand|coyote)\b|\bdesert (camo|tan|color|colour)\b/, black: /\b(black)\b/ };
+  const map = { gold: /\b(gold|golden)\b/, silver: /\b(silver|chrome|stainless|nickel)\b/, pink: /\b(pink)\b/, red: /\b(red)\b/, blue: /\b(blue)\b/, white: /\b(white|arctic)\b/, wood: /\b(wood|wooden)\b/, od: /\b(od|olive|green)\b/, tan: /\b(tan|fde|sand|coyote)\b|\bdesert (camo|tan|color|colour)\b/, black: /\b(black|dark|shadow|obsidian)\b/ };
   for (const [k, re] of Object.entries(map)) if (re.test(t)) return k;
   return null;
 }

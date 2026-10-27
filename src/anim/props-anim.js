@@ -25,6 +25,7 @@ export function propOf(o) {
 }
 
 // plain {x,y,z} anchors (from a reloaded file) -> Vector3
+export function anchorsOfProp(prop) { return anchorsOf(prop); }
 function anchorsOf(prop) {
   const a = (prop.userData.prop && prop.userData.prop.anchors) || {};
   const out = {};
@@ -300,7 +301,7 @@ export function bakeHoldClip(model, prop, opts = {}) {
     return paramsToSpec(d.apply(t, p));
   };
   const clip = rig.bake(opts.name || (d.shots.length ? 'Shoot' : d.swings.length ? 'Slash' : 'Hold'), d.duration, fn, d.fps);
-  clip.userData = { generated: 'hold', prop: prop.uuid };
+  clip.userData = { generated: 'hold', prop: prop.uuid, swings: d.swings.map((w) => ({ ...w })), shots: d.shots.slice() };
   if (d.shots.length) addShotEffects(model, prop, clip, d.shots, opts);
   return { clip, shots: d.shots, swings: d.swings, duration: d.duration };
 }

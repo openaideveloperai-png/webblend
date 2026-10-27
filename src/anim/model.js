@@ -6,6 +6,7 @@ import { uid } from '../core/util.js';
 import { clipWithUuids, bumpClip, parseTrack } from './clips.js';
 import { ConstraintSolver, hasConstraints } from './constraints.js';
 import { addMMDConstraints } from '../io/mmd.js';
+import { syncVFX, removeVFX, restoreVFX } from './vfx.js';
 
 const LOOPS = { repeat: THREE.LoopRepeat, once: THREE.LoopOnce, pingpong: THREE.LoopPingPong };
 
@@ -213,6 +214,7 @@ export class Model {
   // ---------------------------------------------------------------- clips
   addClip(clip, opts = {}) {
     clip.userData = clip.userData || {};
+    if (clip.userData._vfxTaken) restoreVFX(this, clip);
     // make track targets unambiguous and drop tracks that can't bind
     const needs = clip.tracks.some((t) => {
       const { nodeName } = parseTrack(t);
@@ -223,6 +225,7 @@ export class Model {
       const c = clipWithUuids(clip, this.root);
       c.name = clip.name;
       c.userData = clip.userData;
+      c.uuid = clip.uuid; // its effects know it by this
       clip = c;
       if (clip.tracks.length < before && opts.warnDropped !== false) {
         this.app.toast?.(`"${clip.name}": ${before - clip.tracks.length} of ${before} tracks didn't match this model and were skipped`, 'warn', 4000);
@@ -262,6 +265,7 @@ export class Model {
   }
 
   rebuildAction(entry) {
+    if (entry.clip.userData && entry.clip.userData._vfxTaken) restoreVFX(this, entry.clip);
     const time = entry.action ? entry.action.time : 0;
     // stopping an action makes three.js put its bones back where they were when
     // first animated (often the T-pose); keep the pose on screen instead, and
@@ -325,6 +329,8 @@ export class Model {
   removeClip(entry) {
     const i = this.clips.indexOf(entry);
     if (i < 0) return;
+    // its effects leave with it (kept on the clip for undo)
+    removeVFX(this, entry.clip);
     entry.action.stop();
     this.mixer.uncacheAction(entry.clip, this.root);
     this.mixer.uncacheClip(entry.clip);
@@ -351,7 +357,6 @@ export class Model {
   }
 
   evaluate(t) {
-    if (!this.clips.length) return;
     let any = false;
     for (const e of this.clips) {
       if (!e.playing) continue;
@@ -361,6 +366,8 @@ export class Model {
       e.action.enabled = true;
     }
     if (any) this.mixer.setTime(t);
+    // effects only show while their clip plays (and only on frames they're on)
+    syncVFX(this, new Set(this.clips.filter((e) => e.playing).map((e) => e.clip.uuid)));
   }
 
   updateHelpers() {

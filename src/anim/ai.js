@@ -8,7 +8,8 @@ import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
 import { buildProp, presetSpec, findPresetIn, findStyleIn, decorateSpec, floatingParts, PROP_PRESETS, STYLE_NAMES, TEXTURES, PATTERN_NAMES, BLADE_VARIANTS } from '../scene/props.js';
 import { findDecorationIn, COLOR_WORDS } from '../scene/patterns.js';
-import { inspectProp, renderReview } from './model-review.js';
+import { inspectProp, renderReview, renderFilmstrip } from './model-review.js';
+import { bakeVFX, vfxFromText, vfxWordsIn, VFX_PRESETS, VFX_PRESET_NAMES, PARTICLE_SHAPE_NAMES, MESH_SHAPE_NAMES } from './vfx.js';
 
 // what Claude needs to place parts and decorations on the built-in models
 const PRESET_DOC = [
@@ -177,8 +178,11 @@ export function parsePropRequest(text) {
   const swing = /\b(slash|slashes|slashing|swing|swings|swinging|attack|attacks|attacking|strike|strikes|chop|chops|cut|cuts|stab|stabs|hit|hits|combo)\b/.test(t);
   const side = /\b(left hand|left-handed|in (her|his|their|the) left)\b/.test(t) ? 'left' : 'right';
   // "gold flower pattern": the color goes to the flowers, not the whole model
-  const decoration = findDecorationIn(t);
-  const style = findStyleIn(decoration && decoration.colorPhrase ? t.replace(decoration.colorPhrase, ' ') : t);
+  // "flower petals flying": an effect, not a pattern painted on the model
+  const decoration = findDecorationIn(t.replace(/\b((flower|sakura|cherry blossom|rose|lotus)s?\s+)?petals?\b|\bcherry blossoms? (fall|falling|fly|flying|scatter\w*|burst\w*)\b/g, ' '));
+  // "dark trail", "blue fire": colors that belong to an effect, not the model
+  const forModel = t.replace(/\b(dark|shadow|black|red|blue|green|purple|violet|pink|white|gold|golden|orange|yellow|cyan|silver)\s+(trails?|smoke|aura|slash|energy|flames?|fire|magic|glow|mist|sparks?|petals?|lightning|beam|laser|wave|shock ?waves?)\b/g, ' ');
+  const style = findStyleIn(decoration && decoration.colorPhrase ? forModel.replace(decoration.colorPhrase, ' ') : forModel);
   const any = make || shootWord || aim || drop || (swing && !!preset);
   return any ? { preset, make, shoot: shootWord, swing, count, auto, burst, aim, hold, drop, side, style, decoration } : null;
 }
@@ -209,6 +213,7 @@ const FILLER = new Set(('make let have get do does please can could would you i 
 const PROP_WORDS = new Set(('make makes create build give gives add spawn equip hand arm get with holding hold holds carry wield draw pull take out shoot shoots shooting shot shots fire fires firing blast pew unload spray burst open aim aims aiming point drop remove put away holster slash slashes slashing swing swings swinging attack attacks strike strikes chop cut stab hit hits combo full auto automatic mag dump times rounds bullets x her his him their them gun weapon').split(/\s+/));
 for (const p of Object.values(PROP_PRESETS)) for (const w of p.words) for (const part of w.split(/[\s-]+/)) PROP_WORDS.add(part);
 for (const w of ['tan', 'fde', 'desert', 'sand', 'olive', 'green', 'silver', 'chrome', 'gold', 'golden', 'wood', 'wooden', 'white', 'red', 'pink', 'blue', 'black', ...Object.keys(COLOR_WORDS)]) PROP_WORDS.add(w);
+for (const w of ('trail trails swoosh swish streak streaks afterimage afterimages effect effects vfx particle particles petal petals sakura spark sparks fire flame flames flaming burning blaze lightning electric thunder ice icy frost magic magical sparkle sparkles glitter smoke mist dust shockwave impact slam explosion energy wave crescent glow glowing aura laser beam confetti disappear disappears fade fades fading appear appears cut cuts where when blade').split(/\s+/)) PROP_WORDS.add(w);
 // surface patterns the built-in models can wear ("a katana with gold flowers")
 for (const w of ('pattern patterns patterned design designs motif motifs print printed covered all over engraved engraving engravings etched etching carved inlaid inlay '
   + 'flower flowers flowery floral rose roses blossom blossoms petal petals daisy daisies lotus lily lilies sakura cherry scroll scrollwork filigree baroque vine vines ivy leaves leafy damascus damask folded steel wavy '
@@ -396,6 +401,9 @@ export class AIAssistant {
         else segs.push(bakeObject(object, 'float', { size: this.sizeOf(model, object), name: 'Float' }));
       }
       const clip = segs.length > 1 ? concatClips(segs) : segs[0];
+      // "punch with fire fists", "spin with a glowing aura"
+      const fx = model.adopt ? vfxFromText(prompt, { melee: false, gun: false }) : [];
+      if (fx.length) { bakeVFX(model, clip, fx, {}); notes.push(`Added ${fx.map((e) => e.name.toLowerCase()).join(', ')}.`); }
       results.push({ model, clip, loop: parsed.global.loop || (segs.length === 1 && this.isLoop(clip)) });
     }
     const msg = results.map((r) => `Made "${r.clip.name}" (${r.clip.duration.toFixed(1)}s) on ${r.model.name}.`).join(' ') + (notes.length ? ' ' + notes.join(' ') : '');
@@ -447,6 +455,9 @@ export class AIAssistant {
     }
     const swings = melee && (pr.swing || pr.shoot) ? (pr.count || 2) : 0;
     const { clip } = bakeHoldClip(holder, prop, { shots, swings, aim: pr.aim, name: shots ? `Shoot ${prop.name.toLowerCase()} ×${shots}` : swings ? `Swing ${prop.name.toLowerCase()} ×${swings}` : pr.aim ? `${melee ? 'Guard' : 'Aim'} ${prop.name.toLowerCase()}` : `Hold ${prop.name.toLowerCase()}` });
+    // trails, sparks, petals... from the words, timed to the swings / shots
+    const fx = vfxFromText(prompt, { melee, gun: !melee, dark: (prop.userData.prop && /black|dark/.test(pr.style || '')) || /\bdark\b/.test(String(prompt).toLowerCase()) });
+    if (fx.length) { bakeVFX(holder, clip, fx, { prop }); notes.push(`Added ${fx.map((e) => e.name.toLowerCase()).join(', ')}.`); }
     results.push({ model: holder, clip, loop: !shots && !swings && !pr.aim });
     if (pr.swing && !melee && !pr.shoot) notes.push(`(Say "shoot" to fire it.)`);
     const deco = pr.decoration && props.length ? ` with ${pr.decoration.colorWord ? pr.decoration.colorWord + ' ' : ''}${pr.decoration.pattern === 'scroll' ? 'engraving' : pr.decoration.pattern}` : '';
@@ -514,7 +525,8 @@ JSON FORMAT:
     "useProp": "name of a prop the target holds (made in this reply or already held), or \"\"",
     "aimKeys": [{"t": seconds, "weight": 0-1, "yaw": deg, "pitch": deg}],
     "shots": [seconds, ...],
-    "swings": [{"t": seconds, "back": false}]
+    "swings": [{"t": seconds, "back": false}],
+    "vfx": [effect elements, see VFX below]
   }],
   "props": ${this.propFormat()}
 }
@@ -531,6 +543,8 @@ ${params}
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
 ${this.propRules()}
+
+${this.vfxRules()}
 - Keep motions physically plausible and within joint limits (elbows/knees 0-150, head yaw within ±80).
 
 USER REQUEST: ${prompt}`;
@@ -570,6 +584,39 @@ ${PRESET_DOC}
 - Name parts that move "slide", "bolt", "pump", "trigger" or "magazine" (their children move with them). Anchors (prop frame, meters): grip = center of where the main hand holds; support = where the other hand holds ([] for one-handed items); muzzle = barrel tip or blade tip; eject = ejection port; stock = rear end of a shoulder stock ([] for pistols); sight = a point on the sight line. Guns: set fireRate, caliber, action, slide and slideTravel.
 - holder: who holds it (a humanoid in the scene, "selected", or "none" to just place it in the scene).
 - To animate with a held prop set the clip's "useProp" to the prop's name. aimKeys weight 0 = relaxed, holding it at the side; 1 = aimed (guns: two-handed, on the line of sight; rifles shouldered; melee: guard stance), yaw/pitch = aim direction in degrees (+yaw = character's left, +pitch = up). "shots" = times the gun fires: recoil, muzzle flash, tracer, slide/bolt/pump cycling and ejected casings are added automatically; respect the gun's fire rate and aim first (weight 1 at least 0.2 s before the first shot). "swings" = melee slash start times ({back: true} = backhand). While aimed or swinging, the arms' humanoidKeys are ignored; legs/body keys and presets still apply (e.g. preset "walk" + aimKeys + shots to shoot while walking). Keep plantFeet true unless the legs should move.${this.app.settings.get('aiReview') !== false && !reviewing ? '\n- After you answer, the app renders your model from four sides and shows it to you to check and improve, so build the complete model now.' : ''}`;
+  }
+
+  // one effect element (all fields present; -1 / "" / [] = the preset's value)
+  vfxItemSchema() {
+    const n = { type: 'number' }, str = { type: 'string' };
+    const shapes = [...new Set(['', ...PARTICLE_SHAPE_NAMES, ...MESH_SHAPE_NAMES])];
+    return {
+      type: 'object', additionalProperties: false,
+      required: ['name', 'kind', 'preset', 'attach', 'offset', 'when', 'times', 'start', 'end', 'duration', 'color', 'color2', 'blend', 'opacity', 'length', 'fade', 'width', 'shape', 'count', 'life', 'size', 'sizeEnd', 'speed', 'spread', 'direction', 'gravity', 'drag', 'spin', 'inherit', 'travel', 'follow'],
+      properties: {
+        name: str, kind: { type: 'string', enum: ['trail', 'particles', 'mesh'] }, preset: { type: 'string', enum: ['', ...VFX_PRESET_NAMES] },
+        attach: str, offset: { type: 'array', items: n }, when: { type: 'string', enum: ['swings', 'shots', 'fast', 'times', 'range', 'always'] },
+        times: { type: 'array', items: n }, start: n, end: n, duration: n,
+        color: str, color2: str, blend: { type: 'string', enum: ['auto', 'glow', 'solid', 'ink'] }, opacity: n,
+        length: n, fade: n, width: n, shape: { type: 'string', enum: shapes }, count: n, life: n, size: n, sizeEnd: n, speed: n, spread: n,
+        direction: { type: 'string', enum: ['', 'out', 'up', 'down', 'forward', 'back', 'left', 'right', 'along', 'blade'] },
+        gravity: n, drag: n, spin: n, inherit: n, travel: n, follow: { type: 'boolean' },
+      },
+    };
+  }
+
+  // how to compose effects that look right
+  vfxRules() {
+    return `VFX (visual effects: slash trails, sparks, petals, fire, smoke, dust, magic, lightning, energy waves, shockwaves, glows, auras, beams...). Put them in the clip's "vfx", never as props or parts (a prop just stands in the scene, frozen in mid-air). They are computed from the animation itself, so they follow the blade or body part exactly through the motion, and they scrub, loop and export with the clip.
+- Design an effect from one or more elements, layered like a VFX artist would: a sword slash = a trail along the cut (+ a few sparks or petals off the blade, a faint flash); a fire sword = blade glow + flames + embers + an orange trail; a ground slam = shockwave ring + dust + flash; a punch = a streak behind the fist + a flash at the moment of impact. Match what the user describes (colors, mood, size, timing), and invent freely: every field can be set.
+- Element: "kind" trail | particles | mesh. "preset" fills every field you leave at -1 / "" / [] (presets: ${Object.entries(VFX_PRESETS).map(([k, v]) => `"${k}" ${v.label}`).join('; ')}); set "preset" to "" to design from scratch.
+- attach = where it comes from: "blade" (the held weapon's striking part, base to tip; a gun's barrel), "tip" (blade tip / muzzle), "grip", "rightHand", "leftHand", "rightFoot", "leftFoot", "head", "chest", "hips", "ground" (floor under the character), "root", or a bone name from the scene; offset [x, y, z] meters in character space (+x its left, +y up, +z forward).
+- when: "swings" (during each melee swing of this clip), "shots" (each shot), "fast" (whenever the attach point moves fast: punches, kicks, spins; found automatically), "times" (at each of "times" seconds), "range" ("start" to "end" seconds), "always" (the whole clip). Effects must line up with the motion: a slash trail on "swings", an impact on the frame the strike lands.
+- trail: a ribbon swept between the blade's base and tip (from "blade"), or a tapered streak "width" meters wide behind a point; it shows the last "length" seconds of the path (0.15-0.35 for a slash) and fades out over "fade" seconds once the motion stops (0.2-0.4), then disappears.
+- particles: "count" per occurrence of "shape" (${PARTICLE_SHAPE_NAMES.join(', ')}), each living "life" s, sized "size" -> "sizeEnd" meters, launched at "speed" m/s toward "direction" (out = all around, up, down, forward, back, left, right, along = with the attach point's motion, blade = along the blade) within "spread" degrees, falling with "gravity" m/s² (negative rises), slowed by "drag" (0-5), spinning "spin" deg/s, keeping "inherit" (0-1) of the attach point's speed. From "blade" they leave from random points along it. During a window they are spread through it; at a moment they burst.
+- mesh: one shaped effect per occurrence: ${MESH_SHAPE_NAMES.join(', ')} (sphere = soft glow / flash / orb; ring = shockwave on the floor; disc = glow pool; circle = magic rune circle; crescent = flying slash in the swing plane; cone = burst; beam = laser "length" m long; pillar = column of light "length" m tall; spiral = whirl / aura; shell = glow hugging the blade or body part; bolt = lightning "length" m long; star = flare). It grows from "size" to "sizeEnd" (meters) over "duration" s, fades out, spins "spin" deg/s, flies at "travel" m/s toward "direction"; "follow" true rides along with the attach point (auras, shells).
+- Look: color = main / outer color, color2 = hot core or second color (hex). blend "glow" = additive light (fire, energy, sparks, magic; bright colors only), "solid" = opaque things (petals, leaves, shards, confetti), "ink" = dark or smoky (shadow trails, smoke, dust: dark colors need "ink" or "solid", glow can't show them), "auto" picks. opacity 0-1.
+- Real-world scale: sparks 1-5 cm long, petals 2-4 cm, embers 1-3 cm, smoke puffs 20-90 cm, shockwave rings 1-3 m, flying slashes about 1 m across. Keep effects near the character unless something flies off on purpose. Never put effects far above the character.${this.app.settings.get('aiReview') !== false ? '\n- After you answer, the app plays the animation and shows you frames with the effects to check and fix.' : ''}`;
   }
 
   propItemSchema() {
@@ -643,7 +690,7 @@ ${PRESET_DOC}
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys', 'useProp', 'aimKeys', 'shots', 'swings'],
+            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys', 'useProp', 'aimKeys', 'shots', 'swings', 'vfx'],
             properties: {
               name: { type: 'string' },
               target: { type: 'string' },
@@ -685,6 +732,7 @@ ${PRESET_DOC}
                 type: 'array',
                 items: { type: 'object', additionalProperties: false, required: ['t', 'back'], properties: { t: { type: 'number' }, back: { type: 'boolean' } } },
               },
+              vfx: { type: 'array', items: this.vfxItemSchema() },
             },
           },
         },
@@ -818,7 +866,12 @@ ${PRESET_DOC}
 
   // props worth a second look: custom models, and presets Claude added to or changed
   reviewable(spec) {
-    return ((spec && spec.props) || []).filter((ps) => ps && Array.isArray(ps.parts) && (ps.parts.length || (ps.removeParts || []).length)).slice(0, 2);
+    return ((spec && spec.props) || []).filter((ps) => ps && Array.isArray(ps.parts) && (ps.parts.length || (ps.removeParts || []).length) && !this.looksLikeEffect(ps)).slice(0, 2);
+  }
+
+  // an "effect" modeled as a standing object (the frozen-in-mid-air mistake)
+  looksLikeEffect(ps) {
+    return (!ps.holder || ps.holder === 'none') && /\b(trail|vfx|effects?|particles?|aura|sparkles?|slash (wave|arc)|swoosh|afterimage|shock ?wave|explosion)\b/i.test(ps.name || '');
   }
 
   // Build Claude's models off-screen, render them from four sides, inspect them, and let
@@ -872,6 +925,68 @@ Automatic inspection:
 ${r.report.text}
 Your current JSON:
 ${JSON.stringify(r.ps)}`).join('\n\n')}`;
+  }
+
+  // Play the clips Claude made, film them with their effects and let Claude fix what's off.
+  // results: [{ model, clip }] already on the models. -> note string or ''
+  async reviewEffects(prompt, results, { signal, onStatus } = {}) {
+    if (this.app.settings.get('aiReview') === false) return '';
+    const items = results.filter((r) => r.clip && r.clip.userData && Array.isArray(r.clip.userData.vfx) && r.clip.userData.vfx.length).slice(0, 2);
+    if (!items.length) return '';
+    onStatus?.('Claude is checking the effects…');
+    const canSee = await this.canSendImages();
+    const sheets = [], parts = [];
+    for (const { model, clip } of items) {
+      const entry = model.clips.find((e) => e.clip === clip);
+      const rep = clip.userData.vfxReport || [];
+      // moments worth seeing: during and just after each effect
+      const ts = [];
+      for (const r of rep) for (const [a, b] of (r.occurrences || []).slice(0, 3)) { ts.push(a + (b - a) * 0.6); ts.push(Math.min(clip.duration, b + 0.12)); }
+      if (!ts.length) ts.push(clip.duration * 0.3, clip.duration * 0.6);
+      const times = [...new Set(ts.map((t) => +Math.min(clip.duration, Math.max(0, t)).toFixed(2)))].sort((a, b) => a - b);
+      const pick = times.length <= 6 ? times : Array.from({ length: 6 }, (_, i) => times[Math.round((i * (times.length - 1)) / 5)]);
+      let sheet = null;
+      if (canSee && entry) {
+        if (model.switchClip) model.switchClip(entry);
+        const top = Math.max(0, ...rep.map((r) => (r.heightRange ? r.heightRange[1] : 0))) + 0.2;
+        sheet = await renderFilmstrip(this.app, model, entry, pick, { top });
+      }
+      if (sheet) sheets.push(sheet);
+      const swings = (clip.userData.swings || []).map((w) => `${w.t0.toFixed(2)}-${w.t1.toFixed(2)} s`).join(', ');
+      parts.push(`CLIP "${clip.name}" on "${model.name}" (${clip.duration.toFixed(2)} s${swings ? `; swings at ${swings}` : ''}${(clip.userData.shots || []).length ? `; shots at ${clip.userData.shots.map((t) => t.toFixed(2)).join(', ')} s` : ''})${sheet ? `, frames ${pick.map((t, i) => `${String.fromCharCode(65 + i)}=${t.toFixed(2)}s`).join(' ')}` : ''}
+Effect report:
+${rep.map((r) => `- "${r.name}" (${r.kind}) from ${r.attach}, when ${r.when}: ${r.occurrences.length ? 'appears ' + r.occurrences.map(([a, b]) => (a === b ? `at ${a}s` : `${a}-${b}s`)).join(', ') : 'never appears'}${r.size ? `; spans ${r.size.join(' x ')} m, ${r.heightRange[0]}-${r.heightRange[1]} m above the floor, up to ${r.maxDistanceFromSource} m from its source` : ''}${r.issues.length ? '; PROBLEMS: ' + r.issues.join('; ') : ''}`).join('\n')}
+Current vfx JSON:
+${JSON.stringify(clip.userData.vfx.map(({ label, ...rest }) => rest))}`);
+    }
+    if (!sheets.length && !items.some(({ clip }) => (clip.userData.vfxReport || []).some((r) => r.issues.length))) return '';
+    if (signal?.aborted) throw Object.assign(new Error('Stopped.'), { code: 'cancelled' });
+    const text = `You are a VFX artist checking effects you added to animations in a browser 3D animation tool, for this request: "${prompt}".
+${sheets.length ? `Images: ${sheets.length} sheet(s) of frames from the animation as the app plays it, from a three-quarter front view (letters and times on each frame).\n` : ''}
+Check each effect against the request: does it come from the right place and follow the motion (a slash trail should trace the blade's cut during the swing and fade after it), appear at the right moments, read clearly (visible color and blend, right size), stay with the character (nothing frozen in the sky or drifting away), and look polished (layering, color, timing)? Fix every PROBLEM in the report. Return the COMPLETE corrected "vfx" list for each clip (same element format; keep good elements, change or add what's needed). Reply with ONE JSON object only: {"message": "one short sentence on what you changed", "clips": [{"name": "clip name", "vfx": [elements]}]}
+
+${this.vfxRules()}
+
+${parts.join('\n\n')}`;
+    const answer = await this.callClaude(text, {
+      signal, images: sheets, schema: { type: 'object', additionalProperties: false, required: ['message', 'clips'], properties: { message: { type: 'string' }, clips: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['name', 'vfx'], properties: { name: { type: 'string' }, vfx: { type: 'array', items: this.vfxItemSchema() } } } } } },
+      onText: (t) => onStatus?.(`Claude is fixing the effects… (${Math.round(t.length / 100) / 10}k chars)`),
+    });
+    let changed = 0;
+    for (const c of (answer && answer.clips) || []) {
+      const it = items.find((x) => x.clip.name === c.name) || (items.length === 1 ? items[0] : null);
+      if (!it || !Array.isArray(c.vfx) || !c.vfx.length) continue;
+      const { model, clip } = it;
+      const prop = clip.userData.prop ? model.root.getObjectByProperty('uuid', clip.userData.prop) : null;
+      const { report } = bakeVFX(model, clip, c.vfx, { prop: prop || undefined, swings: clip.userData.swings, shots: clip.userData.shots });
+      clip.userData.vfxReport = report;
+      const entry = model.clips.find((e) => e.clip === clip);
+      if (entry) model.rebuildAction(entry);
+      changed++;
+    }
+    this.app.needsEval = true;
+    this.app.viewport?.requestRender();
+    return changed ? String(answer.message || 'Checked and refined the effects.').slice(0, 300) : '';
   }
 
   reviewSchema() {
@@ -949,8 +1064,14 @@ ${JSON.stringify(r.ps)}`).join('\n\n')}`;
   buildProps(spec) {
     const app = this.app;
     const out = [], notes = [];
+    const hasVFX = ((spec && spec.clips) || []).some((c) => c && Array.isArray(c.vfx) && c.vfx.length);
     for (const ps of ((spec && spec.props) || []).slice(0, 6)) {
       if (!ps) continue;
+      // an "effect" modeled as a standing object is the frozen-in-mid-air mistake
+      if (this.looksLikeEffect(ps)) {
+        notes.push(`(Skipped "${ps.name}": effects are made on the animation${hasVFX ? '' : ', ask again for it as an effect'}.)`);
+        continue;
+      }
       try {
         const made = this.propDef(ps);
         const def = made.def;
@@ -1162,7 +1283,12 @@ ${JSON.stringify(r.ps)}`).join('\n\n')}`;
       }
     }
     const clip = new THREE.AnimationClip(name, duration, tracks);
-    clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined };
+    clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined, swings: driver ? driver.swings.map((w) => ({ ...w })) : [], shots: driver ? driver.shots.slice() : [] };
+    // effects follow the finished motion
+    if (Array.isArray(c.vfx) && c.vfx.length && model.adopt) {
+      const { report } = bakeVFX(model, clip, c.vfx, { prop: heldProp || undefined, swings: clip.userData.swings, shots: clip.userData.shots });
+      clip.userData.vfxReport = report;
+    }
     return clip;
   }
 }

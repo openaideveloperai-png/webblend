@@ -48,6 +48,18 @@ const KATANA = { message: 'A katana with gold flowers.', props: [{ name: 'Flower
 const RAYGUN_REVIEWED = { message: 'Added fins and a brighter emitter.', props: [{ ...RAYGUN.props[0],
   materials: [...RAYGUN.props[0].materials, { name: 'fin', color: '#b3262e', metalness: 0.6, roughness: 0.35, emissive: '#000000', emissiveIntensity: 0, opacity: 1, texture: 'none' }],
   parts: [...RAYGUN.props[0].parts, { name: 'fin', shape: 'extrude', material: 'fin', parent: '', pos: [0, 0.045, 0.0], rot: [0, 0, 0], dims: [0.003], axis: 'x', profile: [[-0.03, 0], [0.03, 0], [0.0, 0.03]], holes: [], bevel: 0.0005, segments: 0, variant: '', mirror: '' }] }] };
+// Claude answers the user's VFX request: a custom trail and petals on the swings, one
+// broken effect floating above the head, and an effect wrongly modeled as a prop
+const fxEl = (o) => ({ name: 'fx', kind: 'particles', preset: '', attach: 'blade', offset: [], when: 'swings', times: [], start: -1, end: -1, duration: -1, color: '', color2: '', blend: 'auto', opacity: -1, length: -1, fade: -1, width: -1, shape: '', count: -1, life: -1, size: -1, sizeEnd: -1, speed: -1, spread: -1, direction: '', gravity: -1, drag: -1, spin: -1, inherit: -1, travel: -1, follow: false, ...o });
+const SLASH = { message: 'A dark flower katana with a slash trail.', props: [
+  { name: 'Dark katana', holder: 'selected', hand: 'right', preset: 'katana', style: 'black', kind: 'melee', removeParts: [], materials: [], parts: [], decorations: [{ material: 'blade', pattern: 'hamon+flowers', patternColor: '#b0306a', mapping: 'fit', svg: '', engrave: false }], anchors: { grip: [], support: [], muzzle: [], eject: [], stock: [], sight: [] }, slide: '', slideTravel: 0, fireRate: 0, caliber: 'none', action: 'none' },
+  { name: 'Slash effect', holder: 'none', hand: 'right', preset: 'custom', style: 'default', kind: 'prop', removeParts: [], materials: [{ name: 'glow', color: '#ff00ff', metalness: 0, roughness: 0.5, emissive: '#ff00ff', emissiveIntensity: 2, opacity: 0.5, texture: 'glow' }], parts: [{ name: 'blob', shape: 'sphere', material: 'glow', parent: '', pos: [0, 0, 0], rot: [0, 0, 0], dims: [0.1], axis: 'y', profile: [], holes: [], bevel: 0, segments: 16, variant: '', mirror: '' }], decorations: [], anchors: { grip: [], support: [], muzzle: [], eject: [], stock: [], sight: [] }, slide: '', slideTravel: 0, fireRate: 0, caliber: 'none', action: 'none' }],
+  clips: [{ name: 'Dark slash', target: 'selected', duration: 2.6, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], handTouches: [], plantFeet: true, objectKeys: [], boneKeys: [],
+    useProp: 'Dark katana', aimKeys: [{ t: 0, weight: 0, yaw: 0, pitch: 0 }, { t: 0.4, weight: 1, yaw: 0, pitch: 0 }], shots: [], swings: [{ t: 0.6, back: false }, { t: 1.4, back: true }],
+    vfx: [fxEl({ name: 'Cut trail', kind: 'trail', color: '#2a0b45', color2: '#c48cff', blend: 'ink', length: 0.25, fade: 0.3 }),
+      fxEl({ name: 'Dark petals', shape: 'petal', count: 20, life: 1.4, size: 0.03, speed: 1, spread: 120, direction: 'along', gravity: 0.8, drag: 2, spin: 300, inherit: 0.15, color: '#7a1f3d', blend: 'solid' }),
+      fxEl({ name: 'Sky sparkle', shape: 'star', attach: 'head', offset: [0, 3, 0], when: 'always', count: 20, life: 1, size: 0.05, color: '#ffffff', blend: 'glow' })] }] };
+const SLASH_FIXED = { message: 'Removed the sparkle floating in the sky and brightened the trail edge.', clips: [{ name: 'Dark slash', vfx: [SLASH.clips[0].vfx[0], SLASH.clips[0].vfx[1], fxEl({ name: 'Tip sparks', preset: 'sparks', attach: 'tip', count: 10 })] }] };
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 (async () => {
@@ -172,6 +184,60 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
     ok('the SVG drawing painted the guard', st.mats.guard && st.mats.guard.map === 'decoration-drawing' && st.painted > 20, `painted samples ${st.painted}`);
     ok('loose floating discs dropped, attached ring kept', /Left out 3 loose parts/.test(st.msg), st.msg.slice(0, 200));
     ok('no page errors, no script from the drawing ran', errors.length === 0, errors.slice(0, 4).join(' | '));
+    await page.close();
+  }
+  // ---------------- Claude makes effects, then checks them on film
+  {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    const calls = [];
+    await page.route('https://api.anthropic.com/**', async (route) => {
+      const body = JSON.parse(route.request().postData() || '{}');
+      calls.push(body);
+      const text = JSON.stringify(body.messages);
+      if ((body.tools || []).some((t) => /^web_search/.test(t.type))) {
+        await route.fulfill({ status: 200, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }, body: JSON.stringify({ id: 'msg_r', type: 'message', role: 'assistant', model: body.model, stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 5, output_tokens: 5 }, content: [{ type: 'text', text: '- notes' }] }) });
+        return;
+      }
+      const answer = /VFX artist checking effects/.test(text) ? SLASH_FIXED : SLASH;
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' }, body: sse(JSON.stringify(answer)) });
+    });
+    await page.goto('file://' + path.resolve(__dirname, '../index.html'));
+    await page.waitForTimeout(1200);
+    await page.evaluate(() => { const a = window.webblend; a.settings.setApiKey('sk-ant-test-key', false); a.emit('settings', 'apiKey'); const m = a.models[0]; for (const e of [...m.clips]) m.removeClip(e); a.select(m.root, m); });
+    await page.click('#btn-ai');
+    await page.fill('#ai-prompt', 'make the characther swing a dark flower pattern katana and when it swings the blade makes a trail appear trail like where it cut and t hen disapears , its vfx btw');
+    await page.press('#ai-prompt', 'Enter');
+    await page.waitForFunction(() => !document.querySelector('.msg .thinking'), null, { timeout: 60000 });
+    await page.waitForTimeout(500);
+    const main = calls.find((b) => b.output_config && b.output_config.format && !/VFX artist checking|senior 3D artist/.test(JSON.stringify(b.messages)));
+    const mainText = main && (Array.isArray(main.messages[0].content) ? main.messages[0].content.find((c) => c.type === 'text').text : main.messages[0].content);
+    ok('Claude is told how to compose effects', /VFX \(visual effects/.test(mainText) && /never as props/.test(mainText) && !!main.output_config.format.schema.properties.clips.items.properties.vfx);
+    const fxReview = calls.find((b) => /VFX artist checking effects/.test(JSON.stringify(b.messages)));
+    const rc = fxReview && fxReview.messages[0].content;
+    const rText = Array.isArray(rc) ? rc.find((c) => c.type === 'text').text : '';
+    ok('effects review: Claude gets frames of the animation and the report', Array.isArray(rc) && rc.some((c) => c.type === 'image') && /Effect report/.test(rText), fxReview ? `${rc.filter((c) => c.type === 'image').length} image(s)` : 'no review call');
+    ok('the report catches the effect floating above the head', /"Sky sparkle"[^\n]*PROBLEMS: [^\n]*above the floor/.test(rText), (rText.match(/- "Sky sparkle".*/) || [''])[0].slice(0, 200));
+    ok('the report says where the trail comes from and when', /"Cut trail" \(trail\) from the dark katana's blade, when swings: appears 0\.\d+-0\.\d+s, 1\.\d+-1\.\d+s/.test(rText), (rText.match(/- "Cut trail".*/) || [''])[0].slice(0, 160));
+    const st = await page.evaluate(() => {
+      const a = window.webblend; const m = a.models[0];
+      const e = m.clips.find((c) => c.clip.name === 'Dark slash');
+      const names = e ? e.clip.userData.vfx.map((v) => v.name) : [];
+      const fx = m.root.getObjectByName('Effects');
+      const groups = fx ? fx.children.map((g) => g.name) : [];
+      // the trail is on screen mid-swing
+      a.setTime(0.75); a.tick(0);
+      let visible = 0; m.root.traverse((o) => { if (o.userData.vfx && o.visible) visible++; });
+      const stray = a.models.some((x) => x.name === 'Slash effect');
+      return { names, groups, visible, stray, msg: [...document.querySelectorAll('.msg.bot')].pop().textContent };
+    });
+    ok('the corrected effects replaced the first ones', JSON.stringify(st.names) === JSON.stringify(['Cut trail', 'Dark petals', 'Tip sparks']) && !st.groups.includes('Sky sparkle'), JSON.stringify(st.groups));
+    ok('the trail is visible mid-swing', st.visible > 0, st.visible);
+    ok('the effect modeled as a prop was skipped', !st.stray && /Skipped "Slash effect"/.test(st.msg), st.msg.slice(0, 220));
+    ok('the message says the effects were checked', /Checked the effects: Removed the sparkle/.test(st.msg));
+    ok('no page errors (effects)', errors.length === 0, errors.slice(0, 3).join(' | '));
     await page.close();
   }
   // ---------------- API key path

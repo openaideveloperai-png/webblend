@@ -77,7 +77,7 @@ const d1 = findDecorationIn('make a katana in gold flowerr pattern on the katana
 ok('"katana in gold flowerr pattern" -> gold flowers', d1 && d1.pattern === 'flowers' && d1.colorWord === 'gold', JSON.stringify(d1));
 const d2 = findDecorationIn('a gold katana with a flower pattern');
 ok('"a gold katana with a flower pattern" -> flowers, katana gold', d2 && d2.pattern === 'flowers' && !d2.colorWord);
-ok('"flames in red", "pink camo", "engraved"', findDecorationIn('pistol with flames in red').colorWord === 'red' && findDecorationIn('pink camo rifle').pattern === 'camo' && findDecorationIn('engraved silver pistol').engrave);
+ok('"flames in red", "pink camo", "engraved"', findDecorationIn('pistol with a flame pattern in red').colorWord === 'red' && findDecorationIn('pink camo rifle').pattern === 'camo' && findDecorationIn('engraved silver pistol').engrave);
 ok('layers parse', JSON.stringify(patternLayers('hamon:#ffffff+flowers+bogus')) === JSON.stringify([{ name: 'hamon', color: '#ffffff' }, { name: 'flowers', color: null }]));
 
 console.log(fails ? `${fails} FAILED` : 'ALL DECOR TESTS OK');

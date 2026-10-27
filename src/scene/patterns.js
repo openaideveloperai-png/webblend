@@ -385,7 +385,7 @@ function drawSVG(g, rects, svg, tex) {
 const PATTERN_WORDS = [
   ['sakura', /\b(sakura|cherry blossoms?)\b/], ['flowers', /\b(flowe?r+s?|floral|flowery|flowr+s?|roses?|blossoms?|petals?|daisy|daisies|lotus|lil(y|ies))\b/], ['scroll', /\b(scroll ?work|scrolls?|engrav(ed|ing|ings)|filigree|baroque)\b/],
   ['vines', /\b(vines?|ivy|leaves|leafy)\b/], ['damascus', /\b(damascus|damask|folded steel|wavy steel)\b/], ['digital', /\b(digital camo|pixel camo|marpat)\b/],
-  ['camo', /\b(camo|camouflage|woodland)\b/], ['hex', /\b(hex|hexagons?|honeycomb)\b/], ['stripes', /\b(stripes?|striped|racing stripes?)\b/], ['flames', /\b(flames?|fire|flaming)\b/],
+  ['camo', /\b(camo|camouflage|woodland)\b/], ['hex', /\b(hex|hexagons?|honeycomb)\b/], ['stripes', /\b(stripes?|striped|racing stripes?)\b/], ['flames', /\b(flames? (pattern|design|decals?|paint|print|job)|fire (pattern|design|decals?)|painted flames|flame ?paint|hot ?rod)\b/],
   ['stars', /\b(stars?|starry)\b/], ['hearts', /\b(hearts?)\b/], ['scales', /\b(scales|scaly|dragon ?scales?)\b/], ['dots', /\b(dots|polka|spots|spotted)\b/],
 ];
 export function findPatternIn(text) {

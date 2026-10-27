@@ -181,3 +181,61 @@ export async function renderReview(prop, { cell = [512, 384] } = {}) {
     renderer.forceContextLoss?.();
   }
 }
+
+// Frames of a clip as the app plays it (effects included), for Claude to check its
+// effects: up to 6 labelled moments from a three-quarter view. -> JPEG Blob or null
+export async function renderFilmstrip(app, model, entry, times, { labels = [], top = 0 } = {}) {
+  const vp = app.viewport;
+  if (!vp || !vp.renderer || !times.length) return null;
+  const r = vp.renderer, canvas = r.domElement;
+  const aspect = canvas.width / Math.max(1, canvas.height) || 1.5;
+  const W = 400, H = Math.round(W / aspect);
+  const cols = 3, rows = Math.ceil(Math.min(6, times.length) / cols);
+  const sheet = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(W * cols, H * rows) : Object.assign(document.createElement('canvas'), { width: W * cols, height: H * rows });
+  const g = sheet.getContext('2d');
+  const tr = app.transport, savedT = tr.time, wasPlaying = tr.playing;
+  if (wasPlaying) app.pause();
+  const hidden = [];
+  const hide = (o) => { if (o && o.visible) { o.visible = false; hidden.push(o); } };
+  for (const m of app.models) hide(m.joints);
+  hide(app.selBox); hide(vp.gizmo && vp.gizmo.getHelper ? vp.gizmo.getHelper() : null);
+  try {
+    // frame the character and where its effects went
+    model.root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(model.root, true);
+    const size = box.getSize(new THREE.Vector3()), c = box.getCenter(new THREE.Vector3());
+    const rig = model.humanoid;
+    const toWorld = (v) => v.clone().transformDirection(model.root.matrixWorld);
+    const fwd = rig && rig.fwd ? toWorld(rig.fwd) : new THREE.Vector3(0, 0, 1), lat = rig && rig.lat ? toWorld(rig.lat) : new THREE.Vector3(1, 0, 0), up = rig && rig.up ? toWorld(rig.up) : new THREE.Vector3(0, 1, 0);
+    // frame the character from the floor up to whatever the effects reach (capped)
+    const floorY = box.min.dot(up);
+    const charH = Math.max(size.y, 0.5);
+    const height = Math.min(Math.max(charH, top || 0), charH * 3);
+    const look = c.clone().addScaledVector(up, floorY + height / 2 - c.dot(up));
+    const cam = new THREE.PerspectiveCamera(35, aspect, height / 50, height * 60);
+    const dist = (height * 0.62) / Math.tan(THREE.MathUtils.degToRad(17.5));
+    cam.position.copy(look).addScaledVector(fwd, dist * 0.84).addScaledVector(lat, -dist * 0.42).addScaledVector(up, dist * 0.12);
+    cam.up.copy(up);
+    cam.lookAt(look);
+    times.slice(0, 6).forEach((t, i) => {
+      app.setTime(t, { emit: false });
+      app.tick(0);
+      r.render(vp.scene, cam);
+      const x = (i % cols) * W, y = Math.floor(i / cols) * H;
+      g.drawImage(canvas, x, y, W, H);
+      g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillRect(x, y, W, 20);
+      g.fillStyle = '#fff'; g.font = '13px sans-serif';
+      g.fillText(`${String.fromCharCode(65 + i)}  t = ${t.toFixed(2)} s${labels[i] ? '  ·  ' + labels[i] : ''}`, x + 6, y + 14);
+    });
+  } catch (e) {
+    console.warn('filmstrip failed', e);
+    return null;
+  } finally {
+    for (const o of hidden) o.visible = true;
+    app.setTime(savedT, { emit: false });
+    app.tick(0);
+    if (wasPlaying) app.play();
+    vp.requestRender();
+  }
+  return sheet.convertToBlob ? await sheet.convertToBlob({ type: 'image/jpeg', quality: 0.85 }) : await new Promise((res) => sheet.toBlob(res, 'image/jpeg', 0.85));
+}
