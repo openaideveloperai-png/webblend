@@ -18,7 +18,13 @@ export function initTimeline(app, ui) {
   const body = document.getElementById('tl-body');
   const canvas = document.getElementById('tl-canvas');
   const emptyEl = document.getElementById('tl-empty');
-  const ctx = canvas.getContext('2d');
+  // static parts (rows, keys, ruler) are painted into an offscreen layer and only
+  // re-rendered when something changes; playback just blits it and draws the playhead
+  const screen = canvas.getContext('2d');
+  const baseCanvas = document.createElement('canvas');
+  const baseCtx = baseCanvas.getContext('2d');
+  let ctx = baseCtx;
+  let baseDirty = true;
   const view = { t0: -0.05, pps: 120, scrollY: 0 };
   let rows = [];
   let selected = new Set(); // "ti:ki"
@@ -159,19 +165,32 @@ export function initTimeline(app, ui) {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     W = body.clientWidth; H = body.clientHeight;
     canvas.width = Math.max(1, W * dpr); canvas.height = Math.max(1, H * dpr);
+    baseCanvas.width = canvas.width; baseCanvas.height = canvas.height;
     canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
     labelW = W < 560 ? 104 : 168;
     draw();
   }
 
   let rafPending = false;
-  function draw() {
+  function draw(full = true) {
+    if (full) baseDirty = true;
     if (rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => { rafPending = false; paint(); });
   }
 
   function paint() {
+    if (baseDirty || drag) { ctx = baseCtx; paintBase(); baseDirty = false; }
+    screen.setTransform(1, 0, 0, 1, 0, 0);
+    screen.drawImage(baseCanvas, 0, 0);
+    ctx = screen;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const e = entry();
+    if (model() && e) paintPlayhead(e, e.clip.duration);
+    ctx = baseCtx;
+  }
+
+  function paintBase() {
     const m = model(), e = entry();
     if (e && e.clip !== lastClip) { lastClip = e.clip; selected.clear(); fit(true); }
     buildRows();
@@ -272,7 +291,9 @@ export function initTimeline(app, ui) {
     ctx.beginPath(); ctx.moveTo(labelW + 0.5, 0); ctx.lineTo(labelW + 0.5, H); ctx.stroke();
     // ruler
     drawRuler(dur);
-    // playhead
+  }
+
+  function paintPlayhead(e, dur) {
     const pt = app.transport.playing ? (app.transport.time * e.speed) % Math.max(dur, 1e-3) : curT();
     const px = tToX(pt);
     if (px >= labelW) {
@@ -665,7 +686,7 @@ export function initTimeline(app, ui) {
 
   // ------------------------------------------------------------ resize handle
   new ResizeObserver(resize).observe(body);
-  app.on('time', () => { syncTime(); draw(); });
+  app.on('time', () => { syncTime(); draw(false); });
   app.on('play', () => { syncBar(); draw(); });
   app.on('keys', () => { syncBar(); draw(); });
   app.on('clips', () => { syncBar(); draw(); });
@@ -676,7 +697,7 @@ export function initTimeline(app, ui) {
     syncBar(); draw();
   });
   app.on('settings', (k) => { if (k === 'fps' || k === 'snap' || k === 'autoKey') { fpsSel.value = String(fps()); syncBar(); draw(); } });
-  app.on('frame', () => { if (app.transport.playing) draw(); });
+  app.on('frame', () => { if (app.transport.playing) draw(false); });
   syncBar();
   resize();
   ui.fitTimeline = fit;

@@ -119,6 +119,16 @@ export function detectHumanoid(root, bones) {
   }
   map.head = pick('head');
   map.neck = pick('neck');
+  // Rigify / some rigs: head and neck are just the top of the spine chain (spine.004-006)
+  if (!map.head && !map.neck && cands.spine && cands.spine.length >= 4) {
+    const chainTop = cands.spine.slice().sort((a, b) => depth(b) - depth(a))[0];
+    const armRootB = pick('leftShoulder') || pick('leftUpperArm');
+    // the head is the deepest spine bone above the shoulders
+    if (chainTop && (!armRootB || !isAncestor(chainTop, armRootB))) {
+      map.head = chainTop;
+      if (chainTop.parent && chainTop.parent.isBone && cands.spine.includes(chainTop.parent) && (!armRootB || !isAncestor(chainTop.parent, armRootB))) map.neck = chainTop.parent;
+    }
+  }
   // hips: named, or the common ancestor of both legs
   map.hips = pick('hips');
   const lul = map.leftUpperLeg, rul = map.rightUpperLeg;

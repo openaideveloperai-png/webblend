@@ -250,7 +250,7 @@ export class Viewport {
     dom.addEventListener('pointerup', (e) => {
       if (!down) return;
       const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
-      const wasGizmo = this.gizmo && this.gizmo.dragging;
+      const wasGizmo = this.gizmo && (this.gizmo.dragging || (this.gizmo.object && this.gizmo.axis));
       if (moved < 5 && down.button === 0 && !wasGizmo && !this.gizmoJustUsed) {
         if (this.viewHelper && this.handleViewHelperClick(e)) { down = null; return; }
         const hit = this.pick(e.clientX, e.clientY);
