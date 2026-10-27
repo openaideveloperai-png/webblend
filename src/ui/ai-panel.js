@@ -157,7 +157,7 @@ export function initAIPanel(app, ui) {
       thinking.remove();
       const added = applyResults(results);
       const made = (props || []).map((p) => (p.standalone ? `Made "${p.prop.name}".` : `Made "${p.prop.name}" and put it in ${p.model.name}'s ${p.prop.userData.hold.side} hand.`)).join(' ');
-      const text = (spec && spec.message ? spec.message + ' ' : '') + (made ? made + ' ' : '') + (results.length ? results.map((r) => `"${r.clip.name}" on ${r.model.name} (${r.clip.duration.toFixed(1)}s).`).join(' ') : props && props.length ? '' : 'No animation came back.') + (notes.length ? ' ' + notes.join(' ') : '');
+      const text = (spec && spec.message ? spec.message + ' ' : '') + (spec && spec.reviewed ? `(Looked it over: ${spec.reviewed.replace(/\.?$/, '.')}) ` : '') + (made ? made + ' ' : '') + (results.length ? results.map((r) => `"${r.clip.name}" on ${r.model.name} (${r.clip.duration.toFixed(1)}s).`).join(' ') : props && props.length ? '' : 'No animation came back.') + (notes.length ? ' ' + notes.join(' ') : '');
       const ok = results.length || (props && props.length);
       const el = msg('bot', text, ok ? '' : 'err');
       el.append(actions(added, prompt, false, props || []));

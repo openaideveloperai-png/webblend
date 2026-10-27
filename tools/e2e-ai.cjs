@@ -44,6 +44,10 @@ const KATANA = { message: 'A katana with gold flowers.', props: [{ name: 'Flower
   anchors: { grip: [], support: [], muzzle: [], eject: [], stock: [], sight: [] }, slide: '', slideTravel: 0, fireRate: 0, caliber: 'none', action: 'none' }],
   clips: [{ name: 'Katana slash', target: 'selected', duration: 2.4, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], handTouches: [], plantFeet: true, objectKeys: [], boneKeys: [],
     useProp: 'Flower katana', aimKeys: [{ t: 0, weight: 0, yaw: 0, pitch: 0 }, { t: 0.4, weight: 1, yaw: 0, pitch: 0 }], shots: [], swings: [{ t: 0.6, back: false }, { t: 1.4, back: true }] }] };
+// the self-review answer: same gun with fins added
+const RAYGUN_REVIEWED = { message: 'Added fins and a brighter emitter.', props: [{ ...RAYGUN.props[0],
+  materials: [...RAYGUN.props[0].materials, { name: 'fin', color: '#b3262e', metalness: 0.6, roughness: 0.35, emissive: '#000000', emissiveIntensity: 0, opacity: 1, texture: 'none' }],
+  parts: [...RAYGUN.props[0].parts, { name: 'fin', shape: 'extrude', material: 'fin', parent: '', pos: [0, 0.045, 0.0], rot: [0, 0, 0], dims: [0.003], axis: 'x', profile: [[-0.03, 0], [0.03, 0], [0.0, 0.03]], holes: [], bevel: 0.0005, segments: 0, variant: '', mirror: '' }] }] };
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 (async () => {
@@ -63,7 +67,8 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
         await route.fulfill({ status: 200, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }, body: JSON.stringify({ id: 'msg_r', type: 'message', role: 'assistant', model: body.model, stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 5, output_tokens: 5 }, content: [{ type: 'text', text: '- Retro ray guns: ~25 cm long, bulbous chrome body, glowing rings, wooden grip.' }] }) });
         return;
       }
-      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' }, body: sse(JSON.stringify(RAYGUN)) });
+      const text = JSON.stringify(body.messages);
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' }, body: sse(JSON.stringify(/senior 3D artist reviewing/.test(text) ? RAYGUN_REVIEWED : RAYGUN)) });
     });
     await page.goto('file://' + path.resolve(__dirname, '../index.html'));
     await page.waitForTimeout(1200);
@@ -77,29 +82,37 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
     await page.waitForFunction(() => !document.querySelector('.msg .thinking'), null, { timeout: 30000 });
     await page.waitForTimeout(300);
     const research = calls.find((b) => (b.tools || []).some((t) => /^web_search/.test(t.type)));
-    const main = calls.find((b) => b.output_config && b.output_config.format);
+    const isReview = (b) => /senior 3D artist reviewing/.test(JSON.stringify(b.messages));
+    const main = calls.find((b) => b.output_config && b.output_config.format && !isReview(b));
+    const review = calls.find((b) => isReview(b));
     ok('web research ran first with the web search tool', !!research && research.tools[0].type === 'web_search_20260209' && calls.indexOf(research) < calls.indexOf(main), research && JSON.stringify(research.tools));
     const mainContent = main && main.messages[0].content;
     ok('image sent to Claude as a base64 image block', Array.isArray(mainContent) && mainContent[0].type === 'image' && mainContent[0].source.media_type === 'image/jpeg' && mainContent[0].source.data.length > 50);
     const text = Array.isArray(mainContent) ? mainContent.find((c) => c.type === 'text').text : String(mainContent);
     ok('research notes and image note in the instructions', /WEB RESEARCH/.test(text) && /reference image/.test(text) && /PROPS/.test(text));
     ok('schema asks for props', main && main.output_config.format.schema.properties.props && main.output_config.format.schema.required.includes('props'));
+    const rc = review && review.messages[0].content;
+    const rText = Array.isArray(rc) ? rc.find((c) => c.type === 'text').text : '';
+    ok('self-review: Claude gets the reference image and a render of its model', Array.isArray(rc) && rc.filter((c) => c.type === 'image').length === 2 && calls.indexOf(review) > calls.indexOf(main), review ? `${rc.filter((c) => c.type === 'image').length} images` : 'no review call');
+    ok('self-review: inspection and its own JSON in the prompt', /Automatic inspection/.test(rText) && /size: /.test(rText) && /"Ray gun"/.test(rText) && /contact sheet/.test(rText) && review.output_config.format.schema.required.includes('props'));
     const st = await page.evaluate(() => {
       const a = window.webblend; const m = a.models[0];
       const gun = m.root.getObjectByName('Ray gun');
       const e = m.clips.find((c) => c.clip.name === 'Ray gun blast');
       let meshes = 0; if (gun) gun.traverse((o) => { if (o.isMesh) meshes++; });
       const names = e ? new Set(e.clip.tracks.map((t) => (m.root.getObjectByProperty('uuid', t.name.split('.')[0]) || {}).name)) : new Set();
-      return { gun: !!gun, parent: gun && gun.parent && gun.parent.name, hand: m.humanoid.map.rightHand.name, meshes, clip: !!e, flash: names.has('Muzzle flash'), tracer: [...names].some((n) => /^Tracer/.test(n || '')), msg: [...document.querySelectorAll('.msg.bot')].pop().textContent };
+      let fin = false; if (gun) gun.traverse((o) => { if (o.isMesh && o.material.name === 'fin') fin = true; });
+      return { fin, gun: !!gun, parent: gun && gun.parent && gun.parent.name, hand: m.humanoid.map.rightHand.name, meshes, clip: !!e, flash: names.has('Muzzle flash'), tracer: [...names].some((n) => /^Tracer/.test(n || '')), msg: [...document.querySelectorAll('.msg.bot')].pop().textContent };
     });
     ok('custom prop built and put in the right hand', st.gun && st.parent === st.hand && st.meshes >= 3, JSON.stringify({ parent: st.parent, meshes: st.meshes }));
     ok('clip uses the prop: muzzle flash and tracers', st.clip && st.flash && st.tracer, JSON.stringify(st));
     ok('message says what was made', /Ray gun/.test(st.msg) && /hand/.test(st.msg), st.msg.slice(0, 120));
+    ok('the reviewed model replaced the first draft', st.fin && /Looked it over: Added fins/.test(st.msg), st.msg.slice(0, 160));
     // the follow-up remembers this request
     await page.fill('#ai-prompt', 'now make it shoot faster and more times please');
     await page.press('#ai-prompt', 'Enter');
     await page.waitForFunction(() => !document.querySelector('.msg .thinking'), null, { timeout: 30000 });
-    const last = calls[calls.length - 1];
+    const last = calls.filter((b) => b.output_config && !isReview(b)).pop();
     const lastText = Array.isArray(last.messages[0].content) ? last.messages[0].content.find((c) => c.type === 'text').text : last.messages[0].content;
     ok('follow-up includes the earlier request', /EARLIER IN THIS SESSION/.test(lastText) && /ray gun/i.test(lastText) && /holding: "Ray gun"/.test(lastText));
     // removing from the log takes the prop away too

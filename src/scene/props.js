@@ -303,6 +303,132 @@ function orientOutward(g, zAt) {
   }
 }
 
+// ---------------------------------------------------------------- lofts and sweeps
+// rounded-rectangle-to-ellipse outline: roundness 0 = sharp box corners, 1 = ellipse
+function superOutline(a, b, roundness, n) {
+  const e = 2 / (2 + (1 - THREE.MathUtils.clamp(roundness, 0, 1)) * 10);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2, c = Math.cos(t), s = Math.sin(t);
+    out.push([(a / 2) * Math.sign(c) * Math.pow(Math.abs(c), e), (b / 2) * Math.sign(s) * Math.pow(Math.abs(s), e)]);
+  }
+  return out;
+}
+// along-axis frame: [axis direction, first cross axis, second cross axis]
+const LOFT_AXES = { y: [[0, 1, 0], [1, 0, 0], [0, 0, 1]], z: [[0, 0, 1], [1, 0, 0], [0, 1, 0]], x: [[1, 0, 0], [0, 0, 1], [0, 1, 0]] };
+
+// sections [[at, width, height, roundness, offsetW, offsetH], ...] skinned smoothly
+function loftGeometry(sections, axis, segs) {
+  const S = (sections || []).filter((s) => Array.isArray(s) && s.length >= 3 && s.slice(0, 3).every((v) => Number.isFinite(Number(v)))).map((s) => s.map(Number))
+    .map(([at, w, h, r = 1, ow = 0, oh = 0]) => ({ at, w: Math.abs(w), h: Math.abs(h), r: Number.isFinite(r) ? r : 1, ow: ow || 0, oh: oh || 0 }))
+    .sort((a, b) => a.at - b.at).slice(0, 40);
+  if (S.length < 2) return null;
+  const n = Math.max(8, segs);
+  // smooth in-between sections (Catmull-Rom through every value)
+  const sub = 6, rows = [];
+  const cr = (p0, p1, p2, p3, t) => 0.5 * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t + (-p0 + 3 * p1 - 3 * p2 + p3) * t * t * t);
+  for (let i = 0; i < S.length - 1; i++) {
+    const s0 = S[Math.max(0, i - 1)], s1 = S[i], s2 = S[i + 1], s3 = S[Math.min(S.length - 1, i + 2)];
+    for (let k = 0; k < sub; k++) {
+      const t = k / sub;
+      const v = (key) => cr(s0[key], s1[key], s2[key], s3[key], t);
+      rows.push({ at: s1.at + (s2.at - s1.at) * t, w: Math.max(0, v('w')), h: Math.max(0, v('h')), r: THREE.MathUtils.clamp(v('r'), 0, 1), ow: v('ow'), oh: v('oh') });
+    }
+  }
+  rows.push({ ...S[S.length - 1] });
+  const [A, U, V] = (LOFT_AXES[axis] || LOFT_AXES.y).map((a) => new THREE.Vector3(...a));
+  const pos = [], uv = [], idx = [];
+  const point = (at, cu, cv) => new THREE.Vector3().addScaledVector(A, at).addScaledVector(U, cu).addScaledVector(V, cv);
+  const len = rows[rows.length - 1].at - rows[0].at || 1;
+  rows.forEach((r, j) => {
+    const ring = superOutline(Math.max(r.w, 1e-6), Math.max(r.h, 1e-6), r.r, n);
+    for (let i = 0; i <= n; i++) {
+      const [a, b] = ring[i % n];
+      const q = point(r.at, a + r.ow, b + r.oh);
+      pos.push(q.x, q.y, q.z);
+      uv.push(i / n, (r.at - rows[0].at) / len);
+    }
+    if (j) for (let i = 0; i < n; i++) { const a = (j - 1) * (n + 1) + i, b = a + n + 1; idx.push(a, a + 1, b + 1, a, b + 1, b); }
+  });
+  // close the ends that have area
+  for (const [r, j, dir] of [[rows[0], 0, -1], [rows[rows.length - 1], rows.length - 1, 1]]) {
+    if (r.w < 1e-5 || r.h < 1e-5) continue;
+    const c = pos.length / 3, q = point(r.at, r.ow, r.oh);
+    pos.push(q.x, q.y, q.z); uv.push(0.5, j ? 1 : 0);
+    for (let i = 0; i < n; i++) { const a = j * (n + 1) + i; idx.push(...(dir > 0 ? [c, a, a + 1] : [c, a + 1, a])); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  // the axis frames don't all share a handedness: face the triangles outward
+  const det = new THREE.Matrix3().set(U.x, A.x, V.x, U.y, A.y, V.y, U.z, A.z, V.z).determinant();
+  if (det > 0) flipWinding(g);
+  g.computeVertexNormals();
+  let around = 0;
+  for (const r of rows) around = Math.max(around, Math.PI * (r.w + r.h) / 2);
+  g.userData.uvKind = 'wrap';
+  g.userData.uvSize = { around: around || 0.01, along: len };
+  return g;
+}
+
+function flipWinding(g) {
+  if (g.index) { const ix = g.index.array; for (let i = 0; i < ix.length; i += 3) { const t = ix[i + 1]; ix[i + 1] = ix[i + 2]; ix[i + 2] = t; } g.index.needsUpdate = true; return; }
+  for (const attr of Object.values(g.attributes)) {
+    const k = attr.itemSize, a = attr.array;
+    for (let i = 0; i < attr.count; i += 3) for (let c = 0; c < k; c++) { const t = a[(i + 1) * k + c]; a[(i + 1) * k + c] = a[(i + 2) * k + c]; a[(i + 2) * k + c] = t; }
+    attr.needsUpdate = true;
+  }
+}
+
+// a round (or flattened) tube along a smooth 3D path: cables, bent handles, bows, hoses, tails
+function sweepGeometry(path, dims, segs) {
+  const pts = (path || []).filter((p) => Array.isArray(p) && p.length >= 3 && p.slice(0, 3).every((v) => Number.isFinite(Number(v)))).map((p) => new THREE.Vector3(+p[0], +p[1], +p[2])).slice(0, 64);
+  for (let i = pts.length - 1; i > 0; i--) if (pts[i].distanceTo(pts[i - 1]) < 1e-6) pts.splice(i, 1);
+  if (pts.length < 2) return null;
+  const r0 = Math.abs(num(dims[0], 0.01)) || 0.01, r1 = Math.abs(num(dims[1], r0)) || r0, flat = THREE.MathUtils.clamp(Math.abs(num(dims[2], 1)) || 1, 0.05, 20);
+  const closed = pts.length > 3 && pts[0].distanceTo(pts[pts.length - 1]) < r0;
+  if (closed) pts.pop();
+  const curve = new THREE.CatmullRomCurve3(pts, closed, 'centripetal');
+  const L = curve.getLength();
+  const steps = THREE.MathUtils.clamp(Math.round(L / Math.max(r0, r1) * 2), pts.length * 6, 240);
+  const fr = curve.computeFrenetFrames(steps, closed);
+  const n = Math.max(6, segs);
+  const pos = [], uv = [], idx = [];
+  for (let j = 0; j <= steps; j++) {
+    const t = j / steps, c = curve.getPointAt(t), N = fr.normals[j], B = fr.binormals[j];
+    const r = r0 + (r1 - r0) * t;
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const q = c.clone().addScaledVector(N, Math.cos(a) * r).addScaledVector(B, Math.sin(a) * r * flat);
+      pos.push(q.x, q.y, q.z); uv.push(t, i / n);
+    }
+    if (j) for (let i = 0; i < n; i++) { const a = (j - 1) * (n + 1) + i, b = a + n + 1; idx.push(a, b, a + 1, b, b + 1, a + 1); }
+  }
+  if (!closed) {
+    for (const [j, sgn] of [[0, -1], [steps, 1]]) {
+      const c = curve.getPointAt(j / steps), cc = pos.length / 3;
+      pos.push(c.x, c.y, c.z); uv.push(j / steps, 0.5);
+      for (let i = 0; i < n; i++) { const a = j * (n + 1) + i; idx.push(...(sgn > 0 ? [cc, a, a + 1] : [cc, a + 1, a])); }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  // Frenet frames can be left- or right-handed along the curve: check one triangle against its outward direction
+  {
+    const p = g.attributes.position, a = new THREE.Vector3().fromBufferAttribute(p, idx[0]), b = new THREE.Vector3().fromBufferAttribute(p, idx[1]), c = new THREE.Vector3().fromBufferAttribute(p, idx[2]);
+    const nrm = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a));
+    const out = a.clone().add(b).add(c).multiplyScalar(1 / 3).sub(curve.getPointAt(0.5 / steps));
+    if (nrm.dot(out) < 0) flipWinding(g);
+  }
+  g.computeVertexNormals();
+  g.userData.uvKind = 'wrapAlong';
+  g.userData.uvSize = { around: Math.PI * 2 * Math.max(r0, r1), along: L };
+  return g;
+}
+
 export function partGeometry(p) {
   const d = Array.isArray(p.dims) ? p.dims.map((v) => Math.abs(num(v))) : [];
   const axis = ['x', 'y', 'z'].includes(p.axis) ? p.axis : 'y';
@@ -386,6 +512,14 @@ export function partGeometry(p) {
       AXIS_FROM_Y[axis](g);
       kind = 'wrapAlong'; size = { around: TAU * Math.min(r, R), along: Math.hypot(TAU * R * Math.abs(turns), len) };
       break;
+    }
+    case 'loft': {
+      // profile = sections [[at, width, height, roundness 0-1, offsetW, offsetH], ...] along "axis"
+      return loftGeometry(p.profile, axis, Math.max(segs, 24));
+    }
+    case 'sweep': {
+      // profile = path [[x, y, z], ...]; dims [radius, endRadius, height/width of the cross-section]
+      return sweepGeometry(p.profile, Array.isArray(p.dims) ? p.dims : [], Math.min(segs, 32));
     }
     case 'blade': {
       const dd = Array.isArray(p.dims) ? p.dims.map((v) => num(v)) : [];
@@ -474,6 +608,7 @@ function tileUV(e, tile) {
 }
 
 // ---------------------------------------------------------------- build
+const MIRROR = { x: new THREE.Matrix4().makeScale(-1, 1, 1), y: new THREE.Matrix4().makeScale(1, -1, 1), z: new THREE.Matrix4().makeScale(1, 1, -1) };
 const MOVING = /^(slide|bolt|trigger|hammer|magazine|mag|pump|forend|charging|cylinder_gun|barrel_move)/i;
 const vec3 = (a, d = [0, 0, 0]) => new THREE.Vector3(...(Array.isArray(a) && a.length >= 3 ? a.slice(0, 3).map((v) => num(v)) : d));
 
@@ -498,28 +633,53 @@ function partFrames(parts) {
   return { byName, worldOf };
 }
 
+// each part's bounding boxes in the prop frame (two when mirrored), null when it can't be built
+export function partBoxes(parts) {
+  const { worldOf } = partFrames(parts);
+  return parts.map((p) => {
+    const g = partGeometry(p);
+    if (!g) return null;
+    const out = [];
+    for (const m of [null, MIRROR[p.mirror] || null]) {
+      if (out.length && !m) continue;
+      const gg = m ? g.clone() : g;
+      gg.applyMatrix4(m ? worldOf(p).clone().premultiply(m) : worldOf(p));
+      gg.computeBoundingBox();
+      out.push(gg.boundingBox.clone());
+      if (gg !== g) gg.dispose();
+    }
+    g.dispose();
+    return out;
+  });
+}
+
+// groups of parts that touch each other (boxes within tol meters) -> arrays of part indices, biggest first
+export function connectedGroups(boxes, tol = 0.002, seed = null) {
+  const n = boxes.length, seen = new Array(n).fill(false), groups = [];
+  const touch = (i, j) => boxes[i].some((a) => boxes[j].some((b) => a.clone().expandByScalar(tol).intersectsBox(b)));
+  const order = seed ? [...seed, ...boxes.keys()] : [...boxes.keys()];
+  for (const start of order) {
+    if (seen[start] || !boxes[start]) continue;
+    const grp = [start]; seen[start] = true;
+    for (let k = 0; k < grp.length; k++) for (let j = 0; j < n; j++) if (!seen[j] && boxes[j] && touch(grp[k], j)) { seen[j] = true; grp.push(j); }
+    groups.push(grp);
+  }
+  return seed ? groups : groups.sort((a, b) => b.length - a.length);
+}
+
 // Extra parts added to a preset that touch nothing (neither the model nor a part that
 // does) -> their indices. Decorations made of loose shapes hovering over a blade.
 export function floatingParts(spec, firstExtra) {
   const parts = (spec.parts || []).filter((p) => p && p.shape).slice(0, 400);
   if (firstExtra >= parts.length) return [];
-  const { worldOf } = partFrames(parts);
-  const boxes = parts.map((p) => {
-    const g = partGeometry(p);
-    if (!g) return null;
-    g.applyMatrix4(worldOf(p));
-    g.computeBoundingBox();
-    const b = g.boundingBox.clone().expandByScalar(0.004);
-    g.dispose();
-    return b;
-  });
+  const boxes = partBoxes(parts).map((b) => (b ? b.map((x) => x.expandByScalar(0.002)) : null));
   const attached = new Set();
   for (let i = 0; i < firstExtra; i++) if (boxes[i]) attached.add(i);
   for (let grew = true; grew;) {
     grew = false;
     for (let i = firstExtra; i < parts.length; i++) {
       if (attached.has(i) || !boxes[i]) continue;
-      if ([...attached].some((j) => boxes[j].intersectsBox(boxes[i]))) { attached.add(i); grew = true; }
+      if ([...attached].some((j) => boxes[j].some((a) => boxes[i].some((b) => a.intersectsBox(b))))) { attached.add(i); grew = true; }
     }
   }
   const out = [];
@@ -558,7 +718,10 @@ export function buildProp(spec) {
     for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv', 'side'].includes(k)) g.deleteAttribute(k);
     if (!g.attributes.normal) g.computeVertexNormals();
     g.clearGroups();
-    entries.push({ p, g, mat: matOf(p.material), kind, size, box: kind === 'project' ? new THREE.Box3().setFromBufferAttribute(g.attributes.position) : null });
+    const e = { p, g, mat: matOf(p.material), kind, size, box: kind === 'project' ? new THREE.Box3().setFromBufferAttribute(g.attributes.position) : null };
+    entries.push(e);
+    // symmetric twin across the prop's center plane ("mirror": "x" = a left/right pair)
+    if (MIRROR[p.mirror]) entries.push({ ...e, g: g.clone(), mirror: MIRROR[p.mirror] });
   }
   // decorations: a band ("fit") is drawn at the proportions of the largest part it covers
   const decorated = new Map();
@@ -584,8 +747,10 @@ export function buildProp(spec) {
     const mover = movingRoot(p);
     // into the mover's frame (or the prop's)
     const M = worldOf(p).clone();
+    if (e.mirror) M.premultiply(e.mirror);
     if (mover) M.premultiply(worldOf(mover).clone().invert());
     g.applyMatrix4(M);
+    if (e.mirror) flipWinding(g);
     if (!dec || (!dec.fit && e.kind === 'project')) metricUV(g, (dec ? dec.tile : mat.userData.tile) || 0.05);
     const key = (mover ? mover.name : '') + '|' + (p.material || '');
     if (!groups.has(key)) groups.set(key, { mover, mat, geos: [] });

@@ -8,6 +8,7 @@ import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
 import { buildProp, presetSpec, findPresetIn, findStyleIn, decorateSpec, floatingParts, PROP_PRESETS, STYLE_NAMES, TEXTURES, PATTERN_NAMES, BLADE_VARIANTS } from '../scene/props.js';
 import { findDecorationIn, COLOR_WORDS } from '../scene/patterns.js';
+import { inspectProp, renderReview } from './model-review.js';
 
 // what Claude needs to place parts and decorations on the built-in models
 const PRESET_DOC = [
@@ -515,16 +516,7 @@ JSON FORMAT:
     "shots": [seconds, ...],
     "swings": [{"t": seconds, "back": false}]
   }],
-  "props": [{
-    "name": "e.g. Pistol", "holder": "model name, \"selected\", or \"none\"", "hand": "right"|"left",
-    "preset": "custom" or ${JSON.stringify(Object.keys(PROP_PRESETS))}, "style": "default" or ${JSON.stringify(STYLE_NAMES)},
-    "kind": "gun"|"melee"|"prop",
-    "materials": [{"name": "steel", "color": "#3a3d43", "metalness": 0.9, "roughness": 0.3, "emissive": "#000000", "emissiveIntensity": 0, "opacity": 1, "texture": one of ${JSON.stringify(TEXTURES)}}],
-    "parts": [{"name": "slide", "shape": "box|cylinder|cone|tube|sphere|capsule|torus|extrude|lathe|helix|blade", "material": "steel", "parent": "", "pos": [x,y,z], "rot": [x,y,z], "dims": [...], "axis": "x|y|z", "profile": [[u,v],...], "holes": [[[u,v],...]], "bevel": meters, "segments": 24, "variant": "" or ${JSON.stringify(BLADE_VARIANTS)}}],
-    "decorations": [{"material": "material name (a preset's or yours)", "pattern": "none" or ${JSON.stringify(PATTERN_NAMES.filter((x) => x !== 'none' && x !== 'svg'))}, "patternColor": "#e9c25a", "mapping": "fit"|"tile", "svg": "" or "<svg viewBox=...>...</svg>", "engrave": false}],
-    "anchors": {"grip": [x,y,z], "support": [], "muzzle": [], "eject": [], "stock": [], "sight": []},
-    "slide": "part that cycles when firing, or \"\"", "slideTravel": meters, "fireRate": shots per second, "caliber": "none|9mm|5.56|.308|12ga", "action": "none|semi|auto|pump|bolt"
-  }]
+  "props": ${this.propFormat()}
 }
 
 RULES
@@ -538,20 +530,103 @@ ${params}
 - boneKeys rotate a bone (degrees, local x/y/z) relative to its rest pose. Use them for tails, wings, tentacles, robots, creatures.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
-PROPS (3D models the user asks you to make: guns, swords, tools, items...). Leave "props" empty when none is needed.
-- Prefer a built-in preset when it fits: they are detailed, high-quality models (pistol, rifle, smg, sniper, shotgun, sword, katana, knife, bat). Recolor with "style", rename with "name", decorate with "decorations", and add extra hardware in "parts" (a suppressor, laser, scope, bayonet...) attached to the model in the preset's frame; leave materials empty to keep the preset's. Preset frames (meters) and material names:
-${PRESET_DOC}
-- Patterns, engravings, paint jobs and drawings ON a surface ("gold flower pattern on the blade", "dragon engraved on the slide", "pink camo", "her name written on it") are "decorations", never extra parts: parts floating over a surface look like loose discs. A decoration goes on one material (every part using it): pattern = a built-in pattern drawn in patternColor over the material's color; "hamon+flowers" layers patterns and "hamon:#ffffff+flowers:#e9c25a" gives each layer its color. mapping "fit" stretches one band along each part (u along its length, v across; on a blade v=1 is the edge) — use it for blades, drawings and anything placed; "tile" repeats the pattern at a fixed size (camo, scales, hex). For a picture, a logo, writing or a specific motif, draw it as "svg": compact SVG (under 6 KB, no scripts, no images, no external links), transparent background (the material's color shows through), viewBox shaped like the band (a katana blade is about 22:1, e.g. viewBox="0 0 2200 100"; a pistol slide about 8:1); paths, shapes, gradients and text are fine. engrave true also cuts the decoration into the surface (relief). The katana's blade already has a temper line ("hamon"); keep it under a new pattern with "hamon+...".
-- Custom blades: shape "blade" sweeps a real blade cross-section (spine, ridge and a sharp edge) along +Y from its pos, edge toward +Z: dims [length, width at the base, thickness, curve (meters the tip sweeps back toward the spine), tip length]; variant "katana" (single edge, ridge line, curved kissaki), "double" (double edge, pointed: swords, daggers, spear heads), "knife" (flat grind, drop point).
-- Otherwise use "custom" and build it from parts. Units are meters at real-world size. Prop frame: +Z forward (barrel, blade edge, front), +Y up, +X the prop's left. When held, the hand closes around the "grip" anchor with the fingers along +Z and the thumb toward +Y: a gun's barrel runs along +Z with the grip below it; a melee weapon's handle runs along Y with the blade toward +Y and the edge toward +Z.
-- Shapes and dims: box [width x, height y, depth z] (bevel = edge radius); cylinder/cone [radiusTop, radiusBottom, length] along "axis"; tube (hollow) [outerRadius, innerRadius, length]; sphere [rx, ry, rz]; capsule [radius, length]; torus [ringRadius, tubeRadius, arcDegrees] with "axis" = ring normal; extrude: a 2D outline "profile" [[u,v],...] (8-30 points, counterclockwise or clockwise) extruded by dims[0] (thickness), centered — axis "x" means the outline is the SIDE view (u = z forward, v = y up) extruded sideways: best for gun bodies, slides, stocks, grips, blades, magazines, axes; axis "y" = top view (u = x, v = z); axis "z" = front view (u = x, v = y); "holes" cut openings (trigger guards, windows); lathe: "profile" [[radius, height],...] spun around "axis" (barrels, muzzle devices, scopes, bottles, handles, pommels, lamps); helix [radius, wireRadius, length, turns] (springs, grip wraps). "pos" is the center (extrude/lathe: where their 0,0 is), "rot" degrees XYZ, "parent" = another part's name (then pos/rot are relative to it). Unused fields: [] / "" / 0.
-- Make it look high-grade: 30-120 parts. Get the silhouette right with extrude outlines and a 1-3 mm bevel, then add the details that sell it: seams and grooves (thin dark boxes), serrations, screws and pins, vents, rails, sights, buttons and levers, edge highlights, labels/inlays. 3-7 materials with believable PBR values (metal: metalness 0.8-1, roughness 0.2-0.45; plastic/polymer: metalness 0, roughness 0.5-0.75; rubber 0.9; glass opacity 0.4) and fitting textures (brushed or scratched metal, stipple on grips, knurled, wood, carbon, leather, glow for lights/energy).
-- Name parts that move "slide", "bolt", "pump", "trigger" or "magazine" (their children move with them). Anchors (prop frame, meters): grip = center of where the main hand holds; support = where the other hand holds ([] for one-handed items); muzzle = barrel tip; eject = ejection port; stock = rear end of a shoulder stock ([] for pistols); sight = a point on the sight line. Guns: set fireRate, caliber, action, slide and slideTravel.
-- holder: who holds it (a humanoid in the scene, "selected", or "none" to just place it in the scene).
-- To animate with a held prop set the clip's "useProp" to the prop's name. aimKeys weight 0 = relaxed, holding it at the side; 1 = aimed (guns: two-handed, on the line of sight; rifles shouldered; melee: guard stance), yaw/pitch = aim direction in degrees (+yaw = character's left, +pitch = up). "shots" = times the gun fires: recoil, muzzle flash, tracer, slide/bolt/pump cycling and ejected casings are added automatically; respect the gun's fire rate and aim first (weight 1 at least 0.2 s before the first shot). "swings" = melee slash start times ({back: true} = backhand). While aimed or swinging, the arms' humanoidKeys are ignored; legs/body keys and presets still apply (e.g. preset "walk" + aimKeys + shots to shoot while walking). Keep plantFeet true unless the legs should move.
+${this.propRules()}
 - Keep motions physically plausible and within joint limits (elbows/knees 0-150, head yaw within ±80).
 
 USER REQUEST: ${prompt}`;
+  }
+
+  // the JSON shape of one prop (shared by the first answer and the self-review)
+  propFormat() {
+    return `[{
+    "name": "e.g. Pistol", "holder": "model name, \\"selected\\", or \\"none\\"", "hand": "right"|"left",
+    "preset": "custom" or ${JSON.stringify(Object.keys(PROP_PRESETS))}, "style": "default" or ${JSON.stringify(STYLE_NAMES)},
+    "kind": "gun"|"melee"|"prop",
+    "removeParts": [names of preset parts to take off, e.g. "tsuba"],
+    "materials": [{"name": "steel", "color": "#3a3d43", "metalness": 0.9, "roughness": 0.3, "emissive": "#000000", "emissiveIntensity": 0, "opacity": 1, "texture": one of ${JSON.stringify(TEXTURES)}}],
+    "parts": [{"name": "slide", "shape": "box|cylinder|cone|tube|sphere|capsule|torus|extrude|lathe|loft|sweep|helix|blade", "material": "steel", "parent": "", "pos": [x,y,z], "rot": [x,y,z], "dims": [...], "axis": "x|y|z", "profile": [[...],...], "holes": [[[u,v],...]], "bevel": meters, "segments": 24, "variant": "" or ${JSON.stringify(BLADE_VARIANTS)}, "mirror": ""|"x"|"y"|"z"}],
+    "decorations": [{"material": "material name (a preset's or yours)", "pattern": "none" or ${JSON.stringify(PATTERN_NAMES.filter((x) => x !== 'none' && x !== 'svg'))}, "patternColor": "#e9c25a", "mapping": "fit"|"tile", "svg": "" or "<svg viewBox=...>...</svg>", "engrave": false}],
+    "anchors": {"grip": [x,y,z], "support": [], "muzzle": [], "eject": [], "stock": [], "sight": []},
+    "slide": "part that cycles when firing, or \\"\\"", "slideTravel": meters, "fireRate": shots per second, "caliber": "none|9mm|5.56|.308|12ga", "action": "none|semi|auto|pump|bolt"
+  }]`;
+  }
+
+  // how to build props well
+  propRules() {
+    return `PROPS (3D models the user asks you to make: weapons, tools, gadgets, items, armor, instruments, furniture, vehicles...). Leave "props" empty when none is needed.
+- Built-in presets (${Object.keys(PROP_PRESETS).join(', ')}) are detailed standard models. Use one only when the user wants that standard item: recolor it ("style"), rename it, decorate it ("decorations"), add hardware ("parts": a suppressor, a scope, a bayonet) or swap pieces ("removeParts" plus your own parts, e.g. a dragon-shaped tsuba). Extra parts must attach to the model. Preset frames (meters) and material names:
+${PRESET_DOC}
+- Anything more specific, a named real model (Desert Eagle, AK-47, M1911, Buster Sword...), a fantasy or sci-fi design, an unusual shape, or something with no preset: build it "custom", at the quality of a hero asset in a modern game. Never fall back to a plain preset for these.
+- MODELING METHOD for custom models:
+  1. Real-world size in meters (use the web research and reference images). Prop frame: +Z forward (barrel, blade edge, front), +Y up, +X the prop's left. When held, the hand closes around the "grip" anchor with the fingers along +Z and the thumb toward +Y: a gun's barrel runs along +Z with the grip below it; a melee weapon's handle runs along Y with the blade toward +Y and its edge toward +Z.
+  2. Block out the silhouette with a few big parts: side-view "extrude" outlines (12-40 points, curves sampled finely: these define most hard-surface objects), "loft" for rounded and organic bodies, "lathe" for anything round, "blade" for blades. Get proportions right before any detail.
+  3. Secondary forms: panels, steps and chamfers, guards, ribs, rails, caps, grips, handles. Bevel every hard edge (1-3 mm on hand-held items, 5-15 mm on big ones); nothing in the real world has razor edges except blades.
+  4. Fine detail that sells it: panel lines and seams (thin dark boxes standing 0.3-1 mm proud of the surface), screws, rivets and pins, vents and grooves, buttons, switches and levers, springs ("helix"), cables and hoses ("sweep"), lenses (glass), lights and energy (glow), and patterns, engravings, logos and writing as "decorations" (never as loose shapes).
+  5. Materials: 4-8 PBR materials with believable values (metal: metalness 0.8-1, roughness 0.15-0.45; painted metal: metalness 0.3-0.6; plastic/polymer: metalness 0, roughness 0.45-0.75; rubber 0.9; wood 0.5-0.7; glass opacity 0.3-0.5) and fitting textures (brushed or scratched metal, stipple or knurled grips, wood, leather, fabric, carbon, glow). Contrast them: a model in one flat color looks cheap.
+  6. Assembly: every part touches or slightly overlaps the part it attaches to: no gaps, nothing floating unless the user asked for it (a hovering crystal). Use "parent" for parts that belong together, "mirror" for left/right pairs (model one side only). Keep parts from poking through each other unless intended.
+  Aim for 60-200 parts on a hero prop (at least 40); every part should be there for a reason.
+- Shapes and dims: box [width x, height y, depth z] (bevel = edge radius); cylinder/cone [radiusTop, radiusBottom, length] along "axis"; tube (hollow) [outerRadius, innerRadius, length]; sphere [rx, ry, rz]; capsule [radius, length]; torus [ringRadius, tubeRadius, arcDegrees] with "axis" = ring normal; extrude: a 2D outline "profile" [[u,v],...] extruded by dims[0] (thickness), centered — axis "x" means the outline is the SIDE view (u = z forward, v = y up) extruded sideways: best for gun bodies, slides, stocks, grips, blades, magazines, axe heads; axis "y" = top view (u = x, v = z); axis "z" = front view (u = x, v = y); "holes" cut openings (trigger guards, windows); lathe: "profile" [[radius, height],...] spun around "axis" (barrels, muzzle devices, scopes, bottles, handles, pommels, lamps); loft: "profile" = cross-sections [[at, width, height, roundness 0-1, offsetW, offsetH], ...] along "axis", skinned smoothly (roundness 1 = ellipse, 0 = rectangle; for axis "z" width is x and height is y; for axis "y" width is x and height is z; for axis "x" width is z and height is y) — bodies, hulls, handles, horns, fuselages, gauntlets, anything that swells and tapers; sweep: "profile" = a path [[x,y,z], ...] (3-30 points, smoothed) and dims [radius, endRadius, height/width ratio] — cables, hoses, bent handles, bows, tails, wires, straps; helix [radius, wireRadius, length, turns] (springs, wraps); blade: a real blade cross-section (spine, ridge and a sharp edge) swept along +Y from its pos, edge toward +Z: dims [length, width at the base, thickness, curve (meters the tip sweeps back toward the spine), tip length], variant "katana" (single edge, ridge line, curved kissaki), "double" (double edge, pointed: swords, daggers, spear heads), "knife" (flat grind, drop point). "pos" is the center (extrude/lathe/loft/sweep: where their 0,0,0 is), "rot" degrees XYZ, "parent" = another part's name (then pos/rot are relative to it), "mirror" "x" adds a copy mirrored to the other side of the prop's center plane. Unused fields: [] / "" / 0.
+- Patterns, engravings, paint jobs and drawings ON a surface ("gold flower pattern on the blade", "dragon engraved on the slide", "pink camo", "her name written on it") are "decorations", never extra parts: parts floating over a surface look like loose discs. A decoration goes on one material (every part using it): pattern = a built-in pattern drawn in patternColor over the material's color; "hamon+flowers" layers patterns and "hamon:#ffffff+flowers:#e9c25a" gives each layer its color. mapping "fit" stretches one band along each part (u along its length, v across; on a blade v=1 is the edge) — use it for blades, drawings and anything placed; "tile" repeats the pattern at a fixed size (camo, scales, hex). For a picture, a logo, writing or a specific motif, draw it as "svg": compact SVG (under 6 KB, no scripts, no images, no external links), transparent background (the material's color shows through), viewBox shaped like the band (a katana blade is about 22:1, e.g. viewBox="0 0 2200 100"; a pistol slide about 8:1); paths, shapes, gradients and text are fine. engrave true also cuts the decoration into the surface (relief). The katana's blade already has a temper line ("hamon"); keep it under a new pattern with "hamon+...". Give a decorated part its own material when only that part should carry it.
+- Name parts that move "slide", "bolt", "pump", "trigger" or "magazine" (their children move with them). Anchors (prop frame, meters): grip = center of where the main hand holds; support = where the other hand holds ([] for one-handed items); muzzle = barrel tip or blade tip; eject = ejection port; stock = rear end of a shoulder stock ([] for pistols); sight = a point on the sight line. Guns: set fireRate, caliber, action, slide and slideTravel.
+- holder: who holds it (a humanoid in the scene, "selected", or "none" to just place it in the scene).
+- To animate with a held prop set the clip's "useProp" to the prop's name. aimKeys weight 0 = relaxed, holding it at the side; 1 = aimed (guns: two-handed, on the line of sight; rifles shouldered; melee: guard stance), yaw/pitch = aim direction in degrees (+yaw = character's left, +pitch = up). "shots" = times the gun fires: recoil, muzzle flash, tracer, slide/bolt/pump cycling and ejected casings are added automatically; respect the gun's fire rate and aim first (weight 1 at least 0.2 s before the first shot). "swings" = melee slash start times ({back: true} = backhand). While aimed or swinging, the arms' humanoidKeys are ignored; legs/body keys and presets still apply (e.g. preset "walk" + aimKeys + shots to shoot while walking). Keep plantFeet true unless the legs should move.${this.app.settings.get('aiReview') !== false ? '\n- After you answer, the app renders your model from four sides and shows it to you to check and improve, so build the complete model now.' : ''}`;
+  }
+
+  propItemSchema() {
+    return {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name', 'holder', 'hand', 'preset', 'style', 'kind', 'removeParts', 'materials', 'parts', 'decorations', 'anchors', 'slide', 'slideTravel', 'fireRate', 'caliber', 'action'],
+      properties: {
+        name: { type: 'string' },
+        holder: { type: 'string' },
+        hand: { type: 'string', enum: ['right', 'left'] },
+        preset: { type: 'string', enum: ['custom', ...Object.keys(PROP_PRESETS)] },
+        style: { type: 'string', enum: ['default', ...STYLE_NAMES] },
+        kind: { type: 'string', enum: ['gun', 'melee', 'prop'] },
+        removeParts: { type: 'array', items: { type: 'string' } },
+        materials: {
+          type: 'array',
+          items: {
+            type: 'object', additionalProperties: false, required: ['name', 'color', 'metalness', 'roughness', 'emissive', 'emissiveIntensity', 'opacity', 'texture'],
+            properties: { name: { type: 'string' }, color: { type: 'string' }, metalness: { type: 'number' }, roughness: { type: 'number' }, emissive: { type: 'string' }, emissiveIntensity: { type: 'number' }, opacity: { type: 'number' }, texture: { type: 'string', enum: TEXTURES } },
+          },
+        },
+        parts: {
+          type: 'array',
+          items: {
+            type: 'object', additionalProperties: false, required: ['name', 'shape', 'material', 'parent', 'pos', 'rot', 'dims', 'axis', 'profile', 'holes', 'bevel', 'segments', 'variant', 'mirror'],
+            properties: {
+              name: { type: 'string' }, shape: { type: 'string', enum: ['box', 'cylinder', 'cone', 'tube', 'sphere', 'capsule', 'torus', 'extrude', 'lathe', 'loft', 'sweep', 'helix', 'blade'] },
+              variant: { type: 'string', enum: ['', ...BLADE_VARIANTS] },
+              mirror: { type: 'string', enum: ['', 'x', 'y', 'z'] },
+              material: { type: 'string' }, parent: { type: 'string' },
+              pos: { type: 'array', items: { type: 'number' } }, rot: { type: 'array', items: { type: 'number' } }, dims: { type: 'array', items: { type: 'number' } },
+              axis: { type: 'string', enum: ['x', 'y', 'z'] },
+              profile: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
+              holes: { type: 'array', items: { type: 'array', items: { type: 'array', items: { type: 'number' } } } },
+              bevel: { type: 'number' }, segments: { type: 'number' },
+            },
+          },
+        },
+        decorations: {
+          type: 'array',
+          items: {
+            type: 'object', additionalProperties: false, required: ['material', 'pattern', 'patternColor', 'mapping', 'svg', 'engrave'],
+            properties: { material: { type: 'string' }, pattern: { type: 'string' }, patternColor: { type: 'string' }, mapping: { type: 'string', enum: ['fit', 'tile'] }, svg: { type: 'string' }, engrave: { type: 'boolean' } },
+          },
+        },
+        anchors: {
+          type: 'object', additionalProperties: false, required: ['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'],
+          properties: Object.fromEntries(['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'].map((k) => [k, { type: 'array', items: { type: 'number' } }])),
+        },
+        slide: { type: 'string' },
+        slideTravel: { type: 'number' },
+        fireRate: { type: 'number' },
+        caliber: { type: 'string', enum: ['none', '9mm', '5.56', '.308', '12ga'] },
+        action: { type: 'string', enum: ['none', 'semi', 'auto', 'pump', 'bolt'] },
+      },
+    };
   }
 
   schema() {
@@ -613,61 +688,7 @@ USER REQUEST: ${prompt}`;
             },
           },
         },
-        props: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['name', 'holder', 'hand', 'preset', 'style', 'kind', 'materials', 'parts', 'decorations', 'anchors', 'slide', 'slideTravel', 'fireRate', 'caliber', 'action'],
-            properties: {
-              name: { type: 'string' },
-              holder: { type: 'string' },
-              hand: { type: 'string', enum: ['right', 'left'] },
-              preset: { type: 'string', enum: ['custom', ...Object.keys(PROP_PRESETS)] },
-              style: { type: 'string', enum: ['default', ...STYLE_NAMES] },
-              kind: { type: 'string', enum: ['gun', 'melee', 'prop'] },
-              materials: {
-                type: 'array',
-                items: {
-                  type: 'object', additionalProperties: false, required: ['name', 'color', 'metalness', 'roughness', 'emissive', 'emissiveIntensity', 'opacity', 'texture'],
-                  properties: { name: { type: 'string' }, color: { type: 'string' }, metalness: { type: 'number' }, roughness: { type: 'number' }, emissive: { type: 'string' }, emissiveIntensity: { type: 'number' }, opacity: { type: 'number' }, texture: { type: 'string', enum: TEXTURES } },
-                },
-              },
-              parts: {
-                type: 'array',
-                items: {
-                  type: 'object', additionalProperties: false, required: ['name', 'shape', 'material', 'parent', 'pos', 'rot', 'dims', 'axis', 'profile', 'holes', 'bevel', 'segments', 'variant'],
-                  properties: {
-                    name: { type: 'string' }, shape: { type: 'string', enum: ['box', 'cylinder', 'cone', 'tube', 'sphere', 'capsule', 'torus', 'extrude', 'lathe', 'helix', 'blade'] },
-                    variant: { type: 'string', enum: ['', ...BLADE_VARIANTS] },
-                    material: { type: 'string' }, parent: { type: 'string' },
-                    pos: { type: 'array', items: { type: 'number' } }, rot: { type: 'array', items: { type: 'number' } }, dims: { type: 'array', items: { type: 'number' } },
-                    axis: { type: 'string', enum: ['x', 'y', 'z'] },
-                    profile: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
-                    holes: { type: 'array', items: { type: 'array', items: { type: 'array', items: { type: 'number' } } } },
-                    bevel: { type: 'number' }, segments: { type: 'number' },
-                  },
-                },
-              },
-              decorations: {
-                type: 'array',
-                items: {
-                  type: 'object', additionalProperties: false, required: ['material', 'pattern', 'patternColor', 'mapping', 'svg', 'engrave'],
-                  properties: { material: { type: 'string' }, pattern: { type: 'string' }, patternColor: { type: 'string' }, mapping: { type: 'string', enum: ['fit', 'tile'] }, svg: { type: 'string' }, engrave: { type: 'boolean' } },
-                },
-              },
-              anchors: {
-                type: 'object', additionalProperties: false, required: ['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'],
-                properties: Object.fromEntries(['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'].map((k) => [k, { type: 'array', items: { type: 'number' } }])),
-              },
-              slide: { type: 'string' },
-              slideTravel: { type: 'number' },
-              fireRate: { type: 'number' },
-              caliber: { type: 'string', enum: ['none', '9mm', '5.56', '.308', '12ga'] },
-              action: { type: 'string', enum: ['none', 'semi', 'auto', 'pump', 'bolt'] },
-            },
-          },
-        },
+        props: { type: 'array', items: this.propItemSchema() },
       },
     };
   }
@@ -741,42 +762,120 @@ USER REQUEST: ${prompt}`;
 
   async askClaude(prompt, { signal, onText, images, onStatus } = {}) {
     const provider = this.provider();
+    if (provider !== 'claude-ai' && provider !== 'api') throw new Error('No Claude connection available');
     const imgs = (images || []).slice(0, 5);
+    let research = '';
+    if (provider === 'api' && this.app.settings.get('aiWebSearch') !== false && this.wantsResearch(prompt)) {
+      try { research = await this.research(prompt, imgs.length ? await AIAssistant.imageBlocks(imgs) : [], { signal, onStatus }); } catch (e) { if (signal?.aborted) throw e; console.warn('web research failed', e); }
+      onStatus?.(research ? 'Found references. Claude is modeling…' : 'Claude is modeling…');
+    }
+    const full = this.instructions(prompt, { images: imgs.length, research });
+    const modeling = wantsCustomModel(prompt) || !!(parsePropRequest(prompt) || {}).make;
+    let spec = await this.callClaude(full, { signal, images: imgs, schema: this.schema(), onText, modeling });
+    if (this.app.settings.get('aiReview') !== false) {
+      try { spec = await this.reviewModels(prompt, spec, { signal, onStatus, images: imgs, research }); } catch (e) { if (signal?.aborted || e?.code === 'cancelled') throw e; console.warn('model review failed', e); }
+    }
+    return spec;
+  }
+
+  // one request -> parsed JSON (claude.ai account or API key)
+  async callClaude(text, { signal, images = [], schema, onText, modeling = false } = {}) {
+    const provider = this.provider();
     if (provider === 'claude-ai') {
-      const full = this.instructions(prompt, { images: imgs.length });
-      const opts = { signal, onText: onText ? ({ text }) => onText(text) : undefined, cache: false };
-      if (imgs.length) opts.images = imgs;
-      return await this.sample.json(full, opts);
+      const opts = { signal, onText: onText ? ({ text: t }) => onText(t) : undefined, cache: false };
+      if (images.length) opts.images = images;
+      // models come out better from the most capable model
+      if (modeling) opts.modelTier = 'complex';
+      return await this.sample.json(text, opts);
     }
-    if (provider === 'api') {
-      const client = new Anthropic({ apiKey: this.app.settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1 });
-      const model = this.app.settings.get('aiModel') || 'claude-opus-5-5';
-      const supportsFallback = /^claude-(opus-5|fable-5|sonnet-5-5)/.test(model);
-      const imageBlocks = imgs.length ? await AIAssistant.imageBlocks(imgs) : [];
-      let research = '';
-      if (this.app.settings.get('aiWebSearch') !== false && this.wantsResearch(prompt)) {
-        try { research = await this.research(prompt, imageBlocks, { signal, onStatus }); } catch (e) { if (signal?.aborted) throw e; console.warn('web research failed', e); }
-        onStatus?.(research ? 'Found references. Claude is modeling…' : 'Claude is modeling…');
-      }
-      const full = this.instructions(prompt, { images: imageBlocks.length, research });
-      const req = {
-        model,
-        max_tokens: 64000,
-        output_config: { effort: this.app.settings.get('aiEffort') || 'medium', format: { type: 'json_schema', schema: this.schema() } },
-        messages: [{ role: 'user', content: imageBlocks.length ? [...imageBlocks, { type: 'text', text: full }] : full }],
-      };
-      if (supportsFallback) { req.betas = ['server-side-fallback-2026-07-01']; req.fallbacks = 'default'; }
-      const stream = supportsFallback ? client.beta.messages.stream(req, { signal }) : client.messages.stream(req, { signal });
-      let text = '';
-      stream.on('text', (d) => { text += d; onText?.(text); });
-      const msg = await stream.finalMessage();
-      if (msg.stop_reason === 'refusal') throw new Error('Claude declined this request. Try describing the motion differently.');
-      if (msg.stop_reason === 'max_tokens') throw new Error('The answer was too long. Ask for a shorter or simpler animation.');
-      const block = msg.content.find((b) => b.type === 'text');
-      if (!block) throw new Error('Claude returned no text.');
-      return parseJSONLoose(block.text);
+    const client = new Anthropic({ apiKey: this.app.settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1 });
+    const model = this.app.settings.get('aiModel') || 'claude-opus-5-5';
+    const supportsFallback = /^claude-(opus-5|fable-5|sonnet-5-5)/.test(model);
+    const blocks = images.length ? await AIAssistant.imageBlocks(images) : [];
+    const req = {
+      model,
+      max_tokens: 64000,
+      output_config: { effort: this.effortFor(modeling), format: { type: 'json_schema', schema } },
+      messages: [{ role: 'user', content: blocks.length ? [...blocks, { type: 'text', text }] : text }],
+    };
+    if (supportsFallback) { req.betas = ['server-side-fallback-2026-07-01']; req.fallbacks = 'default'; }
+    const stream = supportsFallback ? client.beta.messages.stream(req, { signal }) : client.messages.stream(req, { signal });
+    let out = '';
+    stream.on('text', (d) => { out += d; onText?.(out); });
+    const msg = await stream.finalMessage();
+    if (msg.stop_reason === 'refusal') throw new Error('Claude declined this request. Try describing it differently.');
+    if (msg.stop_reason === 'max_tokens') throw new Error('The answer was too long. Ask for something shorter or simpler.');
+    const block = msg.content.find((b) => b.type === 'text');
+    if (!block) throw new Error('Claude returned no text.');
+    return parseJSONLoose(block.text);
+  }
+
+  // building a model takes care: "auto" thinks harder for models than for motion
+  effortFor(modeling) {
+    const e = this.app.settings.get('aiEffort') || 'auto';
+    return e === 'auto' ? (modeling ? 'high' : 'medium') : e;
+  }
+
+  // props worth a second look: custom models, and presets Claude added to or changed
+  reviewable(spec) {
+    return ((spec && spec.props) || []).filter((ps) => ps && Array.isArray(ps.parts) && (ps.parts.length || (ps.removeParts || []).length)).slice(0, 2);
+  }
+
+  // Build Claude's models off-screen, render them from four sides, inspect them, and let
+  // Claude fix what it sees. Returns the spec with the improved props swapped in.
+  async reviewModels(prompt, spec, { signal, onStatus, images = [], research = '' } = {}) {
+    const targets = this.reviewable(spec);
+    if (!targets.length) return spec;
+    onStatus?.('Claude is checking the model…');
+    const canSee = await this.canSendImages();
+    const sheets = [], reports = [];
+    for (const ps of targets) {
+      const { def } = this.propDef(ps);
+      const prop = buildProp(def);
+      const report = inspectProp(def, prop);
+      let sheet = null;
+      if (canSee) sheet = await renderReview(prop);
+      prop.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+      if (sheet) sheets.push(sheet);
+      reports.push({ ps, report, sheet: !!sheet });
     }
-    throw new Error('No Claude connection available');
+    if (!sheets.length && !reports.some((r) => r.report.issues)) return spec;
+    if (signal?.aborted) throw Object.assign(new Error('Stopped.'), { code: 'cancelled' });
+    const refs = canSee ? images.slice(0, Math.max(0, 5 - sheets.length)) : [];
+    const text = this.reviewPrompt(prompt, reports, { refs: refs.length, research });
+    const answer = await this.callClaude(text, {
+      signal, images: [...refs, ...sheets], schema: this.reviewSchema(), modeling: true,
+      onText: (t) => onStatus?.(`Claude is refining the model… (${Math.round(t.length / 100) / 10}k chars)`),
+    });
+    const better = (answer && Array.isArray(answer.props) ? answer.props : []).filter((p) => p && Array.isArray(p.parts) && p.parts.length);
+    if (!better.length) return spec;
+    const props = spec.props.map((ps) => {
+      if (!targets.includes(ps)) return ps;
+      const nb = better.find((b) => String(b.name).toLowerCase() === String(ps.name).toLowerCase()) || (targets.length === 1 && better.length === 1 ? better[0] : null);
+      // the new version keeps who holds it and its name (clips refer to it)
+      return nb ? { ...nb, name: ps.name, holder: ps.holder, hand: ps.hand } : ps;
+    });
+    return { ...spec, props, reviewed: answer.message ? String(answer.message).slice(0, 300) : 'Checked and refined the model.' };
+  }
+
+  reviewPrompt(prompt, reports, { refs = 0, research = '' } = {}) {
+    const sheets = reports.filter((r) => r.sheet).length;
+    const pics = [refs ? `the user's ${refs} reference image(s) first` : '', sheets ? `then ${sheets} contact sheet(s) of your model${sheets > 1 ? 's' : ''} as the app renders ${sheets > 1 ? 'them' : 'it'} (in the order below)` : ''].filter(Boolean).join(', ');
+    return `You are a senior 3D artist reviewing props you just modeled for a browser 3D animation tool, for this request: "${prompt}".
+${research ? `\nWEB RESEARCH:\n${research}\n` : ''}${pics ? `\nImages: ${pics}. Each sheet shows the right side, front, top and a three-quarter view on a 10 cm grid; dots mark the anchors (green grip, blue support hand, red muzzle/tip).\n` : ''}
+For each prop: compare it with the real object or the requested design (and the reference images). Look for wrong proportions or silhouette, parts floating or with gaps, parts poking through or misplaced, wrong orientation in the prop frame, flat or blocky areas, too little detail, materials that are dull or all the same, missing recognizable features, missing decorations, anchors off the model. Then return the COMPLETE improved prop (every part, not a diff), with the same name. Fix every problem the inspection lists. If it is already good, add the detail that would make it great. Reply with ONE JSON object only: {"message": "one short sentence on what you improved", "props": ${this.propFormat()}}
+
+${this.propRules()}
+
+${reports.map((r, i) => `PROP ${i + 1}: "${r.ps.name}"${r.sheet ? ' (contact sheet ' + (reports.slice(0, i + 1).filter((x) => x.sheet).length) + ')' : ' (no render available)'}
+Automatic inspection:
+${r.report.text}
+Your current JSON:
+${JSON.stringify(r.ps)}`).join('\n\n')}`;
+  }
+
+  reviewSchema() {
+    return { type: 'object', additionalProperties: false, required: ['message', 'props'], properties: { message: { type: 'string' }, props: { type: 'array', items: this.propItemSchema() } } };
   }
 
   static errorText(e) {
@@ -792,49 +891,70 @@ USER REQUEST: ${prompt}`;
     return e?.message || String(e);
   }
 
+  // one of Claude's "props" -> the spec buildProp takes (+ notes about what was left out)
+  propDef(ps) {
+    const notes = [];
+    const vec = (a) => (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((v) => Number.isFinite(Number(v))) ? a.slice(0, 3).map(Number) : null);
+    const style = ps.style && ps.style !== 'default' ? ps.style : undefined;
+    const clampDims = (parts) => (parts || []).filter((x) => x && x.shape).slice(0, 400).map((x) => ({ ...x, dims: (x.dims || []).map((v) => Math.max(-20, Math.min(20, Number(v) || 0))) }));
+    let def;
+    if (ps.preset && ps.preset !== 'custom' && PROP_PRESETS[ps.preset]) {
+      def = presetSpec(ps.preset, { style, name: ps.name || undefined });
+      // swap out preset parts (and what hangs on them) for Claude's own
+      const drop = new Set((ps.removeParts || []).map((n) => String(n).toLowerCase()).filter(Boolean));
+      if (drop.size) {
+        const before = def.parts.length;
+        const gone = new Set();
+        for (let grew = true; grew;) {
+          grew = false;
+          for (const p of def.parts) if (!gone.has(p) && (drop.has(String(p.name).toLowerCase()) || [...gone].some((g) => g.name && g.name === p.parent))) { gone.add(p); grew = true; }
+        }
+        def.parts = def.parts.filter((p) => !gone.has(p));
+        if (before === def.parts.length) notes.push(`(No preset parts matched ${[...drop].map((n) => `"${n}"`).join(', ')}.)`);
+      }
+      if (ps.parts && ps.parts.length) {
+        const first = def.parts.length;
+        def.parts = [...def.parts, ...clampDims(ps.parts)];
+        // extra parts must attach to the model: loose shapes floating around it are dropped
+        const loose = new Set(floatingParts(def, first));
+        if (loose.size) {
+          def.parts = def.parts.filter((_, i) => !loose.has(i));
+          notes.push(`Left out ${loose.size} loose part${loose.size > 1 ? 's' : ''} that didn't touch the ${def.name.toLowerCase()}.`);
+        }
+      }
+      if (ps.materials && ps.materials.length) {
+        const names = new Set(ps.materials.map((m) => m.name));
+        def.materials = [...def.materials.filter((m) => !names.has(m.name)), ...ps.materials];
+      }
+    } else {
+      const anchors = {};
+      for (const [k, v] of Object.entries(ps.anchors || {})) { const a = vec(v); if (a) anchors[k] = a; }
+      def = {
+        name: ps.name || 'Prop', kind: ps.kind || 'prop', preset: 'custom', materials: (ps.materials || []).map((m) => ({ ...m })), parts: clampDims(ps.parts), anchors,
+        slide: ps.slide || '', slideTravel: Number(ps.slideTravel) || 0, fireRate: Number(ps.fireRate) || 0,
+        caliber: ps.caliber && ps.caliber !== 'none' ? ps.caliber : (ps.kind === 'gun' ? '9mm' : null), action: ps.action && ps.action !== 'none' ? ps.action : null, auto: ps.action === 'auto',
+      };
+    }
+    for (const d of (ps.decorations || []).slice(0, 8)) {
+      if (!d) continue;
+      const pattern = d.pattern && d.pattern !== 'none' ? d.pattern : '';
+      const svg = typeof d.svg === 'string' && d.svg.includes('<svg') ? d.svg.slice(0, 60000) : '';
+      if (!pattern && !svg) continue;
+      decorateSpec(def, { material: d.material || '', pattern, patternColor: d.patternColor || undefined, mapping: d.mapping === 'tile' || d.mapping === 'fit' ? d.mapping : undefined, svg, engrave: !!d.engrave });
+    }
+    return { def, notes };
+  }
+
   // Claude's "props" -> models in hands (or standing in the scene)
   buildProps(spec) {
     const app = this.app;
     const out = [], notes = [];
-    const vec = (a) => (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((v) => Number.isFinite(Number(v))) ? a.slice(0, 3).map(Number) : null);
     for (const ps of ((spec && spec.props) || []).slice(0, 6)) {
       if (!ps) continue;
       try {
-        const style = ps.style && ps.style !== 'default' ? ps.style : undefined;
-        const clampDims = (parts) => (parts || []).filter((x) => x && x.shape).slice(0, 400).map((x) => ({ ...x, dims: (x.dims || []).map((v) => Math.max(-20, Math.min(20, Number(v) || 0))) }));
-        let def;
-        if (ps.preset && ps.preset !== 'custom' && PROP_PRESETS[ps.preset]) {
-          def = presetSpec(ps.preset, { style, name: ps.name || undefined });
-          if (ps.parts && ps.parts.length) {
-            const first = def.parts.length;
-            def.parts = [...def.parts, ...clampDims(ps.parts)];
-            // extra parts must attach to the model: loose shapes floating around it are dropped
-            const loose = new Set(floatingParts(def, first));
-            if (loose.size) {
-              def.parts = def.parts.filter((_, i) => !loose.has(i));
-              notes.push(`Left out ${loose.size} loose part${loose.size > 1 ? 's' : ''} that didn't touch the ${def.name.toLowerCase()}.`);
-            }
-          }
-          if (ps.materials && ps.materials.length) {
-            const names = new Set(ps.materials.map((m) => m.name));
-            def.materials = [...def.materials.filter((m) => !names.has(m.name)), ...ps.materials];
-          }
-        } else {
-          const anchors = {};
-          for (const [k, v] of Object.entries(ps.anchors || {})) { const a = vec(v); if (a) anchors[k] = a; }
-          def = {
-            name: ps.name || 'Prop', kind: ps.kind || 'prop', preset: 'custom', materials: ps.materials || [], parts: clampDims(ps.parts), anchors,
-            slide: ps.slide || '', slideTravel: Number(ps.slideTravel) || 0, fireRate: Number(ps.fireRate) || 0,
-            caliber: ps.caliber && ps.caliber !== 'none' ? ps.caliber : (ps.kind === 'gun' ? '9mm' : null), action: ps.action && ps.action !== 'none' ? ps.action : null, auto: ps.action === 'auto',
-          };
-        }
-        for (const d of (ps.decorations || []).slice(0, 8)) {
-          if (!d) continue;
-          const pattern = d.pattern && d.pattern !== 'none' ? d.pattern : '';
-          const svg = typeof d.svg === 'string' && d.svg.includes('<svg') ? d.svg.slice(0, 60000) : '';
-          if (!pattern && !svg) continue;
-          decorateSpec(def, { material: d.material || '', pattern, patternColor: d.patternColor || undefined, mapping: d.mapping === 'tile' || d.mapping === 'fit' ? d.mapping : undefined, svg, engrave: !!d.engrave });
-        }
+        const made = this.propDef(ps);
+        const def = made.def;
+        notes.push(...made.notes);
         const prop = buildProp(def);
         let meshes = 0;
         prop.traverse((o) => { if (o.isMesh) meshes++; });

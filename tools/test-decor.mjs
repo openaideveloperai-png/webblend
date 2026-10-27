@@ -21,6 +21,32 @@ for (const v of ['katana', 'double', 'knife']) {
   ok(`${v} blade: closed, outward (${(vol * 1e6).toFixed(1)} cm³), ${s.y.toFixed(2)} m long, sharp edge`, finite && vol > 0 && s.y > 0.1 && edgeX < 0.0006, `edge half-thickness ${(edgeX * 1000).toFixed(2)} mm`);
 }
 
+// lofts and sweeps: closed and facing outward along every axis; mirrored twins too
+const vol = (g) => {
+  const p = g.attributes.position, ix = g.index ? g.index.array : [...Array(p.count).keys()];
+  let v = 0; const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  for (let i = 0; i < ix.length; i += 3) { a.fromBufferAttribute(p, ix[i]); b.fromBufferAttribute(p, ix[i + 1]); c.fromBufferAttribute(p, ix[i + 2]); v += a.dot(b.clone().cross(c)) / 6; }
+  return v;
+};
+for (const axis of ['x', 'y', 'z']) {
+  const g = partGeometry({ shape: 'loft', axis, profile: [[0, 0.04, 0.02, 1], [0.05, 0.06, 0.03, 0.5, 0.005, 0], [0.1, 0.02, 0.02, 0]] });
+  g.computeBoundingBox();
+  const s = g.boundingBox.getSize(new THREE.Vector3());
+  const along = { x: s.x, y: s.y, z: s.z }[axis];
+  ok(`loft along ${axis}: closed, outward, ${(along * 100).toFixed(0)} cm long`, vol(g) > 0 && Math.abs(along - 0.1) < 1e-6 && [...g.attributes.normal.array].every(Number.isFinite), `vol ${(vol(g) * 1e6).toFixed(1)} cm³`);
+}
+for (const path of [[[0, 0, 0], [0, 0.1, 0.05], [0.05, 0.2, 0]], [[0, 0, 0], [0.1, 0, 0], [0.1, 0, 0.1], [0, 0, 0.1], [0, 0, 0]]]) {
+  const g = partGeometry({ shape: 'sweep', profile: path, dims: [0.01, 0.006, 1] });
+  ok(`sweep (${path.length} points${path.length === 5 ? ', closed loop' : ''}) faces outward`, g && vol(g) > 0, g && `vol ${(vol(g) * 1e6).toFixed(2)} cm³`);
+}
+{
+  const prop = buildProp({ name: 'm', materials: [{ name: 'a' }], parts: [{ name: 'wing', shape: 'extrude', material: 'a', axis: 'x', dims: [0.004], pos: [0.05, 0, 0], profile: [[0, 0], [0.1, 0], [0, 0.05]], mirror: 'x' }] });
+  const mesh = prop.children.find((o) => o.isMesh);
+  mesh.geometry.computeBoundingBox();
+  const bb = mesh.geometry.boundingBox;
+  ok('mirror "x" adds the twin on the other side, both closed and outward', Math.abs(bb.min.x + bb.max.x) < 1e-6 && bb.min.x < -0.04 && vol(mesh.geometry) > 0, `x ${bb.min.x.toFixed(3)}..${bb.max.x.toFixed(3)}`);
+}
+
 // every preset still builds; with flowers they put them where they belong
 const where = {};
 for (const key of Object.keys(PROP_PRESETS)) {

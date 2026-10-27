@@ -30,7 +30,7 @@ export const DEFAULTS = {
   importLights: false,
   aiProvider: 'auto', // auto | claude-ai | api | offline
   aiModel: 'claude-opus-5-5',
-  aiEffort: 'medium',
+  aiEffort: 'auto',
   rememberKey: false,
   bgColor: '#2a2f38',
   pickMode: 'object', // object | model
@@ -38,6 +38,7 @@ export const DEFAULTS = {
   undoLimit: 80,
   aiAlwaysClaude: false,
   aiWebSearch: true,
+  aiReview: true,
   demoScene: true,
 };
 
