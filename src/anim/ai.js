@@ -6,8 +6,8 @@
 import * as THREE from 'three';
 import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
-import { buildProp, presetSpec, findPresetIn, findStyleIn, PROP_PRESETS } from '../scene/props.js';
-import { attachProp, detachProp, bakeHoldClip, heldProps, recoilOf } from './props-anim.js';
+import { buildProp, presetSpec, findPresetIn, findStyleIn, PROP_PRESETS, STYLE_NAMES, TEXTURES } from '../scene/props.js';
+import { attachProp, detachProp, bakeHoldClip, heldProps, recoilOf, holdDriver, addShotEffects } from './props-anim.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
 import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS } from './humanoid.js';
@@ -192,7 +192,25 @@ const FILLER = new Set(('make let have get do does please can could would you i 
   + 'once twice thrice two three four five six seven eight nine ten for of on at by like while again some bit just start keep continuously repeat after followed').split(/\s+/));
 
 // Short requests made only of motion words + modifiers are handled instantly offline.
+const PROP_WORDS = new Set(('make makes create build give gives add spawn equip hand arm get with holding hold holds carry wield draw pull take out shoot shoots shooting shot shots fire fires firing blast pew unload spray burst open aim aims aiming point drop remove put away holster slash slashes slashing swing swings swinging attack attacks strike strikes chop cut stab hit hits combo full auto automatic mag dump times rounds bullets x her his him their them gun weapon').split(/\s+/));
+for (const p of Object.values(PROP_PRESETS)) for (const w of p.words) for (const part of w.split(/[\s-]+/)) PROP_WORDS.add(part);
+for (const w of ['tan', 'fde', 'desert', 'sand', 'olive', 'green', 'silver', 'chrome', 'gold', 'golden', 'wood', 'wooden', 'white', 'red', 'pink', 'blue', 'black']) PROP_WORDS.add(w);
+
+// "make a lightsaber" (a model we have no preset for)
+const MAKE_SOMETHING = /\b(make|makes|create|build|model|design|craft|generate|give|gives)\s+(me\s+|her\s+|him\s+|them\s+)?(a|an|the|some|my|his|her)\s+[a-z]/i;
+export function wantsCustomModel(text) {
+  return MAKE_SOMETHING.test(String(text || '')) && !findPresetIn(text);
+}
+
 export function isSimplePrompt(text) {
+  if (wantsCustomModel(text)) return false;
+  // prop requests the built-in models cover ("make a gun and shoot 3 times")
+  const pr = parsePropRequest(text);
+  if (pr) {
+    const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+    const unknown = words.filter((w) => !FILLER.has(w) && !PROP_WORDS.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
+    return unknown.length === 0 && (!!pr.preset || pr.shoot || pr.aim || pr.drop || pr.swing);
+  }
   const p = parsePrompt(text);
   if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length || s.touch.touch)) return false;
   const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
@@ -295,6 +313,9 @@ export class AIAssistant {
   runOffline(prompt) {
     const pr = parsePropRequest(prompt);
     if (pr) { const r = this.runProps(pr, prompt); if (r) return r; }
+    if (wantsCustomModel(prompt) && !parsePrompt(prompt).steps.some((st) => st.human.length || st.object.length || st.touch.touch)) {
+      return { results: [], message: `Without Claude I can only make the built-in models: ${Object.keys(PROP_PRESETS).join(', ')}. Add an API key in Settings → AI (or use the hosted page) and Claude can model anything you describe.`, understood: false };
+    }
     const parsed = parsePrompt(prompt);
     const targets = this.resolveTargets(parsed.target);
     if (!targets.length) return { results: [], message: 'Select a model first (click it in the viewport or the Scene list), or add one from the Add menu.', understood: false };
@@ -431,6 +452,8 @@ export class AIAssistant {
         s += `; bones${list.some((b) => translateName(b.name)) ? ' (Japanese names translated)' : ''}: ${list.slice(0, 60).map((b) => nameWithTranslation(b.name)).join(', ')}${list.length > 60 ? ', …' : ''}`;
       }
       if (m.clips.length) s += `; existing clips: ${m.clips.map((c) => c.clip.name).join(', ')}`;
+      if (m.adopt) { const held = heldProps(m); if (held.length) s += `; holding: ${held.map((p) => `"${p.name}" (${p.userData.hold.side} hand, ${p.userData.prop.kind}${p.userData.prop.preset !== 'custom' ? ', preset ' + p.userData.prop.preset : ''})`).join(', ')}`; }
+      if (m.kind === 'prop') s += ' (a prop model)';
       if (app.selection.model === m) s += ' [SELECTED]';
       lines.push(s);
       if (h) { try { const b = describeBody(m); if (b) lines.push(b); } catch (e) { console.warn('body map', e); } }
@@ -438,13 +461,14 @@ export class AIAssistant {
     return lines.join('\n') || '(empty scene)';
   }
 
-  instructions(prompt) {
+  instructions(prompt, ctx = {}) {
     const params = Object.entries(POSE_PARAMS).map(([k, [d, desc]]) => `${k} (default ${d})${desc ? ': ' + desc : ''}`).join('\n');
-    return `You create keyframe animations for a browser 3D animation tool. Reply with ONE JSON object only.
+    const earlier = (this.history || []).slice(-4).map((h) => `- user: ${h.prompt}\n  you made: ${h.summary}`).join('\n');
+    return `You create keyframe animations and 3D props for a browser 3D animation tool. Reply with ONE JSON object only.
 
 SCENE (models the user can animate):
 ${this.sceneDescription()}
-
+${earlier ? `\nEARLIER IN THIS SESSION (the user may refer back, e.g. "make it faster", "now with the left hand"):\n${earlier}\n` : ''}${ctx.images ? `\nThe user attached ${ctx.images} reference image(s). Use them: match a pose or motion they show, or the shape, proportions and colors of an object to model.\n` : ''}${ctx.research ? `\nWEB RESEARCH for this request (from a search just now):\n${ctx.research}\n` : ''}
 JSON FORMAT:
 {
   "message": "one short sentence telling the user what you made",
@@ -459,7 +483,20 @@ JSON FORMAT:
     "handTouches": [{"t": seconds, "hand": "left"|"right", "spot": "lap", "weight": 0-1}],
     "plantFeet": true/false,
     "objectKeys": [{"t": seconds, "channel": "position"|"rotation"|"scale"|"opacity"|"color", "x": n, "y": n, "z": n}],
-    "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg}]
+    "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg}],
+    "useProp": "name of a prop the target holds (made in this reply or already held), or \"\"",
+    "aimKeys": [{"t": seconds, "weight": 0-1, "yaw": deg, "pitch": deg}],
+    "shots": [seconds, ...],
+    "swings": [{"t": seconds, "back": false}]
+  }],
+  "props": [{
+    "name": "e.g. Pistol", "holder": "model name, \"selected\", or \"none\"", "hand": "right"|"left",
+    "preset": "custom" or ${JSON.stringify(Object.keys(PROP_PRESETS))}, "style": "default" or ${JSON.stringify(STYLE_NAMES)},
+    "kind": "gun"|"melee"|"prop",
+    "materials": [{"name": "steel", "color": "#3a3d43", "metalness": 0.9, "roughness": 0.3, "emissive": "#000000", "emissiveIntensity": 0, "opacity": 1, "texture": one of ${JSON.stringify(TEXTURES)}}],
+    "parts": [{"name": "slide", "shape": "box|cylinder|cone|tube|sphere|capsule|torus|extrude|lathe|helix", "material": "steel", "parent": "", "pos": [x,y,z], "rot": [x,y,z], "dims": [...], "axis": "x|y|z", "profile": [[u,v],...], "holes": [[[u,v],...]], "bevel": meters, "segments": 24}],
+    "anchors": {"grip": [x,y,z], "support": [], "muzzle": [], "eject": [], "stock": [], "sight": []},
+    "slide": "part that cycles when firing, or \"\"", "slideTravel": meters, "fireRate": shots per second, "caliber": "none|9mm|5.56|.308|12ga", "action": "none|semi|auto|pump|bolt"
   }]
 }
 
@@ -473,6 +510,15 @@ ${params}
 - objectKeys: position = offset from the object's current place in multiples of its size; rotation = degrees (x,y,z euler) added to its current rotation; scale = multipliers; opacity uses x (0-1); color uses x,y,z as r,g,b 0-1.
 - boneKeys rotate a bone (degrees, local x/y/z) relative to its rest pose. Use them for tails, wings, tentacles, robots, creatures.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
+
+PROPS (3D models the user asks you to make: guns, swords, tools, items...). Leave "props" empty when none is needed.
+- Prefer a built-in preset when it fits: they are detailed, high-quality models (pistol, rifle, smg, sniper, shotgun, sword, katana, knife, bat). Recolor with "style", rename with "name", and add extra parts in "parts" (a suppressor, laser, scope, bayonet, engraving...) positioned in the preset's frame; leave materials empty to keep the preset's.
+- Otherwise use "custom" and build it from parts. Units are meters at real-world size. Prop frame: +Z forward (barrel, blade edge, front), +Y up, +X the prop's left. When held, the hand closes around the "grip" anchor with the fingers along +Z and the thumb toward +Y: a gun's barrel runs along +Z with the grip below it; a melee weapon's handle runs along Y with the blade toward +Y and the edge toward +Z.
+- Shapes and dims: box [width x, height y, depth z] (bevel = edge radius); cylinder/cone [radiusTop, radiusBottom, length] along "axis"; tube (hollow) [outerRadius, innerRadius, length]; sphere [rx, ry, rz]; capsule [radius, length]; torus [ringRadius, tubeRadius, arcDegrees] with "axis" = ring normal; extrude: a 2D outline "profile" [[u,v],...] (8-30 points, counterclockwise or clockwise) extruded by dims[0] (thickness), centered — axis "x" means the outline is the SIDE view (u = z forward, v = y up) extruded sideways: best for gun bodies, slides, stocks, grips, blades, magazines, axes; axis "y" = top view (u = x, v = z); axis "z" = front view (u = x, v = y); "holes" cut openings (trigger guards, windows); lathe: "profile" [[radius, height],...] spun around "axis" (barrels, muzzle devices, scopes, bottles, handles, pommels, lamps); helix [radius, wireRadius, length, turns] (springs, grip wraps). "pos" is the center (extrude/lathe: where their 0,0 is), "rot" degrees XYZ, "parent" = another part's name (then pos/rot are relative to it). Unused fields: [] / "" / 0.
+- Make it look high-grade: 30-120 parts. Get the silhouette right with extrude outlines and a 1-3 mm bevel, then add the details that sell it: seams and grooves (thin dark boxes), serrations, screws and pins, vents, rails, sights, buttons and levers, edge highlights, labels/inlays. 3-7 materials with believable PBR values (metal: metalness 0.8-1, roughness 0.2-0.45; plastic/polymer: metalness 0, roughness 0.5-0.75; rubber 0.9; glass opacity 0.4) and fitting textures (brushed or scratched metal, stipple on grips, knurled, wood, carbon, leather, glow for lights/energy).
+- Name parts that move "slide", "bolt", "pump", "trigger" or "magazine" (their children move with them). Anchors (prop frame, meters): grip = center of where the main hand holds; support = where the other hand holds ([] for one-handed items); muzzle = barrel tip; eject = ejection port; stock = rear end of a shoulder stock ([] for pistols); sight = a point on the sight line. Guns: set fireRate, caliber, action, slide and slideTravel.
+- holder: who holds it (a humanoid in the scene, "selected", or "none" to just place it in the scene).
+- To animate with a held prop set the clip's "useProp" to the prop's name. aimKeys weight 0 = relaxed, holding it at the side; 1 = aimed (guns: two-handed, on the line of sight; rifles shouldered; melee: guard stance), yaw/pitch = aim direction in degrees (+yaw = character's left, +pitch = up). "shots" = times the gun fires: recoil, muzzle flash, tracer, slide/bolt/pump cycling and ejected casings are added automatically; respect the gun's fire rate and aim first (weight 1 at least 0.2 s before the first shot). "swings" = melee slash start times ({back: true} = backhand). While aimed or swinging, the arms' humanoidKeys are ignored; legs/body keys and presets still apply (e.g. preset "walk" + aimKeys + shots to shoot while walking). Keep plantFeet true unless the legs should move.
 - Keep motions physically plausible and within joint limits (elbows/knees 0-150, head yaw within ±80).
 
 USER REQUEST: ${prompt}`;
@@ -484,7 +530,7 @@ USER REQUEST: ${prompt}`;
     return {
       type: 'object',
       additionalProperties: false,
-      required: ['message', 'clips'],
+      required: ['message', 'clips', 'props'],
       properties: {
         message: { type: 'string' },
         clips: {
@@ -492,7 +538,7 @@ USER REQUEST: ${prompt}`;
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys'],
+            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys', 'useProp', 'aimKeys', 'shots', 'swings'],
             properties: {
               name: { type: 'string' },
               target: { type: 'string' },
@@ -524,6 +570,63 @@ USER REQUEST: ${prompt}`;
                 type: 'array',
                 items: { type: 'object', additionalProperties: false, required: ['t', 'bone', 'x', 'y', 'z'], properties: { t: { type: 'number' }, bone: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } } },
               },
+              useProp: { type: 'string' },
+              aimKeys: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['t', 'weight', 'yaw', 'pitch'], properties: { t: { type: 'number' }, weight: { type: 'number' }, yaw: { type: 'number' }, pitch: { type: 'number' } } },
+              },
+              shots: { type: 'array', items: { type: 'number' } },
+              swings: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['t', 'back'], properties: { t: { type: 'number' }, back: { type: 'boolean' } } },
+              },
+            },
+          },
+        },
+        props: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['name', 'holder', 'hand', 'preset', 'style', 'kind', 'materials', 'parts', 'anchors', 'slide', 'slideTravel', 'fireRate', 'caliber', 'action'],
+            properties: {
+              name: { type: 'string' },
+              holder: { type: 'string' },
+              hand: { type: 'string', enum: ['right', 'left'] },
+              preset: { type: 'string', enum: ['custom', ...Object.keys(PROP_PRESETS)] },
+              style: { type: 'string', enum: ['default', ...STYLE_NAMES] },
+              kind: { type: 'string', enum: ['gun', 'melee', 'prop'] },
+              materials: {
+                type: 'array',
+                items: {
+                  type: 'object', additionalProperties: false, required: ['name', 'color', 'metalness', 'roughness', 'emissive', 'emissiveIntensity', 'opacity', 'texture'],
+                  properties: { name: { type: 'string' }, color: { type: 'string' }, metalness: { type: 'number' }, roughness: { type: 'number' }, emissive: { type: 'string' }, emissiveIntensity: { type: 'number' }, opacity: { type: 'number' }, texture: { type: 'string', enum: TEXTURES } },
+                },
+              },
+              parts: {
+                type: 'array',
+                items: {
+                  type: 'object', additionalProperties: false, required: ['name', 'shape', 'material', 'parent', 'pos', 'rot', 'dims', 'axis', 'profile', 'holes', 'bevel', 'segments'],
+                  properties: {
+                    name: { type: 'string' }, shape: { type: 'string', enum: ['box', 'cylinder', 'cone', 'tube', 'sphere', 'capsule', 'torus', 'extrude', 'lathe', 'helix'] },
+                    material: { type: 'string' }, parent: { type: 'string' },
+                    pos: { type: 'array', items: { type: 'number' } }, rot: { type: 'array', items: { type: 'number' } }, dims: { type: 'array', items: { type: 'number' } },
+                    axis: { type: 'string', enum: ['x', 'y', 'z'] },
+                    profile: { type: 'array', items: { type: 'array', items: { type: 'number' } } },
+                    holes: { type: 'array', items: { type: 'array', items: { type: 'array', items: { type: 'number' } } } },
+                    bevel: { type: 'number' }, segments: { type: 'number' },
+                  },
+                },
+              },
+              anchors: {
+                type: 'object', additionalProperties: false, required: ['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'],
+                properties: Object.fromEntries(['grip', 'support', 'muzzle', 'eject', 'stock', 'sight'].map((k) => [k, { type: 'array', items: { type: 'number' } }])),
+              },
+              slide: { type: 'string' },
+              slideTravel: { type: 'number' },
+              fireRate: { type: 'number' },
+              caliber: { type: 'string', enum: ['none', '9mm', '5.56', '.308', '12ga'] },
+              action: { type: 'string', enum: ['none', 'semi', 'auto', 'pump', 'bolt'] },
             },
           },
         },
@@ -531,21 +634,98 @@ USER REQUEST: ${prompt}`;
     };
   }
 
-  async askClaude(prompt, { signal, onText } = {}) {
+  // can this view send images to Claude?
+  async canSendImages() {
+    const p = this.provider();
+    if (p === 'api') return true;
+    if (p === 'claude-ai' && this.sample && this.sample.limits) {
+      try { const l = await this.sample.limits(); return !!(l && l.images); } catch { return false; }
+    }
+    return false;
+  }
+
+  // does this request ask for a model that's worth looking up first?
+  wantsResearch(prompt) {
+    const t = String(prompt || '');
+    if (!/\b(make|makes|create|build|model|design|give|craft|generate|add)\b/i.test(t)) return false;
+    if (/\b(search|look up|lookup|reference|references|accurate|realistic|real|detailed|high[- ]?(grade|quality|detail)|exact)\b/i.test(t)) return true;
+    const preset = findPresetIn(t);
+    if (!preset) return true;
+    // a specific named thing (model numbers, brands)...
+    if (/\b[A-Z][a-z]*[- ]?\d+[A-Za-z]*\b|\b(desert eagle|glock|beretta|colt|kalashnikov|winchester|remington|mossberg|benelli|barrett|sig|hk|heckler|walther|ruger|smith|wesson|thompson|tommy|lightsaber|excalibur|zweihander|claymore|scimitar|rapier)\b/i.test(t)) return true;
+    // ...or described with more than a built-in name ("a retro ray gun", "a gun with a drum magazine")
+    const words = t.toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/[\s-]+/).filter(Boolean);
+    const known = (w) => FILLER.has(w) || PROP_WORDS.has(w) || /^\d+(\.\d+)?s?$/.test(w) || ['like', 'picture', 'image', 'photo', 'this', 'one', 'please', 'it', 'shown'].includes(w);
+    return words.filter((w) => !known(w)).length > 0;
+  }
+
+  async research(prompt, imageBlocks, { signal, onStatus } = {}) {
+    const client = new Anthropic({ apiKey: this.app.settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1 });
+    const model = this.app.settings.get('aiModel') || 'claude-opus-5-5';
+    const tool = /haiku/.test(model) ? { type: 'web_search_20250305', name: 'web_search', max_uses: 3 } : { type: 'web_search_20260209', name: 'web_search', max_uses: 4 };
+    let messages = [{ role: 'user', content: [...(imageBlocks || []), { type: 'text', text: `A 3D artist will build this from simple parts (boxes, extruded outlines, lathed shapes): "${prompt}". Search the web for reference on the object(s) to model: real dimensions in meters, the main parts and their shapes and proportions, details that make it recognizable, colors and materials. Reply with a compact bullet list (at most 250 words) of facts useful for modeling it. No preamble, no links.` }] }];
+    onStatus?.('Searching the web for references…');
+    for (let round = 0; round < 4; round++) {
+      const msg = await client.messages.create({ model, max_tokens: 8000, output_config: { effort: 'low' }, tools: [tool], messages }, { signal });
+      if (msg.stop_reason === 'pause_turn') { messages = [...messages, { role: 'assistant', content: msg.content }]; continue; }
+      if (msg.stop_reason === 'refusal') return '';
+      return msg.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim().slice(0, 3000);
+    }
+    return '';
+  }
+
+  // images (File/Blob) -> base64 JPEG content blocks for the API (max 1568 px)
+  static async imageBlocks(images) {
+    const out = [];
+    for (const img of images || []) {
+      try {
+        const bmp = await createImageBitmap(img);
+        const scale = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));
+        const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+        const cv = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : Object.assign(document.createElement('canvas'), { width: w, height: h });
+        const g = cv.getContext('2d');
+        g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+        g.drawImage(bmp, 0, 0, w, h);
+        bmp.close?.();
+        const blob = cv.convertToBlob ? await cv.convertToBlob({ type: 'image/jpeg', quality: 0.88 }) : await new Promise((res) => cv.toBlob(res, 'image/jpeg', 0.88));
+        const buf = new Uint8Array(await blob.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        out.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: btoa(bin) } });
+      } catch (e) { console.warn('image', e); }
+    }
+    return out;
+  }
+
+  remember(prompt, summary) {
+    this.history = (this.history || []).concat({ prompt: String(prompt).slice(0, 300), summary: String(summary).slice(0, 400) }).slice(-8);
+  }
+
+  async askClaude(prompt, { signal, onText, images, onStatus } = {}) {
     const provider = this.provider();
-    const full = this.instructions(prompt);
+    const imgs = (images || []).slice(0, 5);
     if (provider === 'claude-ai') {
-      return await this.sample.json(full, { signal, onText: onText ? ({ text }) => onText(text) : undefined, cache: false });
+      const full = this.instructions(prompt, { images: imgs.length });
+      const opts = { signal, onText: onText ? ({ text }) => onText(text) : undefined, cache: false };
+      if (imgs.length) opts.images = imgs;
+      return await this.sample.json(full, opts);
     }
     if (provider === 'api') {
       const client = new Anthropic({ apiKey: this.app.settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1 });
       const model = this.app.settings.get('aiModel') || 'claude-opus-5-5';
       const supportsFallback = /^claude-(opus-5|fable-5|sonnet-5-5)/.test(model);
+      const imageBlocks = imgs.length ? await AIAssistant.imageBlocks(imgs) : [];
+      let research = '';
+      if (this.app.settings.get('aiWebSearch') !== false && this.wantsResearch(prompt)) {
+        try { research = await this.research(prompt, imageBlocks, { signal, onStatus }); } catch (e) { if (signal?.aborted) throw e; console.warn('web research failed', e); }
+        onStatus?.(research ? 'Found references. Claude is modeling…' : 'Claude is modeling…');
+      }
+      const full = this.instructions(prompt, { images: imageBlocks.length, research });
       const req = {
         model,
-        max_tokens: 32000,
+        max_tokens: 64000,
         output_config: { effort: this.app.settings.get('aiEffort') || 'medium', format: { type: 'json_schema', schema: this.schema() } },
-        messages: [{ role: 'user', content: full }],
+        messages: [{ role: 'user', content: imageBlocks.length ? [...imageBlocks, { type: 'text', text: full }] : full }],
       };
       if (supportsFallback) { req.betas = ['server-side-fallback-2026-07-01']; req.fallbacks = 'default'; }
       const stream = supportsFallback ? client.beta.messages.stream(req, { signal }) : client.messages.stream(req, { signal });
@@ -574,10 +754,70 @@ USER REQUEST: ${prompt}`;
     return e?.message || String(e);
   }
 
+  // Claude's "props" -> models in hands (or standing in the scene)
+  buildProps(spec) {
+    const app = this.app;
+    const out = [], notes = [];
+    const vec = (a) => (Array.isArray(a) && a.length >= 3 && a.slice(0, 3).every((v) => Number.isFinite(Number(v))) ? a.slice(0, 3).map(Number) : null);
+    for (const ps of ((spec && spec.props) || []).slice(0, 6)) {
+      if (!ps) continue;
+      try {
+        const style = ps.style && ps.style !== 'default' ? ps.style : undefined;
+        const clampDims = (parts) => (parts || []).filter((x) => x && x.shape).slice(0, 400).map((x) => ({ ...x, dims: (x.dims || []).map((v) => Math.max(-20, Math.min(20, Number(v) || 0))) }));
+        let def;
+        if (ps.preset && ps.preset !== 'custom' && PROP_PRESETS[ps.preset]) {
+          def = presetSpec(ps.preset, { style, name: ps.name || undefined });
+          if (ps.parts && ps.parts.length) def.parts = [...def.parts, ...clampDims(ps.parts)];
+          if (ps.materials && ps.materials.length) {
+            const names = new Set(ps.materials.map((m) => m.name));
+            def.materials = [...def.materials.filter((m) => !names.has(m.name)), ...ps.materials];
+          }
+        } else {
+          const anchors = {};
+          for (const [k, v] of Object.entries(ps.anchors || {})) { const a = vec(v); if (a) anchors[k] = a; }
+          def = {
+            name: ps.name || 'Prop', kind: ps.kind || 'prop', preset: 'custom', materials: ps.materials || [], parts: clampDims(ps.parts), anchors,
+            slide: ps.slide || '', slideTravel: Number(ps.slideTravel) || 0, fireRate: Number(ps.fireRate) || 0,
+            caliber: ps.caliber && ps.caliber !== 'none' ? ps.caliber : (ps.kind === 'gun' ? '9mm' : null), action: ps.action && ps.action !== 'none' ? ps.action : null, auto: ps.action === 'auto',
+          };
+        }
+        const prop = buildProp(def);
+        let meshes = 0;
+        prop.traverse((o) => { if (o.isMesh) meshes++; });
+        if (!meshes) { notes.push(`"${ps.name}" came back with no usable parts.`); continue; }
+        const side = ps.hand === 'left' ? 'left' : 'right';
+        let holder = null;
+        if (ps.holder && ps.holder !== 'none') {
+          const t = this.resolveTargets(ps.holder === 'selected' ? 'selected' : ps.holder);
+          holder = t.map((x) => x.model).find((m) => m.humanoid && m.adopt) || null;
+        }
+        if (holder) {
+          for (const old of heldProps(holder).filter((x) => x.userData.hold.side === side)) app.removeProp(holder, old);
+          app.giveProp(holder, prop, side);
+          out.push({ model: holder, prop });
+        } else {
+          const m = app.addModel(prop, { name: prop.name, kind: 'prop', select: false });
+          // stand it next to the selected model
+          const sel = app.selection.model && app.selection.model !== m ? app.selection.model : null;
+          if (sel) { const b = new THREE.Box3().setFromObject(sel.root); if (!b.isEmpty()) prop.position.set(b.max.x + 0.4, Math.max(0.8, (b.min.y + b.max.y) / 2), (b.min.z + b.max.z) / 2); }
+          else prop.position.set(0, 1, 0);
+          prop.updateMatrixWorld(true);
+          m.captureRest();
+          out.push({ model: m, prop, standalone: true });
+        }
+      } catch (e) {
+        console.error(e);
+        notes.push(`Couldn't build "${ps.name}": ${e.message}`);
+      }
+    }
+    return { props: out, notes };
+  }
+
   // Turn Claude's JSON into clips on models
   buildFromSpec(spec) {
     const results = [];
-    const notes = [];
+    const pr = this.buildProps(spec);
+    const notes = [...pr.notes];
     for (const c of (spec && spec.clips) || []) {
       const targets = this.resolveTargets(c.target || 'selected');
       for (const { model, object } of targets) {
@@ -591,7 +831,7 @@ USER REQUEST: ${prompt}`;
         }
       }
     }
-    return { results, notes };
+    return { results, notes, props: pr.props };
   }
 
   buildClip(model, object, c) {
@@ -620,7 +860,38 @@ USER REQUEST: ${prompt}`;
       // moving from one spot to another: lift off, then land
       return e < 0.5 ? { spot: a.spot, weight: w(a) * (1 - 2 * e) } : { spot: b.spot, weight: w(b) * (2 * e - 1) };
     };
-    if (rig && (hKeys.length || tKeys.length || (preset && HUMANOID[preset]))) {
+    // a held prop: aim, shots, swings
+    let driver = null, heldProp = null;
+    if (rig && model.adopt) {
+      const held = heldProps(model);
+      const want = String(c.useProp || '').toLowerCase();
+      heldProp = (want && (held.find((p) => p.name.toLowerCase() === want) || held.find((p) => p.name.toLowerCase().includes(want) || want.includes(p.name.toLowerCase())))) || null;
+      if (!heldProp && held.length && ((c.shots && c.shots.length) || (c.swings && c.swings.length) || (c.aimKeys && c.aimKeys.length) || want)) heldProp = held[0];
+      if (heldProp) {
+        const aKeys = (c.aimKeys || []).filter((k) => k && Number.isFinite(Number(k.t))).sort((a, b) => a.t - b.t);
+        const lerpKey = (field, t, d) => {
+          if (!aKeys.length) return d;
+          const g = (k) => (Number.isFinite(Number(k[field])) ? Number(k[field]) : d);
+          if (t <= aKeys[0].t) return g(aKeys[0]);
+          if (t >= aKeys[aKeys.length - 1].t) return g(aKeys[aKeys.length - 1]);
+          let i = 0;
+          while (i < aKeys.length - 2 && aKeys[i + 1].t <= t) i++;
+          const a = aKeys[i], b = aKeys[i + 1];
+          const u = (t - a.t) / Math.max(1e-6, b.t - a.t);
+          const e = u * u * (3 - 2 * u);
+          return g(a) + (g(b) - g(a)) * e;
+        };
+        const shotTimes = (c.shots || []).map(Number).filter((x) => Number.isFinite(x) && x >= 0 && x < duration - 0.05);
+        driver = holdDriver(model, heldProp, {
+          shotTimes,
+          swingList: (c.swings || []).filter((x) => x && Number.isFinite(Number(x.t)) && x.t < duration).map((x) => ({ t: Number(x.t), back: !!x.back })),
+          aimAt: aKeys.length ? (t) => THREE.MathUtils.clamp(lerpKey('weight', t, 0), 0, 1) : undefined,
+          aimDir: (t) => ({ yaw: THREE.MathUtils.clamp(lerpKey('yaw', t, 0), -80, 80), pitch: THREE.MathUtils.clamp(lerpKey('pitch', t, 0), -60, 60) }),
+          duration, lower: false,
+        });
+      }
+    }
+    if (rig && (hKeys.length || tKeys.length || (preset && HUMANOID[preset]) || driver)) {
       const defaults = defaultParams();
       const presetM = preset && HUMANOID[preset];
       const cycle = presetM ? presetM.cycle / speed : duration;
@@ -651,8 +922,10 @@ USER REQUEST: ${prompt}`;
         if (lt) p.lTouch = lt;
         if (rt) p.rTouch = rt;
         if (c.plantFeet) p.plantFeet = true;
+        if (driver) driver.apply(t, p);
         return paramsToSpec(p);
-      }, 30);
+      }, driver ? driver.fps : 30);
+      if (driver && driver.shots.length) addShotEffects(model, heldProp, clip, driver.shots);
       tracks.push(...clip.tracks);
     } else if (preset && preset.startsWith('object:') && OBJECT[preset.slice(7)]) {
       const clip = bakeObject(object, preset.slice(7), { speed, intensity, duration, size: this.sizeOf(model, object) });
@@ -715,7 +988,7 @@ USER REQUEST: ${prompt}`;
       }
     }
     const clip = new THREE.AnimationClip(name, duration, tracks);
-    clip.userData = { generated: 'ai' };
+    clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined };
     return clip;
   }
 }

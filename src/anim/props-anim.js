@@ -95,14 +95,85 @@ export function restoreFX(model, fx) {
 function holdBase(prop) {
   const h = prop.userData.hold;
   const a = anchorsOf(prop);
-  return {
-    side: h.side,
-    offsetP: new THREE.Vector3().fromArray(h.offsetP),
-    offsetQ: new THREE.Quaternion().fromArray(h.offsetQ),
-    k: h.k || 1,
-    anchors: a,
-    style: styleOf(prop),
+  // where it sits in the hand right now (so nudging it with the gizmo counts)
+  let offsetP = new THREE.Vector3().fromArray(h.offsetP), offsetQ = new THREE.Quaternion().fromArray(h.offsetQ);
+  const hand = prop.parent;
+  let root = hand;
+  while (root && root.parent && !root.userData.modelId) root = root.parent;
+  if (hand && hand.isBone && root) {
+    root.updateMatrixWorld(true);
+    const sHand = new THREE.Vector3().setFromMatrixScale(hand.matrixWorld).x;
+    const sRoot = new THREE.Vector3().setFromMatrixScale(root.matrixWorld).x || 1;
+    offsetP = prop.position.clone().multiplyScalar(sHand / sRoot);
+    offsetQ = prop.quaternion.clone();
+  }
+  return { side: h.side, offsetP, offsetQ, k: h.k || 1, anchors: a, style: styleOf(prop) };
+}
+
+// Turn any imported model into a prop: the longest side becomes the barrel
+// (thinner end forward), the taller side up, the grip at the low back.
+export function wrapAsProp(root, name) {
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const S = root.scale.clone();
+  // sample points in the root's own frame, at its own scale
+  const pts = [];
+  const v = new THREE.Vector3();
+  root.traverse((o) => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const n = o.geometry.attributes.position.count, step = Math.max(1, Math.floor(n / 3000));
+    for (let i = 0; i < n; i += step) { o.getVertexPosition(i, v); pts.push(v.clone().applyMatrix4(o.matrixWorld).applyMatrix4(inv).multiply(S)); }
+  });
+  if (!pts.length) pts.push(new THREE.Vector3());
+  const box = new THREE.Box3().setFromPoints(pts);
+  const size = box.getSize(new THREE.Vector3());
+  const axes = [0, 1, 2].sort((a, b) => size.getComponent(b) - size.getComponent(a));
+  const L = axes[0], U = axes[1];
+  const lo = box.min.getComponent(L), len = size.getComponent(L) || 1;
+  // cross-section of each end: the thinner end is the front (muzzle / tip)
+  const slice = (from, to) => {
+    const sl = pts.filter((p) => { const u = (p.getComponent(L) - lo) / len; return u >= from && u <= to; });
+    if (!sl.length) return { area: Infinity, c: null };
+    const b = new THREE.Box3().setFromPoints(sl);
+    const sz = b.getSize(new THREE.Vector3());
+    return { area: sz.getComponent(axes[1]) * sz.getComponent(axes[2]), c: b.getCenter(new THREE.Vector3()) };
   };
+  const a0 = slice(0, 0.15), a1 = slice(0.85, 1);
+  const frontPos = a1.area <= a0.area;
+  const center = box.getCenter(new THREE.Vector3());
+  const frontC = (frontPos ? a1.c : a0.c) || center;
+  const upSign = frontC.getComponent(U) >= center.getComponent(U) ? 1 : -1;
+  const Z = new THREE.Vector3().setComponent(L, frontPos ? 1 : -1);
+  const Y = new THREE.Vector3().setComponent(U, upSign);
+  const X = new THREE.Vector3().crossVectors(Y, Z);
+  const toProp = new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(center).invert();
+  const wrap = new THREE.Group();
+  wrap.name = name || root.name || 'Prop';
+  root.position.set(0, 0, 0); root.quaternion.identity(); root.scale.copy(S);
+  root.updateMatrix();
+  root.applyMatrix4(toProp); // local -> (scale) -> prop frame
+  wrap.add(root);
+  wrap.updateMatrixWorld(true);
+  const P = pts.map((p) => p.clone().applyMatrix4(toProp));
+  const pb = new THREE.Box3().setFromPoints(P);
+  const ps = pb.getSize(new THREE.Vector3());
+  const front = frontC.clone().applyMatrix4(toProp);
+  // grip: the lowest point in the back 60%, raised a bit toward the top
+  let low = null;
+  for (const p of P) if (p.z < pb.min.z + ps.z * 0.6 && (!low || p.y < low.y)) low = p;
+  const grip = low ? new THREE.Vector3(0, low.y + ps.y * 0.3, low.z) : new THREE.Vector3(0, 0, pb.min.z + ps.z * 0.25);
+  const anchors = {
+    grip,
+    muzzle: new THREE.Vector3(0, front.y, pb.max.z),
+    eject: new THREE.Vector3(-ps.x / 2, front.y, (pb.min.z + pb.max.z) / 2),
+  };
+  if (ps.z > 0.35) {
+    anchors.support = new THREE.Vector3(ps.x * 0.3, pb.min.y + ps.y * 0.5, Math.min(pb.max.z - ps.z * 0.15, grip.z + ps.z * 0.35));
+    anchors.stock = new THREE.Vector3(0, grip.y, pb.min.z);
+  }
+  const gunLike = ps.y > ps.z * 0.25;
+  wrap.userData.prop = { kind: gunLike ? 'gun' : 'melee', preset: 'custom', anchors, slideTravel: 0, slideNode: null, fireRate: 4, caliber: gunLike ? '9mm' : null, action: gunLike ? 'semi' : null, imported: true };
+  return wrap;
 }
 
 // ---------------------------------------------------------------- recoil and timing
@@ -138,46 +209,50 @@ function kickAt(t, shots, amp) {
 // Build a holding / aiming / shooting clip for `model` holding `prop`.
 // opts: shots (number) or shotTimes (array), aimIn, hold (seconds after the
 // last shot), lower (bool), yaw, pitch, twoHands, name, base ('still' | 'idle'), duration
-export function bakeHoldClip(model, prop, opts = {}) {
-  const rig = model.humanoid;
+// Timing and pose logic for a held prop, shared by the built-in clips and
+// Claude's: apply(t, params) adds the hold (aim, support hand, recoil,
+// swings) to a frame's pose params.
+// opts: shots (count) | shotTimes, swings (count) | swingTimes | swingList [{t, back}],
+// aim (bool) | aimAt(t) -> weight, aimIn, hold, lower, loop, yaw, pitch | aimDir(t) -> {yaw, pitch}, twoHands, duration
+export function holdDriver(model, prop, opts = {}) {
   const base = holdBase(prop);
   const style = base.style;
   const rec = recoilOf(prop);
   const rate = opts.rate || rec.rate;
-  const aimIn = opts.aimIn ?? (opts.shots || (opts.shotTimes && opts.shotTimes.length) || opts.aim ? 0.45 : 0);
-  let shotTimes = opts.shotTimes ? opts.shotTimes.slice().sort((a, b) => a - b) : [];
+  const aimIn = opts.aimIn ?? (opts.shots || (opts.shotTimes && opts.shotTimes.length) || opts.aim || opts.swings ? 0.45 : 0);
+  let shotTimes = opts.shotTimes ? opts.shotTimes.filter((x) => Number.isFinite(x) && x >= 0).sort((a, b) => a - b) : [];
   if (!opts.shotTimes && opts.shots > 0) {
     const first = aimIn + 0.22;
     for (let i = 0; i < Math.min(60, opts.shots); i++) shotTimes.push(first + i / rate);
   }
+  // never faster than the gun can fire
+  const minGap = 0.9 / Math.max(0.2, rate);
+  shotTimes = shotTimes.filter((t, i, a) => i === 0 || t - a[i - 1] >= minGap * 0.999).slice(0, 120);
   const r = rnd(shotTimes.length * 7919 + 13);
-  const shots = shotTimes.map((t) => ({ t, j: 0.8 + r() * 0.4 }));
-  // melee swings: [{t0, t1, back}] from opts.swings (count) or opts.swingTimes
+  const shots = style === 'melee' ? [] : shotTimes.map((t) => ({ t, j: 0.8 + r() * 0.4 }));
+  // melee swings: [{t0, t1, back}]
   const swings = [];
-  if (style === 'melee' && (opts.swings > 0 || (opts.swingTimes && opts.swingTimes.length))) {
-    const st = opts.swingTimes || Array.from({ length: Math.min(12, opts.swings) }, (_, i) => 0.55 + i * 0.75);
-    st.forEach((t0, i) => swings.push({ t0, t1: t0 + 0.32, back: i % 2 === 1 }));
+  if (style === 'melee') {
+    if (opts.swingList && opts.swingList.length) opts.swingList.forEach((sw) => swings.push({ t0: sw.t, t1: sw.t + 0.32, back: !!sw.back }));
+    else if (opts.swings > 0 || (opts.swingTimes && opts.swingTimes.length)) {
+      const st = opts.swingTimes || Array.from({ length: Math.min(12, opts.swings) }, (_, i) => 0.55 + i * 0.75);
+      st.forEach((t0, i) => swings.push({ t0, t1: t0 + 0.32, back: i % 2 === 1 }));
+    }
   }
-  const aiming = !!(shots.length || opts.aim || swings.length);
+  const aiming = !!(shots.length || opts.aim || swings.length || opts.aimAt);
   const lastShot = shots.length ? shots[shots.length - 1].t : swings.length ? swings[swings.length - 1].t1 + 0.2 : aimIn;
   const lower = opts.lower ?? (aiming && !opts.loop);
   const holdAfter = opts.hold ?? 0.6;
   const duration = opts.duration || Math.max(1.5, aiming ? lastShot + holdAfter + (lower ? 0.55 : 0) : 3);
   const twoHands = opts.twoHands ?? (style !== 'melee' || (prop.userData.prop.preset === 'katana' || prop.userData.prop.preset === 'bat'));
-  const aimW = (t) => {
+  const aimW = opts.aimAt || ((t) => {
     if (!aiming) return 0;
     let w = aimIn > 0 ? ease(t / aimIn) : 1;
     if (lower) w *= 1 - ease((t - (lastShot + holdAfter)) / 0.5);
     return w;
-  };
-  const baseKey = HUMANOID[opts.base] ? opts.base : HUMANOID.still ? 'still' : 'idle';
-  const bm = HUMANOID[baseKey];
-  const defaults = defaultParams();
-  const fn = (t) => {
-    const ph = bm.loop ? (t / bm.cycle) % 1 : Math.min(1, t / bm.cycle);
-    const p = bm.at(ph, { ...defaults }, {});
-    p.plantFeet = true;
-    const w = aimW(t);
+  });
+  const apply = (t, p) => {
+    const w = THREE.MathUtils.clamp(aimW(t) || 0, 0, 1);
     const kick = kickAt(t, shots, rec);
     // the body takes some of the recoil too
     p.chestPitch = (p.chestPitch || 0) - kick.up * 0.12;
@@ -190,29 +265,44 @@ export function bakeHoldClip(model, prop, opts = {}) {
       p.chestYaw = (p.chestYaw || 0) + sgn * 10 * w;
     }
     let swing = null;
-    if (swings.length) {
-      // which swing are we in, and how far through it
-      for (const sw of swings) {
-        if (t < sw.t0 - 0.35 || t > sw.t1 + 0.35) continue;
-        const amt = t < sw.t0 ? ease((t - (sw.t0 - 0.35)) / 0.35) : t > sw.t1 ? 1 - ease((t - sw.t1) / 0.35) : 1;
-        const phase = t < sw.t0 ? 0 : t > sw.t1 ? 1 : ease((t - sw.t0) / (sw.t1 - sw.t0));
-        swing = { amount: amt, phase, back: sw.back };
-        // put the body into it
-        const into = Math.sin(Math.PI * phase) * amt;
-        const sgn = (base.side === 'right' ? 1 : -1) * (sw.back ? -1 : 1);
-        p.spineYaw = (p.spineYaw || 0) + sgn * (18 - 36 * phase) * amt;
-        p.chestPitch = (p.chestPitch || 0) + 8 * into;
-        p.hipsYaw = (p.hipsYaw || 0) + sgn * (8 - 16 * phase) * amt;
-      }
+    for (const sw of swings) {
+      if (t < sw.t0 - 0.35 || t > sw.t1 + 0.35) continue;
+      const amt = t < sw.t0 ? ease((t - (sw.t0 - 0.35)) / 0.35) : t > sw.t1 ? 1 - ease((t - sw.t1) / 0.35) : 1;
+      const phase = t < sw.t0 ? 0 : t > sw.t1 ? 1 : ease((t - sw.t0) / (sw.t1 - sw.t0));
+      swing = { amount: amt, phase, back: sw.back };
+      // put the body into it
+      const into = Math.sin(Math.PI * phase) * amt;
+      const sgn = (base.side === 'right' ? 1 : -1) * (sw.back ? -1 : 1);
+      p.spineYaw = (p.spineYaw || 0) + sgn * (18 - 36 * phase) * amt;
+      p.chestPitch = (p.chestPitch || 0) + 8 * into;
+      p.hipsYaw = (p.hipsYaw || 0) + sgn * (8 - 16 * phase) * amt;
     }
-    p.hold = { ...base, aim: swing ? Math.max(w, swing.amount) : w, support: twoHands ? (swing ? Math.max(w, swing.amount) : w) : 0, yaw: opts.yaw || 0, pitch: opts.pitch || 0, kick, curl: 1, swing };
-    return paramsToSpec(p);
+    const dir = opts.aimDir ? opts.aimDir(t) : { yaw: opts.yaw || 0, pitch: opts.pitch || 0 };
+    const a = swing ? Math.max(w, swing.amount) : w;
+    p.hold = { ...base, aim: a, support: twoHands ? a : 0, yaw: dir.yaw || 0, pitch: dir.pitch || 0, kick, curl: 1, swing };
+    return p;
   };
-  const fps = shots.length ? 60 : 30;
-  const clip = rig.bake(opts.name || (shots.length ? 'Shoot' : swings.length ? 'Slash' : aiming ? 'Aim' : 'Hold'), duration, fn, swings.length ? 60 : fps);
+  return { apply, shots: shots.map((s) => s.t), swings, duration, style, fps: shots.length || swings.length ? 60 : 30 };
+}
+
+// Build a holding / aiming / shooting / swinging clip for `model` holding `prop`
+// (opts as holdDriver, plus name and base motion 'still' | 'idle').
+export function bakeHoldClip(model, prop, opts = {}) {
+  const rig = model.humanoid;
+  const d = holdDriver(model, prop, opts);
+  const baseKey = HUMANOID[opts.base] ? opts.base : HUMANOID.still ? 'still' : 'idle';
+  const bm = HUMANOID[baseKey];
+  const defaults = defaultParams();
+  const fn = (t) => {
+    const ph = bm.loop ? (t / bm.cycle) % 1 : Math.min(1, t / bm.cycle);
+    const p = bm.at(ph, { ...defaults }, {});
+    p.plantFeet = true;
+    return paramsToSpec(d.apply(t, p));
+  };
+  const clip = rig.bake(opts.name || (d.shots.length ? 'Shoot' : d.swings.length ? 'Slash' : 'Hold'), d.duration, fn, d.fps);
   clip.userData = { generated: 'hold', prop: prop.uuid };
-  if (shots.length) addShotEffects(model, prop, clip, shots.map((s) => s.t), opts);
-  return { clip, shots: shots.map((s) => s.t), swings, duration };
+  if (d.shots.length) addShotEffects(model, prop, clip, d.shots, opts);
+  return { clip, shots: d.shots, swings: d.swings, duration: d.duration };
 }
 
 // ---------------------------------------------------------------- effects

@@ -26,13 +26,13 @@ export function initAnimations(app, ui) {
 
   const clipRow = (model, e) => {
     const active = model.activeClip === e;
-    const radio = h('button', { class: 'ibtn', title: 'Edit this clip in the timeline', 'aria-label': 'Edit in timeline' }, h('span', { class: 'radio-dot' }));
-    radio.addEventListener('click', () => model.setActiveClip(e));
+    const radio = h('button', { class: 'ibtn', title: 'Play and edit this clip (stops the others)', 'aria-label': 'Play and edit this clip' }, h('span', { class: 'radio-dot' }));
+    radio.addEventListener('click', () => model.switchClip(e));
     const play = h('button', { class: 'ibtn' + (e.playing ? ' on' : ''), title: e.playing ? 'Playing (click to mute)' : 'Muted (click to play)', 'aria-label': e.playing ? 'Mute clip' : 'Play clip' }, icon(e.playing ? 'play' : 'pause'));
     play.addEventListener('click', () => { model.setPlaying(e, !e.playing); app.needsEval = true; app.viewport.requestRender(); });
     const keys = allKeyTimes(e.clip).length;
     const name = h('div', { class: 'clip-name', title: 'Click to edit · double-click to rename' }, e.clip.name, ' ', h('span', { class: 'clip-meta' }, `${e.clip.duration.toFixed(2)}s · ${keys} key${keys === 1 ? '' : 's'}`));
-    name.addEventListener('click', () => model.setActiveClip(e));
+    name.addEventListener('click', () => model.switchClip(e));
     name.addEventListener('dblclick', async () => { const n = await promptDialog('Rename clip', 'Clip name', e.clip.name); if (n) { e.clip.name = n; app.emit('clips', model); } });
     const more = h('button', { class: 'ibtn', title: 'More', 'aria-label': 'Clip options' }, icon('dots'));
     more.addEventListener('click', () => clipMenu(model, e, more));
@@ -74,7 +74,7 @@ export function initAnimations(app, ui) {
     const transferBtn = h('button', { class: 'btn sm' }, icon('bone'), 'Copy from…');
     transferBtn.addEventListener('click', () => dropdown(transferItems(model), { anchor: transferBtn }));
     s.append(h('div', { class: 'btns' },
-      h('button', { class: 'btn sm primary', onclick: () => { model.newClip('Action', 2); app.setTime(0); app.emit('clips', model); } }, icon('plus'), 'New clip'),
+      h('button', { class: 'btn sm primary', onclick: () => { model.switchClip(model.newClip('Action', 2)); app.setTime(0); app.emit('clips', model); } }, icon('plus'), 'New clip'),
       h('button', { class: 'btn sm', onclick: () => openAnimationFor(app, model) }, icon('upload'), 'Load file…'),
       transferBtn));
     if (model.humanoid) s.append(h('div', { class: 'hint' }, 'This is a humanoid rig: clips from other characters (Mixamo, VRM, Unreal, Blender…) are retargeted automatically.'));

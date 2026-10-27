@@ -37,6 +37,7 @@ export const DEFAULTS = {
   textureLimitOverride: 0, // 0 = use quality preset
   undoLimit: 80,
   aiAlwaysClaude: false,
+  aiWebSearch: true,
   demoScene: true,
 };
 

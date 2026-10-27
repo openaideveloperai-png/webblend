@@ -8,7 +8,7 @@ import { Viewport } from './viewport.js';
 import { Model, disposeObject } from '../anim/model.js';
 import { setKey, snapshotClip, restoreClip, findTrackIndex, hasKeyAt, deleteKeys, clipInfo, PROPS, propDesc, bumpClip, clipWithUuids } from '../anim/clips.js';
 import { detectHumanoid, retargetClip } from '../anim/humanoid.js';
-import { attachProp, detachProp, propOf, restoreFX } from '../anim/props-anim.js';
+import { attachProp, detachProp, propOf, restoreFX, isProp, wrapAsProp } from '../anim/props-anim.js';
 import { ConstraintSolver, hasConstraints } from '../anim/constraints.js';
 import { vmdModelClip, vmdMorphTracks } from '../io/mmd.js';
 import { ikChain, solveIK } from '../anim/ik.js';
@@ -559,6 +559,30 @@ export class App extends Emitter {
       label: 'Give prop',
       undo: () => { detachProp(model, prop); this.needsEval = true; this.viewport.requestRender(); },
       redo: () => { attachProp(model, prop, side); this.needsEval = true; this.viewport.requestRender(); },
+    });
+    return prop;
+  }
+
+  // put a whole scene model (e.g. an imported gun) in a character's hand
+  giveModelTo(model, holder, side = 'right') {
+    const i = this.models.indexOf(model);
+    if (i < 0 || !holder.humanoid) return null;
+    model.mixer.stopAllAction();
+    this.models.splice(i, 1);
+    this.world.remove(model.root);
+    if (model.joints) model.joints.visible = false;
+    const prop = isProp(model.root) ? model.root : wrapAsProp(model.root, model.name);
+    if (prop === model.root) { prop.position.set(0, 0, 0); prop.quaternion.identity(); }
+    delete model.root.userData.modelId;
+    attachProp(holder, prop, side);
+    this.emit('models');
+    this.select(holder.root, holder);
+    this.needsEval = true;
+    this.viewport.requestRender();
+    this.history.push({
+      label: 'Give to character',
+      undo: () => { detachProp(holder, prop); this.restoreModel(model, i); },
+      redo: () => { this.models.splice(this.models.indexOf(model), 1); this.world.remove(model.root); attachProp(holder, prop, side); this.emit('models'); },
     });
     return prop;
   }

@@ -92,7 +92,8 @@ export function openSettings(app, ui, section) {
     select('aiModel', 'Model', [['claude-opus-5-5', 'Claude Opus 5.5 (best)'], ['claude-sonnet-5-5', 'Claude Sonnet 5.5 (faster)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (fastest)']]),
     select('aiEffort', 'Effort', [['low', 'Low (quick)'], ['medium', 'Medium'], ['high', 'High (more careful)']]),
     toggle('aiAlwaysClaude', 'Send every request to Claude (even simple ones like "walk")'),
-    h('div', { class: 'hint' }, 'Your key stays in this browser and is only sent to api.anthropic.com. Without "remember" it is forgotten when you close the tab.'));
+    toggle('aiWebSearch', 'Let Claude search the web for references when it models something (API key only)'),
+    h('div', { class: 'hint' }, 'Your key stays in this browser and is only sent to api.anthropic.com. Without "remember" it is forgotten when you close the tab. Web searches are billed to your API account (a few per model).'));
 
   const shortcuts = sec('about', 'Keyboard shortcuts', h('div', { class: 'shortcuts' }, ...SHORTCUTS.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])),
     h('div', { class: 'hint', style: { marginTop: '12px' } }, 'WebBlend Animator runs entirely in your browser. Files you open never leave your computer.'));

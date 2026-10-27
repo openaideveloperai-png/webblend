@@ -296,6 +296,16 @@ export class Model {
     for (const e of this.clips) if (e.clip === clip) this.rebuildAction(e);
   }
 
+  // the user picked a clip: play only that one (others can be layered back on
+  // with their play toggles)
+  switchClip(entry) {
+    if (!entry) return;
+    for (const e of this.clips) if (e !== entry && e.playing) this.setPlaying(e, false);
+    if (!entry.playing) this.setPlaying(entry, true);
+    this.setActiveClip(entry);
+    if (this.app) { this.app.needsEval = true; this.app.viewport?.requestRender(); }
+  }
+
   setActiveClip(entry) {
     this.activeClip = entry;
     if (entry && !entry.playing) this.setPlaying(entry, true);

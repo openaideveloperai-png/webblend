@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { h, icon, clear } from './dom.js';
 import { propDesc, morphLabel } from '../anim/clips.js';
 import { rafThrottle, evalExpr } from '../core/util.js';
+import { propOf, heldProps, bakeHoldClip, attachProp } from '../anim/props-anim.js';
 
 const R2D = THREE.MathUtils.RAD2DEG, D2R = THREE.MathUtils.DEG2RAD;
 
@@ -172,6 +173,55 @@ export function initProperties(app, ui) {
       h('button', { class: 'btn sm', onclick: () => { const r = model.rest.get(obj); if (!r) return; const before = { p: obj.position.clone(), q: obj.quaternion.clone(), s: obj.scale.clone() }; obj.position.copy(r.p); obj.quaternion.copy(r.q); obj.scale.copy(r.s); const after = { p: r.p.clone(), q: r.q.clone(), s: r.s.clone() }; app.history.push({ label: 'Reset transform', undo: () => { obj.position.copy(before.p); obj.quaternion.copy(before.q); obj.scale.copy(before.s); app.afterEdit(); }, redo: () => { obj.position.copy(after.p); obj.quaternion.copy(after.q); obj.scale.copy(after.s); app.afterEdit(); } }); app.afterEdit(); } }, icon('reset'), 'Reset'));
     t.append(tb);
     root.append(t);
+
+    // props: held items (guns, swords...) and giving a model to a character
+    const holderOf = (pr) => app.models.find((m) => m.root !== pr && pr.parent && m.root.getObjectById(pr.id));
+    const propActions = (holder, pr) => {
+      const P = pr.userData.prop;
+      const play = (opts, label) => {
+        const { clip } = bakeHoldClip(holder, pr, { ...opts, name: `${label} ${pr.name.toLowerCase()}` });
+        app.addClipToModel(holder, clip, { loop: false });
+        app.select(holder.root, holder);
+        app.setTime(0); app.play();
+      };
+      const side = pr.userData.hold.side, other = side === 'right' ? 'left' : 'right';
+      const flip = () => {
+        // turn it around inside the hand (front <-> back)
+        const R = new THREE.Matrix4().makeRotationY(Math.PI);
+        for (const c of [...pr.children]) if (!c.userData.fx) c.applyMatrix4(R);
+        for (const a of Object.values(P.anchors || {})) if (a && a.isVector3) { a.x = -a.x; a.z = -a.z; }
+        const fl = pr.children.find((c) => c.userData.fx === 'flash');
+        if (fl && P.anchors.muzzle) fl.position.copy(P.anchors.muzzle);
+        attachProp(holder, pr, side);
+        app.needsEval = true; app.viewport.requestRender(); render();
+      };
+      return h('div', { class: 'btns' },
+        P.kind === 'gun' ? h('button', { class: 'btn sm amber', onclick: () => play({ shots: P.auto ? 8 : 3 }, 'Shoot') }, icon('sparkle'), 'Shoot') : null,
+        P.kind === 'melee' ? h('button', { class: 'btn sm amber', onclick: () => play({ swings: 2 }, 'Swing') }, icon('sparkle'), 'Swing') : null,
+        h('button', { class: 'btn sm', onclick: () => play({ aim: true, lower: false, hold: 1.2 }, P.kind === 'melee' ? 'Guard' : 'Aim') }, P.kind === 'melee' ? 'Guard' : 'Aim'),
+        h('button', { class: 'btn sm', onclick: () => { attachProp(holder, pr, other); app.needsEval = true; app.viewport.requestRender(); render(); } }, `To ${other} hand`),
+        h('button', { class: 'btn sm', title: 'Turn it around in the hand', onclick: flip }, 'Flip'),
+        h('button', { class: 'btn sm danger', onclick: () => app.removeProp(holder, pr) }, icon('trash'), 'Remove'));
+    };
+    const heldHere = propOf(obj);
+    if (heldHere && heldHere.userData.hold) {
+      const holder = holderOf(heldHere) || model;
+      root.append(sec('Held prop · ' + heldHere.name,
+        h('div', { class: 'hint' }, `In ${holder.name}'s ${heldHere.userData.hold.side} hand. Move or rotate it with the gizmo to adjust the grip; aiming and shooting follow.`),
+        propActions(holder, heldHere)));
+    } else if (obj === model.root && model.humanoid && model.adopt) {
+      for (const pr of heldProps(model)) root.append(sec('Holding · ' + pr.name, propActions(model, pr)));
+    }
+    const holders = app.models.filter((m) => m !== model && m.humanoid);
+    if (obj === model.root && !model.humanoid && !obj.isLight && !obj.isCamera && model.meshes.length && holders.length) {
+      const who = h('select', { 'aria-label': 'Character' }, ...holders.map((m, i) => h('option', { value: String(i) }, m.name)));
+      const hand = h('select', { 'aria-label': 'Hand' }, h('option', { value: 'right' }, 'Right hand'), h('option', { value: 'left' }, 'Left hand'));
+      root.append(sec('Give to a character',
+        h('div', { class: 'field' }, h('label', {}, 'Character'), who),
+        h('div', { class: 'field' }, h('label', {}, 'Hand'), hand),
+        h('div', { class: 'btns' }, h('button', { class: 'btn sm amber', onclick: () => { const m = holders[parseInt(who.value, 10)]; const pr = app.giveModelTo(model, m, hand.value); if (pr) app.toast(`${m.name} is holding ${pr.name}. Select the character and use Shoot / Swing, or ask the AI.`, 'ok', 3500); } }, 'Give')),
+        h('div', { class: 'hint' }, 'Puts this model in the character\'s hand (its long side forward). Then it can aim, shoot or swing it; use Flip if it faces backward.')));
+    }
 
     // bone tools
     if (obj.isBone) {

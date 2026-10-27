@@ -202,6 +202,22 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   });
   ok('auto-key: re-keying a bone keeps the new pose (no snap back to the T-pose)', ak.r.every((x) => x < 0.01) && Math.abs(ak.at0 - 0.8) < 0.02, JSON.stringify(ak));
 
+  // switching clips plays only the one picked (no overlap with the newest)
+  const sw = await page.evaluate(async () => {
+    const a = window.webblend; a.clearScene(); a.addMannequin();
+    const m = a.models[0];
+    for (const e of [...m.clips]) m.removeClip(e);
+    const r1 = a.ai.runOffline('wave'), r2 = a.ai.runOffline('jump');
+    const e1 = a.addClipToModel(m, r1.results[0].clip), e2 = a.addClipToModel(m, r2.results[0].clip);
+    a.select(m.root, m);
+    await new Promise((res) => setTimeout(res, 150));
+    const sel = document.querySelector('.tl-clip');
+    sel.value = e1.id; sel.dispatchEvent(new Event('change'));
+    await new Promise((res) => setTimeout(res, 100));
+    return { newestPlaying: e2.playing, pickedPlaying: e1.playing, active: m.activeClip === e1 };
+  });
+  ok('switching clips stops the one that was playing', !sw.newestPlaying && sw.pickedPlaying && sw.active, JSON.stringify(sw));
+
   ok('no console errors', errors.length === 0, errors.slice(0, 5).join(' | '));
   await page.screenshot({ path: path.join(OUT, 'ui.png') });
   await browser.close();

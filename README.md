@@ -70,7 +70,7 @@ Only the bones that move the mesh (plus the control bones and IK handles that dr
 3. Press **K** to set a keyframe at the current frame. Move the playhead (click the timeline ruler, or use ←/→) and pose again.
 4. Press **Space** to play. Turn on the red **Auto-key** button to record every change automatically.
    To get in close, use **fly mode** (the keys button in the viewport corner, or the ` key) and move with W A S D like in a game. Bone dots stay small on screen however close you get; change their size in Settings → Viewport.
-5. Use the **Animations** tab to add more clips, mix them, change speed, or copy a clip from another character.
+5. Use the **Animations** tab to add more clips, mix them, change speed, or copy a clip from another character. Picking a clip (there or in the timeline's clip menu) plays just that one; to layer clips on top of each other, switch extra ones on with their play buttons.
 
 ## AI assistant
 
@@ -78,6 +78,7 @@ Open the **AI** tab (or the AI button at the top) and describe what you want:
 
 - `walk`, `run fast`, `jump then wave`, `walk and wave with the left hand`, `dance like crazy`, `sneak`, `sit down`, `nod twice`, `cheer`
 - Hands on the body: `put her hand on her lap while standing`, `hands on hips`, `left hand on her chest and right hand on her head`, `hands behind her back`, `hand on chin`, `hands on knees`, `cross her arms`, `hands behind her head`, `cover her eyes`, `cover ears`, `facepalm`, `hand on her neck`, `touch her ear`. The app scans the character's own mesh (its proportions, where the face, chest, thighs and knees really are, hair ignored), so the palm lands on that spot (lap, belly, chest, heart, hip, thigh, knee, lower back, head, back of the head, forehead, eyes, ear, face, cheek, chin, neck, other shoulder, arms crossed) and the hand turns to lie flat. Standing poses keep the feet planted and the legs still. If the arms are too short for a spot on the thigh, the hand rests as low as it reaches instead of bending over; only knees make the character bend down (mostly at the hips).
+- Props: `make a gun and shoot 3 times`, `give her a rifle and shoot full auto`, `give him a pump shotgun`, `make a gold pistol and aim`, `give her a katana and slash twice`, `drop the gun`. The character holds it at real size in the right (or left) hand with the fingers closed around the grip; aiming uses both hands (pistols out in front, rifles and shotguns shouldered in a bladed stance); every shot adds recoil through the arms, the slide / bolt / pump cycling, a muzzle flash, a tracer and an ejected casing that bounces on the floor. It is all keyframes in one clip, so it scrubs, loops and exports.
 - `make everything bounce`, `spin slowly on the x axis`, `float`, `grow then pulse`, `rainbow colors`
 - On creatures and rigs with tails or tentacles: `wiggle`, `slow sway`
 
@@ -87,6 +88,18 @@ Short requests like these are handled instantly by the built-in motion engine, w
 - In the **downloaded file**, add an Anthropic API key under Settings → AI. The key stays in your browser and is only sent to `api.anthropic.com`. It's forgotten when you close the tab unless you tick "Remember on this device". The default model is Claude Opus 5.5; Sonnet 5.5 and Haiku 5.5 are faster options.
 
 The built-in motions work on any humanoid rig, so the same "walk" fits a Mixamo character, a VRoid model, or the demo mannequin.
+
+### Models made by the AI
+
+The built-in models (pistol, rifle, SMG, sniper rifle, pump shotgun, sword, katana, knife, baseball bat) are detailed procedural models: bevelled outlines, slide serrations, sights, rails, pins and grooves, with metal, polymer, rubber and wood surfaces. Add a colour (black, tan, olive, silver, gold, wood, white, red, pink, blue). They work offline.
+
+With Claude you can ask for anything else ("make a retro ray gun", "make a lightsaber and swing it", "a revolver with a long barrel"). Claude designs it from parts (extruded outlines, lathed shapes, rounded boxes, tubes) with physically based materials, says where the hands go and where the muzzle is, and animates the character using it. You can also:
+
+- **Attach reference images**: the picture button next to the prompt, or paste / drop images onto it. Claude copies a pose, a motion, or an object's shape and colours from them (hosted page and API key).
+- **Let it look things up**: with an API key, Claude can search the web for references (real dimensions, parts, colours) before modelling something specific. Turn it off under Settings → AI.
+- **Ask follow-ups**: it remembers the last few requests in the session ("now faster", "same but with the left hand").
+
+**Holding things.** Select a held prop (or the character) to get Shoot / Swing, Aim / Guard, move it to the other hand, Flip it, or Remove it. Nudge it in the hand with the gizmo and aiming follows. Any model you import (a gun from Sketchfab, a tool...) can be put in a character's hand with **Give to a character** in its properties; WebBlend guesses the front, the grip and the muzzle, and Flip turns it around if it guessed wrong.
 
 Claude gets a map of each character: how tall each body part is, which bone is which part (Japanese bone names translated to English), what moving each bone carries along (rotating a thigh moves the whole leg, so it bends knees with the knee setting instead), and the extra bones it can key, grouped as hair, ears, eyes, face, tail, fingers, clothes and so on. The Scene list also shows an English translation next to Japanese names, and its filter searches both.
 
@@ -136,6 +149,7 @@ tools/make-test-assets.sh /path/to/python-with-bpy ./test-assets
 node tools/test-blend.mjs truth.json test-assets/testfiles/*.blend   # .blend vs Blender ground truth (tools/blender/truth.py)
 node tools/test-humanoid.mjs                                         # rig detection, pose solving, retargeting
 node tools/test-touch.mjs test-assets/assets/hero.blend              # hands placed on body spots, feet planted
+node tools/test-props.mjs                                            # built-in models, holding, aiming, shooting effects
 node tools/test-ai.mjs                                               # offline AI prompt parsing
 node tools/e2e.cjs test-assets/assets ./out                          # full app in headless Chromium
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer

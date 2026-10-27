@@ -47,9 +47,9 @@ export function initTimeline(app, ui) {
   clipSel.addEventListener('change', () => {
     const m = model();
     if (!m) return;
-    if (clipSel.value === '__new') { m.newClip('Action', 2); app.setTime(0); app.emit('clips', m); return; }
+    if (clipSel.value === '__new') { m.switchClip(m.newClip('Action', 2)); app.setTime(0); app.emit('clips', m); return; }
     const e = m.clips.find((c) => c.id === clipSel.value);
-    if (e) m.setActiveClip(e);
+    if (e) m.switchClip(e);
   });
   const tb = (ic, title, fn, cls = '') => { const b = h('button', { class: 'tbtn ' + cls, title, 'aria-label': title }, icon(ic)); b.addEventListener('click', fn); return b; };
   const bFirst = tb('first', 'Go to start (Shift+←)', () => app.setTime(0));
