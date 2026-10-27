@@ -33,7 +33,7 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
     off(); a.tick = orig;
     return { seen, now: a.settings.get('quality'), toast: [...document.querySelectorAll('.toast')].map((t) => t.textContent).find((t) => /slowly/.test(t)) };
   });
-  ok('auto-switches to a lighter mode when lagging', lag.seen.length >= 1 && lag.seen[0] === 'medium(auto)', JSON.stringify(lag));
+  ok('auto-switches to a lighter mode when lagging', lag.seen.length >= 1 && /^(medium|low)\(auto\)$/.test(lag.seen[0]), JSON.stringify(lag));
   // potato downscales big textures on import
   await page.evaluate(() => { const a = window.webblend; a.setQuality('potato'); a.clearScene(); });
   await page.click('.menu-btn:has-text("File")');

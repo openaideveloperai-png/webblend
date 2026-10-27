@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { zipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { clipWithNames, clipWithUuids } from '../anim/clips.js';
+import { bakeConstraints } from '../anim/constraints.js';
 import { inArtifact } from '../core/util.js';
 
 let downloadsCap;
@@ -75,7 +76,9 @@ export async function exportGLB(app, models, filename) {
       m.root.traverse((o) => { if (o.userData.editorOnly && o.visible) { o.visible = false; hidden.push(o); } });
       group.add(m.root);
       for (const e of m.clips) {
-        const c = morphTracksByName(clipWithUuids(e.clip, m.root), m.root);
+        // constraint-driven bones get real keys, so other apps play the same motion
+        const src = m.constraints ? bakeConstraints(m, clipWithUuids(e.clip, m.root), app.settings.get('fps') || 30) : e.clip;
+        const c = morphTracksByName(clipWithUuids(src, m.root), m.root);
         c.name = `${uname.get(m)} | ${e.clip.name}`;
         if (c.tracks.length) clips.push(c);
       }
@@ -91,6 +94,8 @@ export async function exportGLB(app, models, filename) {
     for (const o of hidden) o.visible = true;
     for (const [m, parent] of parents) (parent || app.world).add(m.root);
     app.world.updateMatrixWorld(true);
+    app.needsEval = true;
+    app.viewport.requestRender();
   }
 }
 

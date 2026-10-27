@@ -23,6 +23,40 @@ function visibleChildren(o) {
   return o.children.filter((c) => !c.userData.editorOnly && !c.userData.helper);
 }
 
+// hidden objects (rigid bodies, colliders, cages...) and groups holding only those
+function showsSomething(o, memo) {
+  const k = 'v:' + o.id;
+  if (memo.has(k)) return memo.get(k);
+  const r = o.visible && (!!(o.isMesh || o.isPoints || o.isLine || o.isLight) || o.children.some((c) => showsSomething(c, memo)));
+  memo.set(k, r);
+  return r;
+}
+function isHiddenStuff(o, memo) {
+  if (memo.has(o)) return memo.get(o);
+  let r = false;
+  if (!o.isBone && !o.isCamera && !showsSomething(o, memo) && !o.children.some((c) => c.isBone)) {
+    if (!o.visible || o.userData.hiddenInFile) r = true;
+    else if (!o.isMesh && !o.isLight && !o.isPoints && !o.isLine) {
+      const kids = visibleChildren(o);
+      r = kids.length > 0 && kids.every((c) => isHiddenStuff(c, memo));
+    }
+  }
+  memo.set(o, r);
+  return r;
+}
+
+// what an eye toggle switches: the object itself, or for an object node whose
+// only job is holding its mesh, that mesh (so hidden-in-file parts come back)
+function drawable(o) {
+  const content = o.children.filter((c) => (c.isMesh || c.isPoints || c.isLine || c.isLight) && !c.children.length);
+  if (o.userData.hiddenInFile && content.length) return content;
+  if (!o.visible) return [o];
+  if (content.length && content.every((c) => !c.visible)) return content;
+  return [o];
+}
+
+function isAncestorOf(a, b) { for (let p = b.parent; p; p = p.parent) if (p === a) return true; return false; }
+
 export function initOutliner(app, ui) {
   const root = document.getElementById('outliner');
   const search = document.getElementById('ol-search');
@@ -47,6 +81,20 @@ export function initOutliner(app, ui) {
       if (model.clips.length) r.append(h('span', { class: 'ol-badge', title: `${model.clips.length} animation clip(s)` }, `${model.clips.length}▸`));
       const eye = h('button', { class: 'ol-eye' + (o.visible ? '' : ' off'), title: o.visible ? 'Hide' : 'Show', 'aria-label': o.visible ? 'Hide' : 'Show' }, icon(o.visible ? 'eye' : 'eyeoff'));
       eye.addEventListener('click', (e) => { e.stopPropagation(); model.setVisible(!o.visible); app.viewport.requestRender(); render(); });
+      r.append(eye);
+    } else if (!o.isBone) {
+      // parts can be shown/hidden too (e.g. a helper object a file left visible)
+      const target = drawable(o);
+      const on = target.every((t) => t.visible);
+      const eye = h('button', { class: 'ol-eye' + (on ? '' : ' off'), title: on ? 'Hide' : 'Show', 'aria-label': on ? 'Hide' : 'Show' }, icon(on ? 'eye' : 'eyeoff'));
+      eye.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const before = target.map((t) => t.visible);
+        const set = (vals) => { target.forEach((t, i) => { t.visible = vals[i]; }); app.viewport.requestRender(); render(); };
+        const after = target.map(() => !on);
+        set(after);
+        app.history.push({ label: on ? 'Hide' : 'Show', undo: () => set(before), redo: () => set(after) });
+      });
       r.append(eye);
     }
     r.addEventListener('click', () => app.select(o, model));
@@ -83,12 +131,27 @@ export function initOutliner(app, ui) {
       if (!n) root.append(h('div', { class: 'empty-note' }, 'No matches.'));
       return;
     }
+    const memo = new Map();
     const walk = (o, model, depth) => {
       const { r, kids, isOpen } = row(o, model, depth);
       root.append(r);
       if (isOpen) {
-        kids.slice(0, MAX_CHILDREN).forEach((c) => walk(c, model, depth + 1));
-        if (kids.length > MAX_CHILDREN) root.append(h('div', { class: 'ol-more' }, `${kids.length - MAX_CHILDREN} more — use the filter box`));
+        const sel = app.selection.object;
+        const hidden = kids.filter((c) => isHiddenStuff(c, memo) && c !== sel && !(sel && isAncestorOf(c, sel)));
+        const shown = hidden.length >= 2 ? kids.filter((c) => !hidden.includes(c)) : kids;
+        shown.slice(0, MAX_CHILDREN).forEach((c) => walk(c, model, depth + 1));
+        if (shown.length > MAX_CHILDREN) root.append(h('div', { class: 'ol-more' }, `${shown.length - MAX_CHILDREN} more — use the filter box`));
+        if (hidden.length >= 2) {
+          // tuck hidden helpers away behind one row
+          const key = o.uuid + ':hidden';
+          const open = expanded.has(key);
+          const hr = h('div', { class: 'ol-row ol-hidden-group', style: { paddingLeft: 6 + (depth + 1) * 14 + 'px' }, role: 'treeitem', 'aria-expanded': String(open), title: 'Objects that are hidden in the file (physics bodies, helpers...)' },
+            h('button', { class: 'ol-caret' + (open ? ' open' : ''), tabindex: -1, 'aria-label': open ? 'Collapse' : 'Expand' }, icon('chevron')),
+            h('span', { class: 'ol-icon' }, icon('eyeoff')), h('span', { class: 'ol-name' }, `${hidden.length} hidden objects`));
+          hr.addEventListener('click', () => { if (open) expanded.delete(key); else expanded.add(key); render(); });
+          root.append(hr);
+          if (open) hidden.slice(0, MAX_CHILDREN).forEach((c) => walk(c, model, depth + 2));
+        }
       }
     };
     for (const model of app.models) walk(model.root, model, 0);

@@ -14,11 +14,28 @@ export const CANON = [
   'rightUpperLeg', 'rightLowerLeg', 'rightFoot', 'rightToes',
 ];
 
-const EXCLUDE = /(twist|roll|ik|pole|target|ctrl|control|mch|helper|corr|jiggle|offset|null|_end$|end$|nub|tip$|socket|weapon|prop|attach|dummy|bend|share|sleeve|ribbon|breast|bust|hair|cloth|skirt|cape|tail)/;
+const EXCLUDE = /(twist|roll|ik|pole|target|ctrl|control|mch|helper|corr|jiggle|offset|null|_end$|end$|nub|tip$|socket|weapon|prop|attach|dummy|shadow|bend|share|sleeve|ribbon|breast|bust|hair|cloth|skirt|cape|tail|cancel)/;
+
+// MMD (MikuMikuDance) bone names -> English words the matcher understands.
+// Longest names first: 足首 (ankle) before 足 (leg = thigh in MMD).
+const JP = [
+  ['全ての親', 'master'], ['センター', 'center'], ['グルーブ', 'groove'], ['腰キャンセル', 'helper'], ['キャンセル', 'helper'],
+  ['上半身3', 'upper chest'], ['上半身2', 'chest'], ['上半身', 'spine'], ['下半身', 'lowerbody'], ['腰', 'waist'],
+  ['首', 'neck'], ['頭', 'head'], ['両目', 'eyes'], ['目', 'eye'],
+  ['肩P', 'shoulder helper'], ['肩C', 'shoulder helper'], ['肩', 'shoulder'], ['腕捩', 'twist'], ['手捩', 'twist'], ['捩', 'twist'],
+  ['腕', 'upperarm'], ['ひじ', 'elbow'], ['肘', 'elbow'], ['手首', 'wrist'], ['手先', 'tip'], ['ダミー', 'dummy'],
+  ['親指', 'thumb'], ['人差指', 'index'], ['人指', 'index'], ['中指', 'middle'], ['薬指', 'ring'], ['小指', 'little'],
+  ['足首', 'ankle'], ['足先EX', 'toe'], ['つま先', 'toe'], ['足', 'thigh'], ['ひざ', 'knee'], ['膝', 'knee'],
+  ['乳', 'breast'], ['胸', 'breast'], ['髪', 'hair'], ['スカート', 'skirt'], ['ネクタイ', 'tie'], ['リボン', 'ribbon'], ['尻尾', 'tail'], ['しっぽ', 'tail'],
+  ['左', 'left'], ['右', 'right'],
+].sort((a, b) => b[0].length - a[0].length);
+const HAS_JP = /[\u3040-\u30ff\u4e00-\u9fff]/;
 const FINGER = /(thumb|index|middle|ring|pinky|little|finger|digit|metacarpal|carpal)/;
 
 function words(name) {
   let s = String(name || '');
+  if (s.normalize) s = s.normalize('NFKC'); // full-width ＩＫ, １ -> IK, 1
+  if (HAS_JP.test(s)) for (const [jp, en] of JP) s = s.split(jp).join(' ' + en + ' ');
   s = s.replace(/^.*[:|]/, ''); // namespaces "mixamorig:Hips", "Armature|Hips"
   s = s.replace(/^(mixamorig\d*|def[-_]|org[-_]|bip0?1|character\d*|cc_base_|rig_|j_bip_|j_)/i, ' ');
   s = s.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
@@ -33,7 +50,8 @@ function sideOf(ws) {
 }
 
 function partOf(ws) {
-  const w = ws.filter((x) => !['left', 'right', 'l', 'r', 'lf', 'rt', 'lft', 'rgt', 'bip', 'def', 'jnt', 'joint', 'bone', 'b', 'c', 'j'].includes(x));
+  // "d" / "ex": MMD deform bones (左足D, 足先EX)
+  const w = ws.filter((x) => !['left', 'right', 'l', 'r', 'lf', 'rt', 'lft', 'rgt', 'bip', 'def', 'jnt', 'joint', 'bone', 'b', 'c', 'j', 'd', 'ex'].includes(x));
   const s = w.join(' ');
   const flat = w.join('');
   if (FINGER.test(flat)) return null;
@@ -49,7 +67,7 @@ function partOf(ws) {
   if (/calf|shin|lowerleg|lowleg|knee|tibia|leglower|^leg( \d)?$/.test(flat) || /^leg( \d)?$/.test(s)) return 'lowerLeg';
   if (/^(foot|ankle)$/.test(flat) || /^foot \d?$/.test(s)) return 'foot';
   if (/^(toe|toes|toebase|ball|toe base)/.test(flat)) return 'toes';
-  if (/^(spine|abdomen|torso|waist|stomach|lowerback|back|chest|upperchest|ribs|thorax|spine \d+)/.test(s) || /spine|chest|abdomen|torso/.test(flat)) return 'spine';
+  if (/^(spine|abdomen|torso|waist|stomach|lowerback|back|chest|upperchest|ribs|thorax|spine \d+)/.test(s) || /spine|chest|abdomen|torso|^upperbody/.test(flat)) return 'spine';
   return null;
 }
 
@@ -70,8 +88,9 @@ function pathBetween(anc, desc) { // bones from anc (exclusive) down to desc (ex
 
 const _v1 = new THREE.Vector3();
 
-export function detectHumanoid(root, bones) {
+export function detectHumanoid(root, bones, opts = {}) {
   if (!bones || bones.length < 8) return null;
+  const rank = opts.rank || (() => 1);
   root.updateMatrixWorld(true);
   const cands = {};
   for (const b of bones) {
@@ -83,10 +102,22 @@ export function detectHumanoid(root, bones) {
     const key = side ? side + part[0].toUpperCase() + part.slice(1) : part;
     (cands[key] = cands[key] || []).push(b);
   }
+  // MMD English names: "leg" is the thigh when the same side also has a "knee"
+  for (const side of ['left', 'right']) {
+    const lower = cands[side + 'LowerLeg'];
+    if (lower && lower.length > 1 && !(cands[side + 'UpperLeg'] || []).length) {
+      const up = lower.filter((a) => lower.some((b) => b !== a && isAncestor(a, b)));
+      if (up.length) { cands[side + 'UpperLeg'] = up; cands[side + 'LowerLeg'] = lower.filter((b) => !up.includes(b)); }
+    }
+  }
+  // prefer bones that actually move the mesh (MMD "D" bones over unweighted
+  // control bones in exported files; control bones when constraints drive)
   const pick = (key, prefer = 'shallow') => {
     const list = cands[key];
     if (!list || !list.length) return null;
-    return list.slice().sort((a, b) => (prefer === 'shallow' ? depth(a) - depth(b) : depth(b) - depth(a)))[0];
+    const usable = list.filter((b) => rank(b) > 0);
+    const pool = usable.length ? usable : list;
+    return pool.slice().sort((a, b) => (rank(b) - rank(a)) || (prefer === 'shallow' ? depth(a) - depth(b) : depth(b) - depth(a)))[0];
   };
   const map = {};
   for (const side of ['left', 'right']) {
@@ -132,10 +163,18 @@ export function detectHumanoid(root, bones) {
   // hips: named, or the common ancestor of both legs
   map.hips = pick('hips');
   const lul = map.leftUpperLeg, rul = map.rightUpperLeg;
-  if (lul && rul) {
+  const top0 = map.neck || map.head;
+  const coversAll = (h) => h && isAncestor(h, lul) && isAncestor(h, rul) && (!top0 || isAncestor(h, top0));
+  if (lul && rul && !coversAll(map.hips)) {
+    // lowest bone above both legs (and the spine: MMD splits upper/lower body)
     let a = lul.parent;
-    while (a && !isAncestor(a, rul)) a = a.parent;
-    if (a && a.isBone && (!map.hips || !isAncestor(map.hips, lul))) map.hips = a;
+    while (a && !(isAncestor(a, rul) && (!top0 || isAncestor(a, top0)))) a = a.parent;
+    if (a && a.isBone) map.hips = a;
+    else if (!map.hips) {
+      a = lul.parent;
+      while (a && !isAncestor(a, rul)) a = a.parent;
+      if (a && a.isBone) map.hips = a;
+    }
   }
   if (!map.hips) return null;
   const top = map.neck || map.head;

@@ -61,6 +61,7 @@ export function openSettings(app, ui, section) {
 
   const view = sec('viewport', 'Viewport',
     toggle('showGrid', 'Grid'), toggle('showAxes', 'Axis gizmo'), toggle('showSkeleton', 'Show bones (click the dots to pose)'),
+    toggle('showAllBones', 'Also show helper bones (end bones, IK and constraint helpers)'),
     select('pickMode', 'Clicking selects', [['object', 'The part under the mouse'], ['model', 'The whole model']]),
     (() => { const c = h('input', { type: 'color', value: s.get('bgColor') }); c.addEventListener('input', () => app.setSetting('bgColor', c.value)); return h('div', { class: 'field' }, h('label', {}, 'Background'), c); })(),
     toggle('importLights', 'Import lights from .blend files'),

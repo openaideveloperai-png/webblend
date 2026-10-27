@@ -24,16 +24,15 @@ import { MD2Loader } from 'three/examples/jsm/loaders/MD2Loader.js';
 import { GCodeLoader } from 'three/examples/jsm/loaders/GCodeLoader.js';
 import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
-import { DDSLoader } from 'three/examples/jsm/loaders/DDSLoader.js';
 import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
 import { importBlend } from './blend/blendimport.js';
 import { createDracoLoader } from './draco.js';
 import { VFS } from './vfs.js';
-import { optimizeTextures, textureFromBlob, sniffImageType } from './textures.js';
+import { optimizeTextures, textureFromBytes, AnyImageLoader } from './textures.js';
 import { extOf, stripExt, baseName } from '../core/util.js';
 
 export const MODEL_EXTS = new Set(['glb', 'gltf', 'fbx', 'obj', 'dae', 'stl', 'ply', '3mf', 'amf', '3ds', 'wrl', 'vrml', 'vox', 'usdz', 'usda', 'usdc', 'usd', 'lwo', 'kmz', 'pcd', 'xyz', 'vtk', 'vtp', 'bvh', 'md2', 'gcode', 'drc', 'svg', 'blend', 'json', 'vrm']);
-export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tga', 'avif']);
+export const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tga', 'dds', 'avif']);
 export const ACCEPT = [...MODEL_EXTS, ...IMAGE_EXTS, 'zip', 'mtl', 'bin'].map((e) => '.' + e).join(',');
 
 const UNSUPPORTED = {
@@ -75,7 +74,7 @@ function patchUSD(warn) {
 
 const GREY_PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNo6Ojo/w8ABFIB/ZpNwGQAAAAASUVORK5CYII=';
 
-function makeManager(vfs, basePath, missing) {
+function makeManager(vfs, basePath, missing, maxTexture = 16384) {
   const manager = new THREE.LoadingManager();
   let pending = 0;
   const waiters = [];
@@ -102,7 +101,7 @@ function makeManager(vfs, basePath, missing) {
     return url;
   });
   manager.addHandler(/\.tga$/i, new TGALoader(manager));
-  manager.addHandler(/\.dds$/i, new DDSLoader(manager));
+  manager.addHandler(/\.dds$/i, new AnyImageLoader(manager, maxTexture));
   return manager;
 }
 
@@ -164,6 +163,17 @@ function hasBones(root) {
 }
 
 // Put static models on the ground, centered.
+const HELPER_MESH = /^(rigid_?bod(y|ies)|rigid[_ .]|rb[_ .]|collider|collision|ucx_|ubx_|usp_|ucp_|mmd_tools_rigid)/i;
+function hideHelperMeshes(root) {
+  let n = 0;
+  root.traverse((o) => {
+    if (!(o.isMesh || o.isLine || o.isPoints) || o.isSkinnedMesh || !o.visible) return;
+    const names = [o.name, o.parent ? o.parent.name : '', ...[].concat(o.material || []).map((m) => m.name || '')];
+    if (names.some((x) => HELPER_MESH.test(x))) { o.visible = false; o.userData.hiddenInFile = true; n++; }
+  });
+  return n;
+}
+
 function groundAndCenter(root) {
   root.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(root);
@@ -224,9 +234,30 @@ export class Importer {
     // order: models with meshes first, animation sources (bvh/json) last
     const rank = (e) => (e.ext === 'bvh' || e.ext === 'json' ? 2 : 0);
     filtered.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+    // the same model in several formats (goatchan.blend + mesh/goatchan.fbx): load the best one
+    const PREF = ['blend', 'glb', 'vrm', 'gltf', 'fbx', 'dae', 'usdz', 'usdc', 'usda', 'usd', 'obj', '3ds', 'lwo', 'ply', 'stl', '3mf', 'amf', 'wrl', 'vrml', 'kmz', 'drc'];
+    const skipped = [];
+    const byStem = new Map();
+    for (const e of filtered) {
+      if (!PREF.includes(e.ext)) continue;
+      const stem = stripExt(e.name).toLowerCase();
+      if (!byStem.has(stem)) byStem.set(stem, []);
+      byStem.get(stem).push(e);
+    }
+    for (const group of byStem.values()) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => PREF.indexOf(a.ext) - PREF.indexOf(b.ext));
+      for (const e of group.slice(1)) skipped.push({ entry: e, kept: group[0] });
+    }
+    if (skipped.length) {
+      const drop = new Set(skipped.map((x) => x.entry));
+      for (let i = filtered.length - 1; i >= 0; i--) if (drop.has(filtered[i])) filtered.splice(i, 1);
+    }
+    // next to a real model, a .json is probably a config/data file: try it, but quietly
+    if (filtered.some((e) => e.ext !== 'json' && e.ext !== 'bvh')) for (const e of filtered) if (e.ext === 'json') e.optional = true;
     const images = all.filter((e) => IMAGE_EXTS.has(e.ext));
     const unsupported = all.filter((e) => UNSUPPORTED[e.ext]);
-    return { primaries: filtered, images, unsupported };
+    return { primaries: filtered, images, unsupported, skipped };
   }
 
   // Load one primary file. Returns {root, animations, warnings, format, name, kind}
@@ -234,7 +265,9 @@ export class Importer {
     const ext = entry.ext;
     const basePath = entry.key.includes('/') ? entry.path.replace(/\\/g, '/').split('/').slice(0, -1).join('/') + '/' : '';
     const missing = new Set();
-    const manager = makeManager(vfs, entry.path, missing);
+    const unreadable = new Set();
+    let helperCount = 0;
+    const manager = makeManager(vfs, entry.path, missing, this.app.settings.maxTexture());
     const name = stripExt(entry.name);
     const warnings = [];
     let root = null, animations = [], kind = 'import', placeOnGround = false, info = null;
@@ -413,7 +446,7 @@ export class Importer {
         const geo = new MD2Loader(manager).parse(await readBuf(entry.blob));
         const mat = stdMaterial();
         const img = vfs.list().find((e) => IMAGE_EXTS.has(e.ext));
-        if (img) { const t = await textureFromBlob(img.blob); t.colorSpace = THREE.SRGBColorSpace; mat.map = t; mat.color.set(0xffffff); }
+        if (img) { const t = await textureFromBytes(new Uint8Array(await img.blob.arrayBuffer()), img.name, this.app.settings.maxTexture()); t.colorSpace = THREE.SRGBColorSpace; mat.map = t; mat.color.set(0xffffff); }
         const mesh = new THREE.Mesh(geo, mat);
         mesh.name = name;
         root = new THREE.Group();
@@ -447,19 +480,21 @@ export class Importer {
           importLights: this.app.settings.get('importLights'),
           maxSubdivLevels: ['potato', 'low'].includes(this.app.settings.get('quality')) ? 1 : 2,
           maxSubdivFaces: ['potato', 'low'].includes(this.app.settings.get('quality')) ? 150000 : 400000,
-          loadImage: async ({ bytes, path }) => {
-            if (bytes && bytes.length) {
-              const type = sniffImageType(bytes);
-              if (type) return textureFromBlob(new Blob([bytes], { type }));
-              if (/\.tga$/i.test(path)) return new TGALoader().parse(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+          loadImage: async ({ bytes, path, name: imgName }) => {
+            const maxTex = this.app.settings.maxTexture();
+            const label = baseName((path || imgName || 'texture').replace(/^\/\//, ''));
+            try {
+              if (bytes && bytes.length) return await textureFromBytes(bytes, path || imgName, maxTex);
+              if (!path) return null;
+              // UDIM tiles: use the first tile
+              const rel = path.replace(/^\/\//, '').replace(/<UDIM>/g, '1001').replace(/<UVTILE>/g, 'u1_v1');
+              const e = vfs.find(rel, entry.path) || vfs.find(baseName(rel), entry.path);
+              if (!e) { missing.add(baseName(rel)); return null; }
+              return await textureFromBytes(new Uint8Array(await e.blob.arrayBuffer()), e.name, maxTex);
+            } catch (err) {
+              unreadable.add(label);
               return null;
             }
-            if (!path) return null;
-            const rel = path.replace(/^\/\//, '');
-            const e = vfs.find(rel, entry.path) || vfs.find(baseName(rel), entry.path);
-            if (!e) { missing.add(baseName(rel)); return null; }
-            if (e.ext === 'tga') return new TGALoader().parse(await e.blob.arrayBuffer());
-            return textureFromBlob(e.blob);
           },
         });
         root = res.scene;
@@ -505,6 +540,10 @@ export class Importer {
         const gpuMax = renderer.capabilities.maxTextureSize || 4096;
         await optimizeTextures(root, this.app.settings.maxTexture(), gpuMax);
       } catch (e) { console.warn(e); }
+      // physics / collision meshes exported along with the model (MMD rigid
+      // bodies, Unreal UCX_ colliders...) start hidden. .blend files say
+      // what's hidden themselves.
+      if (ext !== 'blend') helperCount = hideHelperMeshes(root);
     }
     // tidy clip names: "Armature|Walk" -> "Walk", "mixamo.com" -> file name
     for (const c of animations) {
@@ -530,17 +569,18 @@ export class Importer {
         unitNote = 'converted from centimeters to meters';
       }
     }
+    if (unreadable.size) warnings.push(`Couldn't read texture${unreadable.size > 1 ? 's' : ''}: ${[...unreadable].slice(0, 6).join(', ')}${unreadable.size > 6 ? '…' : ''} (unsupported image format)`);
     if (missing.size) warnings.push(`Missing texture${missing.size > 1 ? 's' : ''}: ${[...missing].slice(0, 6).join(', ')}${missing.size > 6 ? '…' : ''} (drop the textures or a .zip together with the model)`);
     const animationOnly = !!root && !hasMesh(root) && animations.length > 0;
     const notes = unitNote ? [unitNote] : [];
+    if (helperCount) notes.push(`${helperCount} physics/collision helper object${helperCount > 1 ? 's are' : ' is'} hidden (show ${helperCount > 1 ? 'them' : 'it'} from the Scene list)`);
     if (kind === 'animation') return { root: null, animations, warnings, notes, format: ext, name, kind, animationOnly: true };
     return { root, animations, warnings, notes, format: ext, name, kind, animationOnly, hasBones: root ? hasBones(root) : false, info };
   }
 
   async imagePlane(entry) {
     let tex;
-    if (entry.ext === 'tga') tex = new TGALoader().parse(await entry.blob.arrayBuffer());
-    else tex = await textureFromBlob(entry.blob);
+    tex = await textureFromBytes(new Uint8Array(await entry.blob.arrayBuffer()), entry.name, this.app.settings.maxTexture());
     tex.colorSpace = THREE.SRGBColorSpace;
     const img = tex.image;
     const aspect = (img.width || 1) / (img.height || 1);

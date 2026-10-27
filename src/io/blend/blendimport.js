@@ -883,9 +883,10 @@ export async function importBlend(arrayBuffer, opts = {}) {
       m.roughness = maView.get('roughness') ?? 0.5;
       const nt = maView.deref('nodetree', 'bNodeTree');
       if (nt && (maView.get('use_nodes') || bf.version >= 500)) {
-        try { await applyNodeTree(bf, nt, m, getImageTexture); } catch (e) { warnings.push('Material ' + m.name + ': ' + e.message); }
+        try { await applyNodeTree(bf, nt, m, getImageTexture, maView); } catch (e) { warnings.push('Material ' + m.name + ': ' + e.message); }
       }
-      m.side = THREE.FrontSide;
+      // Blender shows both sides unless "Backface Culling" is ticked
+      m.side = (maView.get('blend_flag') || 0) & 1 ? THREE.FrontSide : THREE.DoubleSide;
       return m;
     })();
     matCache.set(maView.offset, p);
@@ -893,7 +894,18 @@ export async function importBlend(arrayBuffer, opts = {}) {
   };
 
   // ---------- objects
-  const objViews = bf.idBlocks('OB').map((b) => bf.view(b));
+  let objViews = bf.idBlocks('OB').map((b) => bf.view(b));
+  const vis = sceneVisibility(bf);
+  if (vis) {
+    // objects that aren't in the current scene (other scenes, unused data) stay out,
+    // except parents of objects that are in it
+    const keep = new Set(vis.inScene);
+    for (const ob of objViews) {
+      if (!vis.inScene.has(ob.offset)) continue;
+      for (let p = ob.deref('parent'), n = 0; p && n < 64; p = p.deref('parent'), n++) keep.add(p.offset);
+    }
+    objViews = objViews.filter((ob) => keep.has(ob.offset));
+  }
   const nodes = new Map(); // ob offset -> {ob, node(animated), attach(parent for children)}
   const objByPtr = new Map();
   for (const b of bf.idBlocks('OB')) objByPtr.set(b.oldPtr, bf.view(b));
@@ -919,9 +931,8 @@ export async function importBlend(arrayBuffer, opts = {}) {
     node.quaternion.copy(dq).multiply(q);
     node.scale.set(size[0] * dscale[0], size[1] * dscale[1], size[2] * dscale[2]);
     node.userData.blend = { type, rotmode };
-    const restrict = ob.get('restrictflag') || 0;
-    if (restrict & 1) node.visible = false;
-    nodes.set(ob.offset, { ob, node, attach: node, type });
+    const hidden = vis ? (!vis.inScene.has(ob.offset) || vis.isHidden(ob)) : !!((ob.get('restrictflag') || 0) & 1);
+    nodes.set(ob.offset, { ob, node, attach: node, type, hidden });
   }
 
   // armature bones
@@ -1128,8 +1139,10 @@ export async function importBlend(arrayBuffer, opts = {}) {
     const skeleton = new THREE.Skeleton(bones);
     mesh.bind(skeleton, mesh.matrixWorld);
   }
+  const unsupportedCons = new Set();
   for (const arm of armatures.values()) {
     if (!arm.pose) continue;
+    const armUnsupported = new Set();
     for (const pc of bf.listBase(arm.pose.get('chanbase'), 'bPoseChannel')) {
       const b = arm.bones.get(pc.str('name'));
       const rest = arm.restInfo.get(pc.str('name'));
@@ -1141,8 +1154,36 @@ export async function importBlend(arrayBuffer, opts = {}) {
       b.quaternion.copy(rest.quat).multiply(q);
       b.scale.set(s[0], s[1], s[2]);
       b.userData.blendRotmode = pc.get('rotmode') ?? 0;
+      const cons = readConstraints(bf, pc, armUnsupported);
+      if (cons.length) {
+        b.userData.constraints = cons;
+        arm.hasConstraints = true;
+      }
+      const ikflag = pc.get('ikflag') || 0;
+      if (ikflag) {
+        b.userData.ik = {
+          lock: [!!(ikflag & 1), !!(ikflag & 2), !!(ikflag & 4)],
+          limit: [!!(ikflag & 8), !!(ikflag & 16), !!(ikflag & 32)],
+          min: pc.get('limitmin') || [0, 0, 0],
+          max: pc.get('limitmax') || [0, 0, 0],
+        };
+      }
+    }
+    // rest pose per bone, needed to evaluate constraints later
+    if (arm.hasConstraints) {
+      for (const [name, r] of arm.restInfo) {
+        const b = arm.bones.get(name);
+        if (b) b.userData.rest = { p: r.pos.toArray(), q: r.quat.toArray(), len: r.length };
+      }
+      arm.node.userData.constraintArmature = true;
+    }
+    if (armUnsupported.size) {
+      // can't reproduce this rig's behaviour: pose the deforming bones directly instead
+      arm.node.userData.constraintsIncomplete = [...armUnsupported];
+      for (const u of armUnsupported) unsupportedCons.add(u);
     }
   }
+  if (unsupportedCons.size) warnings.push(`This rig uses bone constraints WebBlend can't run (${[...unsupportedCons].join(', ')}), so its control bones are off. You can still pose the bones that move the mesh.`);
 
   // ---------- animations
   const animations = [];
@@ -1298,10 +1339,21 @@ export async function importBlend(arrayBuffer, opts = {}) {
   }
   for (const c of merged.values()) { c.resetDuration?.(); animations.push(c); }
 
+  // Hidden objects: hide what they draw, not the node, because in Blender
+  // hiding a parent (e.g. the armature) doesn't hide its children.
+  let hiddenCount = 0;
+  for (const e of nodes.values()) {
+    if (!e.hidden) continue;
+    hiddenCount++;
+    e.node.userData.hiddenInFile = true;
+    for (const c of e.node.children) if (c.isMesh || c.isCamera || c.isLight || c.isPoints || c.isLine) c.visible = false;
+  }
+
   root.updateMatrixWorld(true);
   const info = {
     version: (bf.version / 100).toFixed(2),
     objects: nodes.size,
+    hidden: hiddenCount,
     meshes: meshTasks.filter((e) => e.mesh).length,
     armatures: armatures.size,
     actions: animations.length,
@@ -1310,112 +1362,393 @@ export async function importBlend(arrayBuffer, opts = {}) {
   return { scene: root, animations, warnings, info };
 }
 
+// ---------------------------------------------------------------- bone constraints
+
+const CON_TYPES = {
+  2: ['TRACK_TO', 'bTrackToConstraint'], 3: ['IK', 'bKinematicConstraint'], 5: ['LIMIT_ROTATION', 'bRotLimitConstraint'],
+  8: ['COPY_ROTATION', 'bRotateLikeConstraint'], 9: ['COPY_LOCATION', 'bLocateLikeConstraint'], 10: ['COPY_SCALE', 'bSizeLikeConstraint'],
+  13: ['LOCKED_TRACK', 'bLockTrackConstraint'], 15: ['STRETCH_TO', 'bStretchToConstraint'], 21: ['DAMPED_TRACK', 'bDampTrackConstraint'],
+  23: ['COPY_TRANSFORMS', 'bTransLikeConstraint'],
+};
+const CON_NAMES = { 1: 'Child Of', 4: 'Follow Path', 6: 'Limit Location', 7: 'Limit Scale', 11: 'Python', 12: 'Action', 14: 'Limit Distance', 16: 'Floor', 18: 'Clamp To', 19: 'Transformation', 20: 'Shrinkwrap', 22: 'Spline IK', 24: 'Maintain Volume', 25: 'Pivot', 30: 'Armature' };
+const CON_SPACE = { 0: 'WORLD', 1: 'LOCAL', 2: 'POSE', 3: 'LOCAL_WITH_PARENT', 4: 'POSE', 5: 'WORLD', 6: 'LOCAL' };
+
+// Plain-data description of a pose bone's constraints (stored in bone.userData).
+function readConstraints(bf, pc, unsupported) {
+  const out = [];
+  for (const c of bf.listBase(pc.get('constraints'), 'bConstraint')) {
+    const t = c.get('type');
+    const flag = c.get('flag') || 0;
+    if (flag & (512 | 4)) continue; // muted or invalid
+    const def = CON_TYPES[t];
+    if (!def) { if (CON_NAMES[t]) unsupported.add(CON_NAMES[t]); continue; }
+    const [type, structName] = def;
+    const d = bf.viewAtPtr(c.ptr('data'), structName, c.scope);
+    if (!d) continue;
+    const tar = d.deref('tar', 'Object');
+    const con = {
+      type,
+      name: c.str('name'),
+      influence: c.get('enforce') ?? 1,
+      ownerSpace: CON_SPACE[c.get('ownspace')] || 'WORLD',
+      targetSpace: CON_SPACE[c.get('tarspace')] || 'WORLD',
+      headTail: c.get('headtail') || 0,
+      target: tar ? tar.idName() : '',
+      subtarget: d.str('subtarget'),
+    };
+    if (type === 'COPY_ROTATION' || type === 'COPY_LOCATION' || type === 'COPY_SCALE' || type === 'COPY_TRANSFORMS') {
+      con.flag = d.get('flag') || 0;
+      con.mix = d.get('mix_mode') || 0;
+      con.eulerOrder = d.get('euler_order') || 0;
+    } else if (type === 'IK') {
+      const ik = d.get('flag') || 0;
+      con.chain = d.get('rootbone') || 0;
+      con.useTail = !!(ik & 1);
+      con.iterations = d.get('iterations') || 500;
+      const pole = d.deref('poletar', 'Object');
+      con.pole = pole ? pole.idName() : '';
+      con.poleSub = d.str('polesubtarget');
+      con.poleAngle = d.get('poleangle') || 0;
+      if (!con.target) continue; // IK without target (auto IK) does nothing on its own
+    } else if (type === 'LIMIT_ROTATION') {
+      con.flag = d.get('flag') || 0;
+      con.min = [d.get('xmin') || 0, d.get('ymin') || 0, d.get('zmin') || 0];
+      con.max = [d.get('xmax') || 0, d.get('ymax') || 0, d.get('zmax') || 0];
+      con.eulerOrder = d.get('euler_order') || 0;
+    } else if (type === 'DAMPED_TRACK' || type === 'LOCKED_TRACK') {
+      con.track = d.get('trackflag') ?? 1;
+    } else if (type === 'TRACK_TO') {
+      con.track = d.get('reserved1') ?? 1;
+    } else if (type === 'STRETCH_TO') {
+      con.restLength = d.get('orglength') || 0;
+    }
+    if (type !== 'LIMIT_ROTATION' && !con.target) continue;
+    out.push(con);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- scene / visibility
+
+// Which objects belong to the current scene, and which of those Blender hides
+// in the viewport (hidden object, hidden or excluded collection, "H" hide).
+function sceneVisibility(bf) {
+  const globB = bf.blocks.find((b) => b.code === 'GLOB');
+  const gdef = bf.structDef('FileGlobal');
+  const glob = globB && gdef ? new StructView(bf, globB.offset, gdef, globB) : null;
+  let sce = glob ? glob.deref('curscene', 'Scene') : null;
+  if (!sce) { const sb = bf.idBlocks('SC')[0]; sce = sb ? bf.view(sb) : null; }
+  if (!sce) return null;
+  const master = sce.deref('master_collection', 'Collection');
+  if (!master) return null; // files from before 2.8
+  const inScene = new Set();
+  const seenCol = new Set();
+  const walkCol = (c) => {
+    if (!c || seenCol.has(c.offset)) return;
+    seenCol.add(c.offset);
+    for (const co of bf.listBase(c.get('gobject'), 'CollectionObject')) { const ob = co.deref('ob', 'Object'); if (ob) inScene.add(ob.offset); }
+    for (const ch of bf.listBase(c.get('children'), 'CollectionChild')) walkCol(ch.deref('collection', 'Collection'));
+  };
+  walkCol(master);
+  if (!inScene.size) return null;
+  const layers = [...bf.listBase(sce.get('view_layers'), 'ViewLayer')];
+  let vl = glob ? glob.deref('cur_view_layer', 'ViewLayer') : null;
+  if (!vl || !layers.some((l) => l.offset === vl.offset)) vl = layers[0] || null;
+  const visibleCol = new Set();
+  const baseFlag = new Map();
+  if (vl) {
+    const walkLC = (lb, parentHidden, depth) => {
+      if (depth > 64) return;
+      for (const lc of bf.listBase(lb, 'LayerCollection')) {
+        const flag = lc.get('flag') || 0;
+        if (flag & 16) continue; // excluded (checkbox off)
+        const c = lc.deref('collection', 'Collection');
+        const hidden = parentHidden || !!(flag & 128) || !!(c && (c.get('flag') || 0) & 1);
+        if (!hidden && c) for (const co of bf.listBase(c.get('gobject'), 'CollectionObject')) { const ob = co.deref('ob', 'Object'); if (ob) visibleCol.add(ob.offset); }
+        walkLC(lc.get('layer_collections'), hidden, depth + 1);
+      }
+    };
+    walkLC(vl.get('layer_collections'), false, 0);
+    for (const b of bf.listBase(vl.get('object_bases'), 'Base')) { const ob = b.deref('object', 'Object'); if (ob) baseFlag.set(ob.offset, b.get('flag') || 0); }
+  }
+  return { inScene, isHidden: (ob) => {
+    const r = ob.get('restrictflag') || 0;
+    if (r & 1 || r & 4) return true; // hidden in viewport / disabled in renders
+    if (vl && !visibleCol.has(ob.offset)) return true;
+    if ((baseFlag.get(ob.offset) || 0) & 256) return true;
+    return false;
+  } };
+}
+
 // ---------------------------------------------------------------- nodes
 
-async function applyNodeTree(bf, nt, mat, getImageTexture) {
-  const nodes = [...bf.listBase(nt.get('nodes'), 'bNode')];
-  const links = [...bf.listBase(nt.get('links'), 'bNodeLink')];
-  const sockets = new Map(); // socket offset -> {node, socket}
-  const nodeInfo = nodes.map((n) => {
-    const inputs = [...bf.listBase(n.get('inputs'), 'bNodeSocket')];
-    const outputs = [...bf.listBase(n.get('outputs'), 'bNodeSocket')];
-    return { n, idname: n.str('idname'), inputs, outputs };
-  });
-  const linkTo = new Map(); // tosock offset -> link
-  for (const l of links) {
-    const ts = l.deref('tosock', 'bNodeSocket');
-    if (ts) linkTo.set(ts.offset, l);
-  }
+// Texture names that are clearly not the base color (MMD toon/sphere maps,
+// PBR helper maps...) and names that clearly are.
+const NOT_COLOR = /toon|sphere|\bsp[ah]\b|\.sp[ah]\b|normal|\bnrm\b|_n\b|_nm\b|bump|rough|metal|spec|gloss|occlu|\bao\b|_ao\b|mask|height|disp|emis|matcap|ramp|shadow|\blut\b|rim|cavity|curvature|detail|noise|orm\b|_mra\b|_rma\b/i;
+const IS_COLOR = /base|diffuse|albedo|colou?r|\bcol\b|_col\b|main|_d\b|_c\b|_bc\b|_alb\b|\btex\b|_tex\b|skin|body|face|hair|cloth/i;
+const NODE_DO_OUTPUT = 64;
+
+// Reads a material's node tree (following links into node groups) and fills
+// in a three.js material: base color + texture, alpha, metal/rough, normal map, emission.
+async function applyNodeTree(bf, nt, mat, getImageTexture, maView) {
+  const graphs = new Map();
+  const graph = (tree) => {
+    if (!tree) return null;
+    if (graphs.has(tree.offset)) return graphs.get(tree.offset);
+    const g = { tree, nodes: [], byOffset: new Map(), linkTo: new Map(), groupOut: null };
+    graphs.set(tree.offset, g);
+    for (const n of bf.listBase(tree.get('nodes'), 'bNode')) {
+      const info = { n, idname: n.str('idname'), name: n.str('name'), label: n.str('label'), flag: n.get('flag') || 0, inputs: [...bf.listBase(n.get('inputs'), 'bNodeSocket')], outputs: [...bf.listBase(n.get('outputs'), 'bNodeSocket')] };
+      g.nodes.push(info);
+      g.byOffset.set(n.offset, info);
+    }
+    for (const l of bf.listBase(tree.get('links'), 'bNodeLink')) {
+      if ((l.get('flag') || 0) & 16) continue; // muted link
+      const ts = l.deref('tosock', 'bNodeSocket');
+      if (ts) g.linkTo.set(ts.offset, l);
+    }
+    const outs = g.nodes.filter((x) => x.idname === 'NodeGroupOutput');
+    g.groupOut = outs.find((x) => x.flag & NODE_DO_OUTPUT) || outs[0] || null;
+    return g;
+  };
   const sockName = (s) => s.str('name') || s.str('identifier');
-  const input = (info, name) => info.inputs.find((s) => sockName(s) === name || s.str('identifier') === name);
-  const defaultValue = (s) => {
-    const dv = s.deref('default_value');
-    if (!dv) return null;
-    return dv.get('value');
+  const sameSock = (list, s) => {
+    const id = s.str('identifier'), nm = sockName(s);
+    return list.find((x) => x.str('identifier') === id) || list.find((x) => sockName(x) === nm) || null;
   };
-  const upstream = (sock, depth = 0) => {
-    // returns {info, outSock} of the node feeding this socket, skipping reroutes
-    const l = linkTo.get(sock.offset);
-    if (!l) return null;
-    const fn = l.deref('fromnode', 'bNode');
-    const fs = l.deref('fromsock', 'bNodeSocket');
-    const info = nodeInfo.find((x) => x.n.offset === fn?.offset);
-    if (!info) return null;
-    if (info.idname === 'NodeReroute' && depth < 16) return upstream(info.inputs[0], depth + 1);
-    return { info, outSock: fs };
-  };
-  const findImage = (sock, depth = 0) => {
-    if (!sock || depth > 6) return null;
-    const up = upstream(sock);
-    if (!up) return null;
-    if (up.info.idname === 'ShaderNodeTexImage') return { image: up.info.n.deref('id'), outName: up.outSock ? sockName(up.outSock) : 'Color' };
-    // walk through simple color nodes (mix, hue/sat, gamma, brightness, normal map, separate...)
-    for (const s of up.info.inputs) {
-      const r = findImage(s, depth + 1);
-      if (r) return r;
+  const input = (info, ...names) => {
+    for (const name of names) {
+      const s = info.inputs.find((x) => sockName(x) === name || x.str('identifier') === name);
+      if (s) return s;
     }
     return null;
   };
+  const defaultValue = (s) => {
+    const dv = s && s.deref('default_value');
+    return dv ? dv.get('value') : null;
+  };
+  const isGroupNode = (info) => /NodeGroup$|^ShaderNodeCustomGroup$/.test(info.idname) && info.n.ptr('id');
 
-  const output = nodeInfo.find((x) => x.idname === 'ShaderNodeOutputMaterial') || null;
-  let bsdf = null;
-  if (output) {
-    const surf = input(output, 'Surface');
-    const up = surf && upstream(surf);
-    if (up) bsdf = up.info;
+  // Follow a socket upstream through reroutes and group boundaries.
+  // -> { node: {g, info, outSock, stack}, names } | { sock (unlinked), names } | null
+  const trace = (g, sock, stack = [], names = [], depth = 0) => {
+    if (!g || !sock || depth > 64) return null;
+    const l = g.linkTo.get(sock.offset);
+    if (!l) return { sock, names };
+    const fn = l.deref('fromnode', 'bNode');
+    const fs = l.deref('fromsock', 'bNodeSocket');
+    const info = fn && g.byOffset.get(fn.offset);
+    if (!info || !fs) return null;
+    if (info.idname === 'NodeReroute') return trace(g, info.inputs[0], stack, names, depth + 1);
+    if (info.flag & 512 && info.inputs[0]) return trace(g, info.inputs[0], stack, names, depth + 1); // muted node passes through
+    if (info.idname === 'NodeGroupInput') {
+      if (!stack.length) return { sock: null, names };
+      const { g: pg, info: gnode } = stack[stack.length - 1];
+      const outer = sameSock(gnode.inputs, fs);
+      if (!outer) return null;
+      return trace(pg, outer, stack.slice(0, -1), [...names, sockName(outer)], depth + 1);
+    }
+    if (isGroupNode(info)) {
+      const sub = graph(info.n.deref('id', 'bNodeTree'));
+      const inner = sub && sub.groupOut && sameSock(sub.groupOut.inputs, fs);
+      if (!inner) return null;
+      return trace(sub, inner, [...stack, { g, info }], [...names, info.name, info.label, sockName(fs)], depth + 1);
+    }
+    return { node: { g, info, outSock: fs, stack }, names };
+  };
+  const valueOf = (g, sock, stack) => {
+    const t = trace(g, sock, stack);
+    return t && t.sock ? defaultValue(t.sock) : (t && !t.node ? null : undefined);
+  };
+
+  // all image textures feeding a socket, with the names seen on the way
+  const imagesFeeding = (g, sock, stack, out = [], path = [], depth = 0, seen = new Set()) => {
+    if (depth > 10) return out;
+    const t = trace(g, sock, stack);
+    if (!t || !t.node) return out;
+    const { info } = t.node;
+    const key = t.node.g.tree.offset + ':' + info.n.offset + ':' + t.node.stack.length;
+    if (seen.has(key)) return out;
+    seen.add(key);
+    const names = [...path, ...t.names];
+    if (info.idname === 'ShaderNodeTexImage') {
+      const image = info.n.deref('id');
+      if (image) out.push({ image, info, outName: sockName(t.node.outSock), names, depth });
+      return out;
+    }
+    for (const s of info.inputs) {
+      if (s.str('identifier') === 'Vector' || sockName(s) === 'Vector') continue;
+      imagesFeeding(t.node.g, s, t.node.stack, out, [...names, sockName(s)], depth + 1, seen);
+    }
+    return out;
+  };
+  const imageText = (c) => [c.info.name, c.info.label, c.image.idName(), c.image.str('filepath') || c.image.str('name'), ...c.names].join(' ');
+  const nonColor = (image) => {
+    const cs = image.get('colorspace_settings');
+    return !!cs && /non-?color|raw|linear data|generic data/i.test(cs.str('name'));
+  };
+  const scoreColor = (c) => {
+    const text = imageText(c);
+    let s = 0;
+    if (NOT_COLOR.test(text)) s -= 10;
+    if (IS_COLOR.test(text)) s += 4;
+    if (c.outName === 'Alpha') s -= 6;
+    if (nonColor(c.image)) s -= 8;
+    return s - c.depth * 0.3;
+  };
+  const best = (cands, min) => {
+    let top = null, ts = -Infinity;
+    for (const c of cands) { const s = scoreColor(c); if (s > ts) { ts = s; top = c; } }
+    return top && ts >= min ? top : null;
+  };
+  const textureFor = async (c, colorSpace) => {
+    const tex = await getImageTexture(c.image, colorSpace);
+    if (tex) {
+      const st = bf.viewAtPtr(c.info.n.ptr('storage'), 'NodeTexImage', c.info.n.scope);
+      const ext = st ? st.get('extension') ?? 0 : 0;
+      const wrap = ext === 1 || ext === 2 ? THREE.ClampToEdgeWrapping : ext === 3 ? THREE.MirroredRepeatWrapping : THREE.RepeatWrapping;
+      if (tex.wrapS !== wrap) { tex.wrapS = tex.wrapT = wrap; tex.needsUpdate = true; }
+    }
+    return tex;
+  };
+
+  // ----- find the surface shader
+  const root = graph(nt);
+  const outputs = root.nodes.filter((x) => x.idname === 'ShaderNodeOutputMaterial');
+  const output = outputs.find((x) => x.flag & NODE_DO_OUTPUT) || outputs[0] || null;
+  const SHADER = /Bsdf|Emission|Principled|EeveeSpecular|SubsurfaceScattering/;
+  let alphaMix = null;
+  const findShader = (g, sock, stack, depth = 0) => {
+    if (depth > 12) return null;
+    const t = trace(g, sock, stack);
+    if (!t || !t.node) return null;
+    const { info } = t.node;
+    if (info.idname === 'ShaderNodeBsdfTransparent') return { transparent: true };
+    if (SHADER.test(info.idname)) return t.node;
+    if (info.idname === 'ShaderNodeMixShader' || info.idname === 'ShaderNodeAddShader') {
+      const shaderIns = info.inputs.filter((s) => /^Shader/.test(s.str('identifier') || sockName(s)));
+      const found = shaderIns.map((s) => findShader(t.node.g, s, t.node.stack, depth + 1));
+      const ti = found.findIndex((f) => f && f.transparent);
+      const real = found.find((f) => f && !f.transparent);
+      if (ti >= 0 && real && info.idname === 'ShaderNodeMixShader') alphaMix = { g: t.node.g, stack: t.node.stack, fac: input(info, 'Fac', 'Factor'), transparentFirst: ti === 0 };
+      return real || null;
+    }
+    // anything else (shader-to-RGB, custom nodes...): keep looking upstream
+    for (const s of info.inputs) {
+      const r = findShader(t.node.g, s, t.node.stack, depth + 1);
+      if (r && !r.transparent) return r;
+    }
+    return null;
+  };
+  let bsdf = output ? findShader(root, input(output, 'Surface'), []) : null;
+  if (!bsdf) {
+    const p = root.nodes.find((x) => x.idname === 'ShaderNodeBsdfPrincipled') || root.nodes.find((x) => SHADER.test(x.idname));
+    if (p) bsdf = { g: root, info: p, stack: [] };
   }
-  if (!bsdf || !/Bsdf|Emission/.test(bsdf.idname)) bsdf = nodeInfo.find((x) => x.idname === 'ShaderNodeBsdfPrincipled') || nodeInfo.find((x) => /ShaderNodeBsdf/.test(x.idname)) || bsdf;
-  if (!bsdf) return;
 
-  const colorSock = input(bsdf, 'Base Color') || input(bsdf, 'Color');
-  if (colorSock) {
-    const v = defaultValue(colorSock);
-    if (Array.isArray(v)) mat.color.setRGB(v[0], v[1], v[2]);
-    const img = findImage(colorSock);
-    if (img && img.image) {
-      const tex = await getImageTexture(img.image, THREE.SRGBColorSpace);
-      if (tex) { mat.map = tex; mat.color.setRGB(1, 1, 1); }
+  // ----- base color
+  let colorDone = false;
+  if (bsdf) {
+    const { g, info, stack } = bsdf;
+    const colorSock = input(info, 'Base Color', 'Color', 'Diffuse Color');
+    if (colorSock) {
+      const v = valueOf(g, colorSock, stack);
+      if (Array.isArray(v)) mat.color.setRGB(v[0], v[1], v[2]);
+      const pick = best(imagesFeeding(g, colorSock, stack), -5);
+      if (pick) {
+        const tex = await textureFor(pick, THREE.SRGBColorSpace);
+        if (tex) { mat.map = tex; mat.color.setRGB(1, 1, 1); colorDone = true; mat.userData.mapNode = pick.info; }
+      }
     }
   }
-  const metal = input(bsdf, 'Metallic');
-  if (metal) { const v = defaultValue(metal); if (typeof v === 'number') mat.metalness = v; }
-  const rough = input(bsdf, 'Roughness');
-  if (rough) { const v = defaultValue(rough); if (typeof v === 'number') mat.roughness = v; }
-  const alpha = input(bsdf, 'Alpha');
-  if (alpha) {
-    const v = defaultValue(alpha);
-    if (linkTo.has(alpha.offset)) {
-      const img = findImage(alpha);
-      if (img && img.image) { mat.alphaTest = 0.5; if (!mat.map) { const t = await getImageTexture(img.image, THREE.SRGBColorSpace); if (t) mat.map = t; } }
-    } else if (typeof v === 'number' && v < 0.999) { mat.transparent = true; mat.opacity = v; mat.depthWrite = v > 0.5; }
+  if (!colorDone) {
+    // custom/toon shaders we can't follow: use the most color-like image anywhere in the material
+    const all = [];
+    const scan = (g, stack, depth) => {
+      if (!g || depth > 4) return;
+      for (const info of g.nodes) {
+        if (info.idname === 'ShaderNodeTexImage') { const image = info.n.deref('id'); if (image) all.push({ image, info, outName: 'Color', names: [], depth }); }
+        else if (isGroupNode(info)) scan(graph(info.n.deref('id', 'bNodeTree')), [...stack, { g, info }], depth + 1);
+      }
+    };
+    scan(root, [], 0);
+    const pick = best(all, all.length === 1 ? -4 : 0);
+    if (pick) {
+      const tex = await textureFor(pick, THREE.SRGBColorSpace);
+      if (tex) { mat.map = tex; mat.color.setRGB(1, 1, 1); mat.userData.mapNode = pick.info; }
+    }
   }
-  const normal = input(bsdf, 'Normal');
+  if (!bsdf) return;
+  const { g, info, stack } = bsdf;
+
+  const num = (sock) => { const v = sock ? valueOf(g, sock, stack) : null; return typeof v === 'number' ? v : null; };
+  const metal = num(input(info, 'Metallic'));
+  if (metal !== null) mat.metalness = metal;
+  const rough = num(input(info, 'Roughness'));
+  if (rough !== null) mat.roughness = rough;
+  if (info.idname === 'ShaderNodeBsdfDiffuse' || info.idname === 'ShaderNodeBsdfToon') { mat.metalness = 0; mat.roughness = Math.max(mat.roughness, 0.8); }
+
+  // ----- alpha
+  const blended = (maView.get('surface_render_method') === 1) || (maView.get('blend_method') === 5);
+  const useImageAlpha = () => {
+    if (blended) { mat.transparent = true; mat.alphaTest = 0.05; }
+    else mat.alphaTest = 0.5;
+  };
+  const alphaSock = input(info, 'Alpha');
+  if (alphaSock) {
+    const t = trace(g, alphaSock, stack);
+    if (t && t.node) {
+      if (imagesFeeding(g, alphaSock, stack).length) useImageAlpha();
+    } else {
+      const v = t && t.sock ? defaultValue(t.sock) : null;
+      if (typeof v === 'number' && v < 0.999) { mat.transparent = true; mat.opacity = v; mat.depthWrite = v > 0.5; }
+    }
+  }
+  if (alphaMix && alphaMix.fac) {
+    const t = trace(alphaMix.g, alphaMix.fac, alphaMix.stack);
+    if (t && t.node) {
+      if (imagesFeeding(alphaMix.g, alphaMix.fac, alphaMix.stack).length) useImageAlpha();
+    } else {
+      const f = t && t.sock ? defaultValue(t.sock) : null;
+      if (typeof f === 'number') {
+        const op = alphaMix.transparentFirst ? f : 1 - f;
+        if (op < 0.999) { mat.transparent = true; mat.opacity = op; mat.depthWrite = op > 0.5; }
+      }
+    }
+  }
+
+  // ----- normal map
+  const normal = input(info, 'Normal');
   if (normal) {
-    const up = upstream(normal);
-    if (up && up.info.idname === 'ShaderNodeNormalMap') {
-      const img = findImage(input(up.info, 'Color'));
-      if (img && img.image) {
-        const t = await getImageTexture(img.image, THREE.NoColorSpace);
-        if (t) {
-          mat.normalMap = t;
-          const strength = defaultValue(input(up.info, 'Strength'));
+    const t = trace(g, normal, stack);
+    if (t && t.node && t.node.info.idname === 'ShaderNodeNormalMap') {
+      const nm = t.node;
+      const imgs = imagesFeeding(nm.g, input(nm.info, 'Color'), nm.stack);
+      if (imgs.length) {
+        const tex = await textureFor(imgs[0], THREE.NoColorSpace);
+        if (tex && tex !== mat.map) {
+          mat.normalMap = tex;
+          const strength = valueOf(nm.g, input(nm.info, 'Strength'), nm.stack);
           if (typeof strength === 'number') mat.normalScale.set(strength, strength);
         }
       }
     }
   }
-  const emis = input(bsdf, 'Emission Color') || input(bsdf, 'Emission');
-  const emisStr = input(bsdf, 'Emission Strength');
-  const strength = emisStr ? defaultValue(emisStr) : 1;
+
+  // ----- emission
+  const emis = input(info, 'Emission Color', 'Emission');
+  const emisStr = input(info, 'Emission Strength');
+  const strength = emisStr ? num(emisStr) : 1;
   if (emis && typeof strength === 'number' && strength > 0) {
-    const v = defaultValue(emis);
+    const v = valueOf(g, emis, stack);
     if (Array.isArray(v) && (v[0] + v[1] + v[2]) > 0) { mat.emissive.setRGB(v[0], v[1], v[2]); mat.emissiveIntensity = strength; }
-    const img = findImage(emis);
-    if (img && img.image) { const t = await getImageTexture(img.image, THREE.SRGBColorSpace); if (t) { mat.emissiveMap = t; mat.emissive.setRGB(1, 1, 1); mat.emissiveIntensity = strength; } }
+    const imgs = imagesFeeding(g, emis, stack);
+    if (imgs.length) { const t = await textureFor(imgs[0], THREE.SRGBColorSpace); if (t) { mat.emissiveMap = t; mat.emissive.setRGB(1, 1, 1); mat.emissiveIntensity = strength; } }
   }
-  if (bsdf.idname === 'ShaderNodeEmission') {
-    const c = defaultValue(input(bsdf, 'Color'));
-    const s = defaultValue(input(bsdf, 'Strength'));
-    if (Array.isArray(c)) { mat.emissive.setRGB(c[0], c[1], c[2]); mat.emissiveIntensity = typeof s === 'number' ? s : 1; mat.color.setRGB(0, 0, 0); }
+  if (info.idname === 'ShaderNodeEmission') {
+    const c = valueOf(g, input(info, 'Color'), stack);
+    const s = num(input(info, 'Strength'));
+    if (Array.isArray(c)) { mat.emissive.setRGB(c[0], c[1], c[2]); mat.emissiveIntensity = s ?? 1; if (!mat.map) mat.color.setRGB(0, 0, 0); }
+    if (mat.map && !mat.emissiveMap) { mat.emissiveMap = mat.map; mat.emissive.setRGB(1, 1, 1); }
   }
 }

@@ -12,4 +12,5 @@ D=$(cd "$(dirname "$0")/blender" && pwd)
 "$PY" "$D/make_zoo.py" -- "$OUT/zoo"
 mkdir -p "$OUT/zoo/fbxtex" && "$PY" "$D/make_fbxtex.py" -- "$OUT/zoo/fbxtex"
 "$PY" "$D/make_bvh.py" -- "$OUT/zoo" "$OUT/assets/hero.blend"
+mkdir -p "$OUT/mmd" && "$PY" "$D/make_mmd_style.py" -- "$OUT/mmd" && (cd "$OUT/mmd" && rm -f goatchan.zip && zip -qr goatchan.zip goat)
 echo "Assets in $OUT (zip the objpack / gltfsep / fbxtex folders for the zip tests)"

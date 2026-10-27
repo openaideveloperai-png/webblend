@@ -18,6 +18,7 @@ export const DEFAULTS = {
   autoQuality: true,
   showGrid: true,
   showSkeleton: true,
+  showAllBones: false,
   showStats: false,
   showAxes: true,
   fps: 30,

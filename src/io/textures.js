@@ -1,5 +1,7 @@
 // Texture helpers: downscale oversized textures to save GPU/CPU memory.
 import * as THREE from 'three';
+import { TGALoader } from 'three/examples/jsm/loaders/TGALoader.js';
+import { decodeDDS } from './dds.js';
 
 export const TEXTURE_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap', 'bumpMap', 'displacementMap', 'lightMap', 'specularMap', 'clearcoatMap', 'clearcoatNormalMap', 'clearcoatRoughnessMap', 'sheenColorMap', 'sheenRoughnessMap', 'transmissionMap', 'thicknessMap', 'specularColorMap', 'specularIntensityMap', 'iridescenceMap', 'anisotropyMap', 'gradientMap', 'matcap'];
 
@@ -110,4 +112,71 @@ export function sniffImageType(u8) {
   if (u8[0] === 0x47 && u8[1] === 0x49 && u8[2] === 0x46) return 'image/gif';
   if (u8[0] === 0x42 && u8[1] === 0x4d) return 'image/bmp';
   return '';
+}
+
+// RGBA8 pixels (rows top to bottom) -> texture that matches image orientation
+export function rgbaTexture(data, width, height) {
+  const t = new THREE.DataTexture(data, width, height, THREE.RGBAFormat);
+  t.flipY = true;
+  t.generateMipmaps = true;
+  t.minFilter = THREE.LinearMipmapLinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.needsUpdate = true;
+  return t;
+}
+
+export function textureFromTGA(buffer) {
+  const r = new TGALoader().parse(buffer);
+  return rgbaTexture(r.data, r.width, r.height);
+}
+
+export function textureFromDDS(buffer, maxSize) {
+  const r = decodeDDS(buffer, maxSize);
+  return rgbaTexture(r.data, r.width, r.height);
+}
+
+const extOf = (name) => (/\.([a-z0-9]+)$/i.exec(name || '') || [])[1]?.toLowerCase() || '';
+
+// Any image file as bytes -> texture. png jpg webp gif bmp avif (browser),
+// tga, dds (incl. BC7) and MMD sphere maps (.spa/.sph, which are BMPs).
+export async function textureFromBytes(u8, name = '', maxSize = 16384) {
+  const buffer = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+  if (u8.length > 4 && u8[0] === 0x44 && u8[1] === 0x44 && u8[2] === 0x53 && u8[3] === 0x20) return textureFromDDS(buffer, maxSize);
+  const type = sniffImageType(u8);
+  if (type) return textureFromBlob(new Blob([u8], { type }));
+  if (extOf(name) === 'tga' || looksLikeTGA(u8)) return textureFromTGA(buffer);
+  // let the browser try (avif, ico, ...)
+  return textureFromBlob(new Blob([u8]));
+}
+
+function looksLikeTGA(u8) {
+  // no magic number: check the header fields are plausible
+  if (u8.length < 18) return false;
+  const cmap = u8[1], type = u8[2], depth = u8[16];
+  return cmap <= 1 && [1, 2, 3, 9, 10, 11].includes(type) && [8, 15, 16, 24, 32].includes(depth);
+}
+
+// Loader for LoadingManager handlers (FBX/OBJ/DAE textures): returns the
+// texture right away and fills it in when the file has loaded.
+export class AnyImageLoader extends THREE.Loader {
+  constructor(manager, maxSize = 16384) { super(manager); this.maxSize = maxSize; }
+  load(url, onLoad, onProgress, onError) {
+    const tex = new THREE.DataTexture(new Uint8Array([200, 200, 200, 255]), 1, 1, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    const loader = new THREE.FileLoader(this.manager);
+    loader.setResponseType('arraybuffer');
+    loader.setPath(this.path);
+    loader.load(url, async (buf) => {
+      try {
+        const t = await textureFromBytes(new Uint8Array(buf), url, this.maxSize);
+        tex.image = t.image;
+        tex.flipY = t.flipY;
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.needsUpdate = true;
+        onLoad?.(tex);
+      } catch (e) { onError ? onError(e) : console.warn('texture failed', url, e); }
+    }, onProgress, onError);
+    return tex;
+  }
 }

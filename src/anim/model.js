@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import { JointHelper } from '../core/joints.js';
 import { uid } from '../core/util.js';
 import { clipWithUuids, bumpClip, parseTrack } from './clips.js';
+import { ConstraintSolver, hasConstraints } from './constraints.js';
 
 const LOOPS = { repeat: THREE.LoopRepeat, once: THREE.LoopOnce, pingpong: THREE.LoopPingPong };
 
@@ -42,6 +43,81 @@ export class Model {
     });
     this.nodeCount = 0;
     this.root.traverse(() => { this.nodeCount++; });
+    this.constraints = null;
+    if (this.bones.length && hasConstraints(this.bones)) {
+      let incomplete = false;
+      this.root.traverse((o) => { if (o.userData.constraintsIncomplete) incomplete = true; });
+      if (!incomplete) {
+        try { const s = new ConstraintSolver(this.root, this.bones); if (s.count) this.constraints = s; } catch (e) { console.warn('constraints', e); }
+      }
+    }
+    this.analyzeBones();
+  }
+
+  // Which bones matter for posing: bones that move the mesh (weighted, or
+  // carrying parented parts), the control bones that drive them through
+  // constraints, IK handles, and their parents. Leaf/helper bones are left out.
+  analyzeBones() {
+    const weighted = new Set();
+    for (const s of this.skinned) {
+      const si = s.geometry.attributes.skinIndex, sw = s.geometry.attributes.skinWeight;
+      const bones = s.skeleton && s.skeleton.bones;
+      if (!si || !sw || !bones) continue;
+      const used = new Uint8Array(bones.length);
+      for (let i = 0, n = si.count; i < n; i++) {
+        for (let k = 0; k < 4; k++) if (sw.getComponent(i, k) > 1e-3) used[si.getComponent(i, k)] = 1;
+      }
+      bones.forEach((b, i) => { if (used[i]) weighted.add(b); });
+    }
+    for (const b of this.bones) {
+      if (b.children.some((c) => !c.isBone && hasGeometry(c))) weighted.add(b);
+    }
+    const driven = this.constraints ? this.constraints.driven : new Map();
+    const effective = new Set();
+    const addEff = (b, d = 0) => {
+      if (effective.has(b) || d > 64) return;
+      effective.add(b);
+      for (const t of driven.get(b) || []) addEff(t, d + 1);
+    };
+    for (const b of weighted) addEff(b);
+    if (this.constraints) {
+      for (const it of this.constraints.items) {
+        if (it.c.type !== 'IK' || !it.chain.some((b) => effective.has(b))) continue;
+        if (it.target && it.target.isBone) effective.add(it.target);
+        if (it.pole && it.pole.isBone) effective.add(it.pole);
+      }
+    }
+    const keep = new Set();
+    for (const b of effective) for (let p = b; p && p.isBone; p = p.parent) keep.add(p);
+    this.weightedBones = weighted;
+    this.effectiveBones = keep;
+    this.drivenBones = new Set([...driven.keys()].filter((b) => driven.get(b).some((t) => keep.has(t))));
+    const helper = /^_(dummy|shadow)_|^(mch|org|wgt)[-_.]/i;
+    let list = this.bones.filter((b) => keep.has(b) && !this.drivenBones.has(b) && !helper.test(b.name));
+    if (!weighted.size || list.length < 2) list = this.bones.filter((b) => !helper.test(b.name));
+    if (list.length < 2) list = this.bones.slice();
+    this.poseBones = list;
+  }
+
+  // 2 = moves the mesh, 1 = other, 0 = overridden by constraints
+  boneRank(b) {
+    if (this.drivenBones && this.drivenBones.has(b)) return 0;
+    return this.effectiveBones && this.effectiveBones.has(b) && this.weightedBones.size ? 2 : 1;
+  }
+
+  animatedSet() {
+    const set = new Set();
+    for (const e of this.clips) {
+      if (!e.playing || !(e.weight > 0)) continue;
+      for (const t of e.clip.tracks) { const i = t.name.indexOf('.'); set.add(i > 0 ? t.name.slice(0, i) : t.name); }
+    }
+    return set;
+  }
+
+  solveConstraints() {
+    if (!this.constraints) return false;
+    this.constraints.solve(this.animatedSet());
+    return true;
   }
 
   captureRest() {
@@ -92,7 +168,8 @@ export class Model {
     }
     const avg = n ? total / n : this.size * 0.05;
     const size = Math.min(Math.max(avg * 0.12, this.size * 0.004), this.size * 0.02);
-    this.joints = new JointHelper(this, this.bones, size);
+    const shown = this.app.settings.get('showAllBones') ? this.bones : (this.poseBones || this.bones);
+    this.joints = new JointHelper(this, shown, size);
     this.joints.visible = this.app.settings.get('showSkeleton') && this.root.visible;
     this.app.viewport.helpers.add(this.joints);
     this.joints.update();
@@ -249,6 +326,12 @@ export class Model {
     if (this.joints) { this.joints.parent?.remove(this.joints); this.joints.dispose(); }
     disposeObject(this.root, sharedCheck);
   }
+}
+
+function hasGeometry(o) {
+  let found = false;
+  o.traverse((c) => { if (!found && (c.isMesh || c.isPoints || c.isLine)) found = true; });
+  return found;
 }
 
 export function disposeObject(root, isShared) {

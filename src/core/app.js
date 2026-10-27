@@ -55,7 +55,7 @@ export class App extends Emitter {
     this.viewport.helpers.add(this.selBox);
     this.cameraHelpers = new Map();
     this.bindGizmo();
-    this.detectHumanoid = (model) => detectHumanoid(model.root, model.bones);
+    this.detectHumanoid = (model) => detectHumanoid(model.root, model.bones, { rank: (b) => model.boneRank(b) });
   }
 
   fatal(msg) { this.emit('fatal', msg); }
@@ -683,6 +683,8 @@ export class App extends Emitter {
       this.emit('evaluated');
     }
     this.world.updateMatrixWorld(true);
+    // bone constraints (control bones driving deform bones, IK legs...)
+    for (const m of this.models) if (m.constraints && m.root.visible && m.solveConstraints()) m.root.updateMatrixWorld(true);
     for (const m of this.models) m.updateHelpers();
     for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); this.updateCameraHelper(m, h); }
     if (this.selBox.visible && (tr.playing || this._drag)) this.updateSelBox();
@@ -722,6 +724,7 @@ export class App extends Emitter {
     if (k === 'showGrid') { this.viewport.grid.visible = v; this.viewport.axes.visible = v && this.settings.get('showAxes'); }
     if (k === 'showAxes') this.viewport.axes.visible = v && this.settings.get('showGrid');
     if (k === 'showSkeleton') for (const m of this.models) if (m.joints) m.joints.visible = v && m.root.visible;
+    if (k === 'showAllBones') { for (const m of this.models) m.buildJoints(); this.select(this.selection.object, this.selection.model); }
     if (k === 'bgColor') this.viewport.renderer.setClearColor(new THREE.Color(v), 1);
     if (k === 'ikChain') this.select(this.selection.object, this.selection.model);
     this.emit('settings', k, v);
@@ -741,23 +744,26 @@ export class App extends Emitter {
       this.toast(e.message, 'error', 6000);
       return;
     }
-    const { primaries, images, unsupported } = this.importer.pickPrimaries(vfs);
+    const { primaries, images, unsupported, skipped = [] } = this.importer.pickPrimaries(vfs);
     const report = [];
     for (const u of unsupported) report.push(unsupportedMessage(u.ext));
     const loaded = [];
     const animOnly = [];
     const infoNotes = [];
+    for (const x of skipped) infoNotes.push(`skipped ${x.entry.name} (same model as ${x.kept.name})`);
     let added = 0;
     for (const entry of primaries) {
       status(`Loading ${entry.name}…`);
       await new Promise((r) => setTimeout(r, 16));
       try {
         const res = await this.importer.load(entry, vfs);
+        if (entry.optional && !res.root && !(res.animations || []).length) continue;
         for (const w of res.warnings) report.push(`${entry.name}: ${w}`);
         for (const n of res.notes || []) infoNotes.push(`${entry.name} ${n}`);
         if (res.animationOnly) animOnly.push({ entry, res });
         else if (res.root) loaded.push({ entry, res });
       } catch (e) {
+        if (entry.optional) continue;
         console.error(e);
         report.push(`${entry.name}: ${friendlyError(e)}`);
       }

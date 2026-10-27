@@ -32,7 +32,7 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 | Animation only | `.bvh` · `.fbx`/`.glb` with no mesh (applied to the selected character) · `.json` clips exported from this app |
 | 2D → 3D | `.svg` (extruded) · `.png` `.jpg` `.webp` `.gif` `.bmp` `.tga` (image planes) |
 | Archives | `.zip` (nested zips too) and whole folders |
-| Textures | png, jpg, webp, gif, bmp, tga, dds, ktx2 (ktx2 needs internet) |
+| Textures | png, jpg, webp, gif, bmp, tga, dds (BC1–BC5, BC7), ktx2 (ktx2 needs internet) |
 
 FBX, BVH and DAE files in centimeters are converted to meters automatically.
 
@@ -42,12 +42,18 @@ FBX, BVH and DAE files in centimeters are converted to meters automatically.
 
 Supported:
 - Meshes with n-gons, UVs, smooth/flat shading and multiple materials
-- Principled BSDF colors, plus image textures (packed into the file, or dropped alongside it / in the same zip)
+- Principled BSDF colors and image textures, also inside node groups (MMD and other toon shaders). Textures can be packed into the file, or sit next to it / in the same zip (png, jpg, bmp, tga, dds including BC7, webp)
 - Object hierarchy, bone parenting, empties, cameras and (optionally) lights
+- Objects hidden in Blender (hidden objects or collections, rigid bodies, cages) stay hidden; the Scene list tucks them away
 - Armatures with skin weights, shape keys, and actions, including Blender 4.4+ layered actions
+- Bone constraints, live: Copy Rotation/Location/Scale/Transforms, IK (chain length, pole, knee limits), Damped Track, Track To, Stretch To, Limit Rotation. MMD rigs (control bones driving "D" bones, leg IK) pose and play like in Blender
 - Mirror and Subdivision Surface modifiers (subdivision matches Blender's result)
 
-Not supported (export to glTF from Blender for these): other modifiers, geometry nodes, curves/text objects, linked library data, and procedural shader textures.
+Not supported (export to glTF from Blender for these): other modifiers, geometry nodes, curves/text objects, linked library data, procedural shader textures, and some constraint types (Child Of, Armature, Transformation…; when a rig uses these, you pose the bones that move the mesh directly).
+
+### Rigs from MMD, games and Rigify
+
+Only the bones that move the mesh (plus the control bones and IK handles that drive them) get clickable dots, so exported rigs with hundreds of helper bones stay usable. Turn on Settings → Viewport → "Also show helper bones" to see every bone. Japanese MMD bone names (センター, 上半身, 左腕, 右ひざ, 左足ＩＫ…) are recognized, so the AI motions and retargeting work on MMD characters.
 
 ## Quick animating guide
 
@@ -121,4 +127,6 @@ node tools/e2e.cjs test-assets/assets ./out                          # full app 
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer
 node tools/e2e-ai.cjs                                                # Claude integrations with mocked responses
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
+node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
+node tools/e2e-mmd.cjs test-assets/mmd ./out                         # MMD-style .blend zip and Blender-exported .glb
 ```
