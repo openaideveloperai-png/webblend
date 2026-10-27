@@ -34,6 +34,16 @@ const RAYGUN = { message: 'A retro ray gun.', props: [{ name: 'Ray gun', holder:
   slide: '', slideTravel: 0, fireRate: 3, caliber: 'none', action: 'semi' }],
   clips: [{ name: 'Ray gun blast', target: 'selected', duration: 2, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], handTouches: [], plantFeet: true, objectKeys: [], boneKeys: [],
     useProp: 'Ray gun', aimKeys: [{ t: 0, weight: 0, yaw: 0, pitch: 0 }, { t: 0.5, weight: 1, yaw: 10, pitch: 0 }, { t: 1.8, weight: 1, yaw: 10, pitch: 0 }], shots: [0.8, 1.2], swings: [] }] };
+// Claude decorates a katana (flowers on the blade, a drawing on the guard) and adds loose
+// "flower" discs floating around it, which must be dropped
+const disc = (i) => ({ name: 'flower disc ' + i, shape: 'cylinder', material: 'gold', parent: '', pos: [0.03, 0.15 + i * 0.12, 0.05], rot: [0, 0, 90], dims: [0.012, 0.012, 0.002], axis: 'x', profile: [], holes: [], bevel: 0, segments: 16, variant: '' });
+const KATANA = { message: 'A katana with gold flowers.', props: [{ name: 'Flower katana', holder: 'selected', hand: 'right', preset: 'katana', style: 'default', kind: 'melee', materials: [],
+  parts: [disc(0), disc(1), disc(2), { name: 'tassel ring', shape: 'torus', material: 'gold', parent: '', pos: [0, -0.29, 0], rot: [0, 0, 0], dims: [0.006, 0.0015, 360], axis: 'x', profile: [], holes: [], bevel: 0, segments: 12, variant: '' }],
+  decorations: [{ material: 'blade', pattern: 'hamon+flowers', patternColor: '#e9c25a', mapping: 'fit', svg: '', engrave: false },
+    { material: 'guard', pattern: 'none', patternColor: '', mapping: 'fit', svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"><path d="M10 50 Q100 0 200 50 T390 50" stroke="#ffd700" stroke-width="12" fill="none"/><text x="200" y="90" font-size="30" fill="#fff">花</text><script>alert(1)</script></svg>', engrave: false }],
+  anchors: { grip: [], support: [], muzzle: [], eject: [], stock: [], sight: [] }, slide: '', slideTravel: 0, fireRate: 0, caliber: 'none', action: 'none' }],
+  clips: [{ name: 'Katana slash', target: 'selected', duration: 2.4, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], handTouches: [], plantFeet: true, objectKeys: [], boneKeys: [],
+    useProp: 'Flower katana', aimKeys: [{ t: 0, weight: 0, yaw: 0, pitch: 0 }, { t: 0.4, weight: 1, yaw: 0, pitch: 0 }], shots: [], swings: [{ t: 0.6, back: false }, { t: 1.4, back: true }] }] };
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 (async () => {
@@ -97,6 +107,58 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
     const gone = await page.evaluate(() => !window.webblend.models[0].root.getObjectByName('Ray gun') && !window.webblend.models[0].clips.some((c) => /Ray gun blast/.test(c.clip.name)));
     ok('Remove takes away the clip and the prop', gone);
     ok('no page errors (props)', errors.length === 0, errors.slice(0, 4).join(' | '));
+    await page.close();
+  }
+  // ---------------- Claude decorates a built-in model
+  {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    page.on('dialog', (d) => { errors.push('dialog: ' + d.message()); d.dismiss(); });
+    let main = null;
+    await page.route('https://api.anthropic.com/**', async (route) => {
+      const body = JSON.parse(route.request().postData() || '{}');
+      if ((body.tools || []).some((t) => /^web_search/.test(t.type))) {
+        await route.fulfill({ status: 200, headers: { 'content-type': 'application/json', 'access-control-allow-origin': '*' }, body: JSON.stringify({ id: 'msg_r', type: 'message', role: 'assistant', model: body.model, stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 5, output_tokens: 5 }, content: [{ type: 'text', text: '- notes' }] }) });
+        return;
+      }
+      main = body;
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' }, body: sse(JSON.stringify(KATANA)) });
+    });
+    await page.goto('file://' + path.resolve(__dirname, '../index.html'));
+    await page.waitForTimeout(1200);
+    await page.evaluate(() => { const a = window.webblend; a.settings.setApiKey('sk-ant-test-key', false); a.emit('settings', 'apiKey'); const m = a.models[0]; for (const e of [...m.clips]) m.removeClip(e); a.select(m.root, m); });
+    await page.click('#btn-ai');
+    await page.fill('#ai-prompt', 'make a katana in gold flowerr pattern on the katana as a drawing on it and make it swing');
+    await page.press('#ai-prompt', 'Enter');
+    await page.waitForFunction(() => !document.querySelector('.msg .thinking'), null, { timeout: 30000 });
+    await page.waitForTimeout(800);
+    const text = main && (Array.isArray(main.messages[0].content) ? main.messages[0].content.find((c) => c.type === 'text').text : main.messages[0].content);
+    ok('decorated request goes to Claude with decoration rules and preset frames', !!main && /decorations/.test(text) && /never extra parts/.test(text) && /katana: blade along \+Y/.test(text));
+    const sch = main && main.output_config.format.schema.properties.props.items;
+    ok('schema has decorations and the blade shape', sch && sch.required.includes('decorations') && sch.properties.parts.items.properties.shape.enum.includes('blade'));
+    const st = await page.evaluate(() => {
+      const a = window.webblend; const m = a.models[0];
+      const k = m.root.getObjectByName('Flower katana');
+      const mats = {}; let discs = 0, ring = false;
+      if (k) k.traverse((o) => { if (o.isMesh) { mats[o.material.name] = { map: o.material.map && o.material.map.name, decorated: o.material.userData.decorated }; } });
+      // count gold parts: habaki, 2 seppa, 2 menuki + ring; floating discs would add 3 more cylinders
+      const gold = k && [...k.children].find((o) => o.isMesh && o.material.name === 'gold');
+      const goldVerts = gold ? gold.geometry.attributes.position.count : 0;
+      // the guard drawing: did the SVG paint over the base color?
+      let painted = 0;
+      const guard = k && [...k.children].find((o) => o.isMesh && o.material.name === 'guard');
+      const img = guard && guard.material.map && guard.material.map.image;
+      if (img) { const g = img.getContext('2d'); const d = g.getImageData(0, 0, img.width, img.height).data; const b = [d[0], d[1], d[2]]; for (let i = 0; i < d.length; i += 4 * 7) if (Math.abs(d[i] - b[0]) + Math.abs(d[i + 1] - b[1]) + Math.abs(d[i + 2] - b[2]) > 60) painted++; }
+      const clip = m.clips.find((c) => c.clip.name === 'Katana slash');
+      return { k: !!k, mats, goldVerts, painted, clip: !!clip, msg: [...document.querySelectorAll('.msg.bot')].pop().textContent };
+    });
+    ok('katana built and held, swing clip made', st.k && st.clip, JSON.stringify({ k: st.k, clip: st.clip }));
+    ok('blade wears hamon + flowers as a fitted band', st.mats.blade && /hamon\+flowers/.test(st.mats.blade.map) && st.mats.blade.decorated === 'fit', JSON.stringify(st.mats.blade));
+    ok('the SVG drawing painted the guard', st.mats.guard && st.mats.guard.map === 'decoration-drawing' && st.painted > 20, `painted samples ${st.painted}`);
+    ok('loose floating discs dropped, attached ring kept', /Left out 3 loose parts/.test(st.msg), st.msg.slice(0, 200));
+    ok('no page errors, no script from the drawing ran', errors.length === 0, errors.slice(0, 4).join(' | '));
     await page.close();
   }
   // ---------------- API key path

@@ -16,6 +16,7 @@ import { AIAssistant } from '../anim/ai.js';
 import { Importer, unsupportedMessage } from '../io/importer.js';
 import { optimizeTextures } from '../io/textures.js';
 import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITIVES } from '../scene/primitives.js';
+import { onDecorationReady } from '../scene/patterns.js';
 
 const _v = new THREE.Vector3();
 
@@ -33,6 +34,8 @@ export class App extends Emitter {
     this.world = new THREE.Group();
     this.world.name = 'World';
     this.viewport = new Viewport(this, dom.viewport);
+    // drawings on props load a moment later: show them when they arrive
+    onDecorationReady(() => this.viewport.requestRender());
     this.viewport.scene.add(this.world);
     // first-run quality detection
     if (!this.settings.get('quality')) {

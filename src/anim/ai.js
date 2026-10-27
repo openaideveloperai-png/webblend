@@ -6,7 +6,18 @@
 import * as THREE from 'three';
 import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
-import { buildProp, presetSpec, findPresetIn, findStyleIn, PROP_PRESETS, STYLE_NAMES, TEXTURES } from '../scene/props.js';
+import { buildProp, presetSpec, findPresetIn, findStyleIn, decorateSpec, floatingParts, PROP_PRESETS, STYLE_NAMES, TEXTURES, PATTERN_NAMES, BLADE_VARIANTS } from '../scene/props.js';
+import { findDecorationIn, COLOR_WORDS } from '../scene/patterns.js';
+
+// what Claude needs to place parts and decorations on the built-in models
+const PRESET_DOC = [
+  '  pistol: barrel along +Z (muzzle z 0.12, rear z -0.08), slide top y 0.042, grip down to y -0.11. Materials: steel (slide), polymer (frame), grip (grip panels), darksteel (barrel, pins, controls), dark, brass, sightdot.',
+  '  rifle / smg / sniper / shotgun: barrel along +Z, receivers z -0.12..0.13 at y -0.07..0.04, handguard and barrel forward of z 0.13 (rifle muzzle z ~0.65), stock behind z -0.12 (to about z -0.33), magazine and pistol grip below. Materials: alu (receivers, handguard, rails), polymer (stock), grip, darksteel (barrel, small parts), dark, glass; shotgun: wood (stock, pump).',
+  '  katana: blade along +Y from y 0 to 0.70, edge toward +Z, flat faces toward ±X, curving back toward -Z near the tip; tsuba (guard) at y -0.01, handle down to y -0.29. Materials: blade (has a "hamon" temper line), guard (tsuba, fuchi, kashira), wrap (handle: silk over ray skin, pattern "wrap"), gold (habaki, menuki), peg.',
+  '  sword: double-edged blade along +Y from y 0 to 0.74, edges toward ±Z, flat faces toward ±X (pattern "fuller", engraved); crossguard at y -0.01 spanning z ±0.11; grip down to y -0.21. Materials: blade, guard (crossguard, pommel), wrap (grip).',
+  '  knife: blade along +Y from y 0 to 0.137, edge toward +Z, faces ±X; handle down to y -0.12. Materials: blade, guard, wrap.',
+  '  bat: along +Y from y -0.16 to 0.70. Materials: wood, tape.',
+].join('\n');
 import { attachProp, detachProp, bakeHoldClip, heldProps, recoilOf, holdDriver, addShotEffects } from './props-anim.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
@@ -164,9 +175,11 @@ export function parsePropRequest(text) {
   const drop = /\b(drop|drops|remove|delete|put away|holster|get rid of|throw away|lose)\b.{0,20}\b(gun|weapon|pistol|rifle|sword|knife|prop|it|shotgun|katana|bat|smg|sniper)\b/.test(t);
   const swing = /\b(slash|slashes|slashing|swing|swings|swinging|attack|attacks|attacking|strike|strikes|chop|chops|cut|cuts|stab|stabs|hit|hits|combo)\b/.test(t);
   const side = /\b(left hand|left-handed|in (her|his|their|the) left)\b/.test(t) ? 'left' : 'right';
-  const style = findStyleIn(t);
+  // "gold flower pattern": the color goes to the flowers, not the whole model
+  const decoration = findDecorationIn(t);
+  const style = findStyleIn(decoration && decoration.colorPhrase ? t.replace(decoration.colorPhrase, ' ') : t);
   const any = make || shootWord || aim || drop || (swing && !!preset);
-  return any ? { preset, make, shoot: shootWord, swing, count, auto, burst, aim, hold, drop, side, style } : null;
+  return any ? { preset, make, shoot: shootWord, swing, count, auto, burst, aim, hold, drop, side, style, decoration } : null;
 }
 
 export function parsePrompt(text) {
@@ -194,7 +207,11 @@ const FILLER = new Set(('make let have get do does please can could would you i 
 // Short requests made only of motion words + modifiers are handled instantly offline.
 const PROP_WORDS = new Set(('make makes create build give gives add spawn equip hand arm get with holding hold holds carry wield draw pull take out shoot shoots shooting shot shots fire fires firing blast pew unload spray burst open aim aims aiming point drop remove put away holster slash slashes slashing swing swings swinging attack attacks strike strikes chop cut stab hit hits combo full auto automatic mag dump times rounds bullets x her his him their them gun weapon').split(/\s+/));
 for (const p of Object.values(PROP_PRESETS)) for (const w of p.words) for (const part of w.split(/[\s-]+/)) PROP_WORDS.add(part);
-for (const w of ['tan', 'fde', 'desert', 'sand', 'olive', 'green', 'silver', 'chrome', 'gold', 'golden', 'wood', 'wooden', 'white', 'red', 'pink', 'blue', 'black']) PROP_WORDS.add(w);
+for (const w of ['tan', 'fde', 'desert', 'sand', 'olive', 'green', 'silver', 'chrome', 'gold', 'golden', 'wood', 'wooden', 'white', 'red', 'pink', 'blue', 'black', ...Object.keys(COLOR_WORDS)]) PROP_WORDS.add(w);
+// surface patterns the built-in models can wear ("a katana with gold flowers")
+for (const w of ('pattern patterns patterned design designs motif motifs print printed covered all over engraved engraving engravings etched etching carved inlaid inlay '
+  + 'flower flowers flowery floral rose roses blossom blossoms petal petals daisy daisies lotus lily lilies sakura cherry scroll scrollwork filigree baroque vine vines ivy leaves leafy damascus damask folded steel wavy '
+  + 'camo camouflage woodland digital pixel marpat hex hexagon hexagons honeycomb stripe stripes striped racing flame flames fire flaming star stars starry heart hearts scales scaly dragon dots polka spots spotted').split(/\s+/)) PROP_WORDS.add(w);
 
 // "make a lightsaber" (a model we have no preset for)
 const MAKE_SOMETHING = /\b(make|makes|create|build|model|design|craft|generate|give|gives)\s+(me\s+|her\s+|him\s+|them\s+)?(a|an|the|some|my|his|her)\s+[a-z]/i;
@@ -384,6 +401,14 @@ export class AIAssistant {
     return { results, message: understood ? msg : `I didn't fully understand that, so ${msg.charAt(0).toLowerCase() + msg.slice(1)} Try words like: walk, run, jump, wave, dance, bounce, spin, float.`, understood };
   }
 
+  // a built-in model with the style and pattern the request asked for
+  presetWith(key, pr) {
+    const spec = presetSpec(key, { style: pr.style });
+    const d = pr.decoration;
+    if (spec && d) decorateSpec(spec, { pattern: d.pattern, patternColor: d.patternColor || undefined, engrave: d.engrave || undefined });
+    return spec;
+  }
+
   // props offline: make / hold / aim / shoot / drop
   runProps(pr, prompt) {
     const app = this.app;
@@ -393,7 +418,7 @@ export class AIAssistant {
     if (!holder) {
       if (!pr.make || !app.addModel) return null;
       // nobody to hold it: put it in the scene on its own
-      const prop = buildProp(presetSpec(pr.preset, { style: pr.style }));
+      const prop = buildProp(this.presetWith(pr.preset, pr));
       const m = app.addModel(prop, { name: prop.name, kind: 'prop' });
       return { results, props: [{ model: m, prop, standalone: true }], message: `Made a ${prop.name.toLowerCase()} (${PROP_PRESETS[pr.preset] ? 'built-in model' : 'model'}). Add or select a character and say "shoot" to use it.`, understood: true };
     }
@@ -406,7 +431,7 @@ export class AIAssistant {
     const wantKey = pr.preset || (pr.shoot && !prop ? 'pistol' : null);
     if (wantKey && (pr.make || !prop || (prop.userData.prop.preset !== wantKey && pr.preset))) {
       for (const p of heldProps(holder).filter((x) => x.userData.hold.side === pr.side)) app.removeProp ? app.removeProp(holder, p) : detachProp(holder, p);
-      prop = buildProp(presetSpec(wantKey, { style: pr.style }));
+      prop = buildProp(this.presetWith(wantKey, pr));
       if (app.giveProp) app.giveProp(holder, prop, pr.side); else attachProp(holder, prop, pr.side);
       props.push({ model: holder, prop });
     }
@@ -423,7 +448,8 @@ export class AIAssistant {
     const { clip } = bakeHoldClip(holder, prop, { shots, swings, aim: pr.aim, name: shots ? `Shoot ${prop.name.toLowerCase()} ×${shots}` : swings ? `Swing ${prop.name.toLowerCase()} ×${swings}` : pr.aim ? `${melee ? 'Guard' : 'Aim'} ${prop.name.toLowerCase()}` : `Hold ${prop.name.toLowerCase()}` });
     results.push({ model: holder, clip, loop: !shots && !swings && !pr.aim });
     if (pr.swing && !melee && !pr.shoot) notes.push(`(Say "shoot" to fire it.)`);
-    const made = props.length ? `Made a ${prop.name.toLowerCase()} and put it in ${holder.name}'s ${pr.side} hand. ` : '';
+    const deco = pr.decoration && props.length ? ` with ${pr.decoration.colorWord ? pr.decoration.colorWord + ' ' : ''}${pr.decoration.pattern === 'scroll' ? 'engraving' : pr.decoration.pattern}` : '';
+    const made = props.length ? `Made a ${prop.name.toLowerCase()}${deco} and put it in ${holder.name}'s ${pr.side} hand. ` : '';
     return { results, props, message: made + `Made "${clip.name}" (${clip.duration.toFixed(1)}s)${shots ? ' with muzzle flash, tracers, recoil and casings' : ''}.` + (notes.length ? ' ' + notes.join(' ') : ''), understood: true };
   }
 
@@ -494,7 +520,8 @@ JSON FORMAT:
     "preset": "custom" or ${JSON.stringify(Object.keys(PROP_PRESETS))}, "style": "default" or ${JSON.stringify(STYLE_NAMES)},
     "kind": "gun"|"melee"|"prop",
     "materials": [{"name": "steel", "color": "#3a3d43", "metalness": 0.9, "roughness": 0.3, "emissive": "#000000", "emissiveIntensity": 0, "opacity": 1, "texture": one of ${JSON.stringify(TEXTURES)}}],
-    "parts": [{"name": "slide", "shape": "box|cylinder|cone|tube|sphere|capsule|torus|extrude|lathe|helix", "material": "steel", "parent": "", "pos": [x,y,z], "rot": [x,y,z], "dims": [...], "axis": "x|y|z", "profile": [[u,v],...], "holes": [[[u,v],...]], "bevel": meters, "segments": 24}],
+    "parts": [{"name": "slide", "shape": "box|cylinder|cone|tube|sphere|capsule|torus|extrude|lathe|helix|blade", "material": "steel", "parent": "", "pos": [x,y,z], "rot": [x,y,z], "dims": [...], "axis": "x|y|z", "profile": [[u,v],...], "holes": [[[u,v],...]], "bevel": meters, "segments": 24, "variant": "" or ${JSON.stringify(BLADE_VARIANTS)}}],
+    "decorations": [{"material": "material name (a preset's or yours)", "pattern": "none" or ${JSON.stringify(PATTERN_NAMES.filter((x) => x !== 'none' && x !== 'svg'))}, "patternColor": "#e9c25a", "mapping": "fit"|"tile", "svg": "" or "<svg viewBox=...>...</svg>", "engrave": false}],
     "anchors": {"grip": [x,y,z], "support": [], "muzzle": [], "eject": [], "stock": [], "sight": []},
     "slide": "part that cycles when firing, or \"\"", "slideTravel": meters, "fireRate": shots per second, "caliber": "none|9mm|5.56|.308|12ga", "action": "none|semi|auto|pump|bolt"
   }]
@@ -512,7 +539,10 @@ ${params}
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
 PROPS (3D models the user asks you to make: guns, swords, tools, items...). Leave "props" empty when none is needed.
-- Prefer a built-in preset when it fits: they are detailed, high-quality models (pistol, rifle, smg, sniper, shotgun, sword, katana, knife, bat). Recolor with "style", rename with "name", and add extra parts in "parts" (a suppressor, laser, scope, bayonet, engraving...) positioned in the preset's frame; leave materials empty to keep the preset's.
+- Prefer a built-in preset when it fits: they are detailed, high-quality models (pistol, rifle, smg, sniper, shotgun, sword, katana, knife, bat). Recolor with "style", rename with "name", decorate with "decorations", and add extra hardware in "parts" (a suppressor, laser, scope, bayonet...) attached to the model in the preset's frame; leave materials empty to keep the preset's. Preset frames (meters) and material names:
+${PRESET_DOC}
+- Patterns, engravings, paint jobs and drawings ON a surface ("gold flower pattern on the blade", "dragon engraved on the slide", "pink camo", "her name written on it") are "decorations", never extra parts: parts floating over a surface look like loose discs. A decoration goes on one material (every part using it): pattern = a built-in pattern drawn in patternColor over the material's color; "hamon+flowers" layers patterns and "hamon:#ffffff+flowers:#e9c25a" gives each layer its color. mapping "fit" stretches one band along each part (u along its length, v across; on a blade v=1 is the edge) — use it for blades, drawings and anything placed; "tile" repeats the pattern at a fixed size (camo, scales, hex). For a picture, a logo, writing or a specific motif, draw it as "svg": compact SVG (under 6 KB, no scripts, no images, no external links), transparent background (the material's color shows through), viewBox shaped like the band (a katana blade is about 22:1, e.g. viewBox="0 0 2200 100"; a pistol slide about 8:1); paths, shapes, gradients and text are fine. engrave true also cuts the decoration into the surface (relief). The katana's blade already has a temper line ("hamon"); keep it under a new pattern with "hamon+...".
+- Custom blades: shape "blade" sweeps a real blade cross-section (spine, ridge and a sharp edge) along +Y from its pos, edge toward +Z: dims [length, width at the base, thickness, curve (meters the tip sweeps back toward the spine), tip length]; variant "katana" (single edge, ridge line, curved kissaki), "double" (double edge, pointed: swords, daggers, spear heads), "knife" (flat grind, drop point).
 - Otherwise use "custom" and build it from parts. Units are meters at real-world size. Prop frame: +Z forward (barrel, blade edge, front), +Y up, +X the prop's left. When held, the hand closes around the "grip" anchor with the fingers along +Z and the thumb toward +Y: a gun's barrel runs along +Z with the grip below it; a melee weapon's handle runs along Y with the blade toward +Y and the edge toward +Z.
 - Shapes and dims: box [width x, height y, depth z] (bevel = edge radius); cylinder/cone [radiusTop, radiusBottom, length] along "axis"; tube (hollow) [outerRadius, innerRadius, length]; sphere [rx, ry, rz]; capsule [radius, length]; torus [ringRadius, tubeRadius, arcDegrees] with "axis" = ring normal; extrude: a 2D outline "profile" [[u,v],...] (8-30 points, counterclockwise or clockwise) extruded by dims[0] (thickness), centered — axis "x" means the outline is the SIDE view (u = z forward, v = y up) extruded sideways: best for gun bodies, slides, stocks, grips, blades, magazines, axes; axis "y" = top view (u = x, v = z); axis "z" = front view (u = x, v = y); "holes" cut openings (trigger guards, windows); lathe: "profile" [[radius, height],...] spun around "axis" (barrels, muzzle devices, scopes, bottles, handles, pommels, lamps); helix [radius, wireRadius, length, turns] (springs, grip wraps). "pos" is the center (extrude/lathe: where their 0,0 is), "rot" degrees XYZ, "parent" = another part's name (then pos/rot are relative to it). Unused fields: [] / "" / 0.
 - Make it look high-grade: 30-120 parts. Get the silhouette right with extrude outlines and a 1-3 mm bevel, then add the details that sell it: seams and grooves (thin dark boxes), serrations, screws and pins, vents, rails, sights, buttons and levers, edge highlights, labels/inlays. 3-7 materials with believable PBR values (metal: metalness 0.8-1, roughness 0.2-0.45; plastic/polymer: metalness 0, roughness 0.5-0.75; rubber 0.9; glass opacity 0.4) and fitting textures (brushed or scratched metal, stipple on grips, knurled, wood, carbon, leather, glow for lights/energy).
@@ -588,7 +618,7 @@ USER REQUEST: ${prompt}`;
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'holder', 'hand', 'preset', 'style', 'kind', 'materials', 'parts', 'anchors', 'slide', 'slideTravel', 'fireRate', 'caliber', 'action'],
+            required: ['name', 'holder', 'hand', 'preset', 'style', 'kind', 'materials', 'parts', 'decorations', 'anchors', 'slide', 'slideTravel', 'fireRate', 'caliber', 'action'],
             properties: {
               name: { type: 'string' },
               holder: { type: 'string' },
@@ -606,9 +636,10 @@ USER REQUEST: ${prompt}`;
               parts: {
                 type: 'array',
                 items: {
-                  type: 'object', additionalProperties: false, required: ['name', 'shape', 'material', 'parent', 'pos', 'rot', 'dims', 'axis', 'profile', 'holes', 'bevel', 'segments'],
+                  type: 'object', additionalProperties: false, required: ['name', 'shape', 'material', 'parent', 'pos', 'rot', 'dims', 'axis', 'profile', 'holes', 'bevel', 'segments', 'variant'],
                   properties: {
-                    name: { type: 'string' }, shape: { type: 'string', enum: ['box', 'cylinder', 'cone', 'tube', 'sphere', 'capsule', 'torus', 'extrude', 'lathe', 'helix'] },
+                    name: { type: 'string' }, shape: { type: 'string', enum: ['box', 'cylinder', 'cone', 'tube', 'sphere', 'capsule', 'torus', 'extrude', 'lathe', 'helix', 'blade'] },
+                    variant: { type: 'string', enum: ['', ...BLADE_VARIANTS] },
                     material: { type: 'string' }, parent: { type: 'string' },
                     pos: { type: 'array', items: { type: 'number' } }, rot: { type: 'array', items: { type: 'number' } }, dims: { type: 'array', items: { type: 'number' } },
                     axis: { type: 'string', enum: ['x', 'y', 'z'] },
@@ -616,6 +647,13 @@ USER REQUEST: ${prompt}`;
                     holes: { type: 'array', items: { type: 'array', items: { type: 'array', items: { type: 'number' } } } },
                     bevel: { type: 'number' }, segments: { type: 'number' },
                   },
+                },
+              },
+              decorations: {
+                type: 'array',
+                items: {
+                  type: 'object', additionalProperties: false, required: ['material', 'pattern', 'patternColor', 'mapping', 'svg', 'engrave'],
+                  properties: { material: { type: 'string' }, pattern: { type: 'string' }, patternColor: { type: 'string' }, mapping: { type: 'string', enum: ['fit', 'tile'] }, svg: { type: 'string' }, engrave: { type: 'boolean' } },
                 },
               },
               anchors: {
@@ -767,7 +805,16 @@ USER REQUEST: ${prompt}`;
         let def;
         if (ps.preset && ps.preset !== 'custom' && PROP_PRESETS[ps.preset]) {
           def = presetSpec(ps.preset, { style, name: ps.name || undefined });
-          if (ps.parts && ps.parts.length) def.parts = [...def.parts, ...clampDims(ps.parts)];
+          if (ps.parts && ps.parts.length) {
+            const first = def.parts.length;
+            def.parts = [...def.parts, ...clampDims(ps.parts)];
+            // extra parts must attach to the model: loose shapes floating around it are dropped
+            const loose = new Set(floatingParts(def, first));
+            if (loose.size) {
+              def.parts = def.parts.filter((_, i) => !loose.has(i));
+              notes.push(`Left out ${loose.size} loose part${loose.size > 1 ? 's' : ''} that didn't touch the ${def.name.toLowerCase()}.`);
+            }
+          }
           if (ps.materials && ps.materials.length) {
             const names = new Set(ps.materials.map((m) => m.name));
             def.materials = [...def.materials.filter((m) => !names.has(m.name)), ...ps.materials];
@@ -780,6 +827,13 @@ USER REQUEST: ${prompt}`;
             slide: ps.slide || '', slideTravel: Number(ps.slideTravel) || 0, fireRate: Number(ps.fireRate) || 0,
             caliber: ps.caliber && ps.caliber !== 'none' ? ps.caliber : (ps.kind === 'gun' ? '9mm' : null), action: ps.action && ps.action !== 'none' ? ps.action : null, auto: ps.action === 'auto',
           };
+        }
+        for (const d of (ps.decorations || []).slice(0, 8)) {
+          if (!d) continue;
+          const pattern = d.pattern && d.pattern !== 'none' ? d.pattern : '';
+          const svg = typeof d.svg === 'string' && d.svg.includes('<svg') ? d.svg.slice(0, 60000) : '';
+          if (!pattern && !svg) continue;
+          decorateSpec(def, { material: d.material || '', pattern, patternColor: d.patternColor || undefined, mapping: d.mapping === 'tile' || d.mapping === 'fit' ? d.mapping : undefined, svg, engrave: !!d.engrave });
         }
         const prop = buildProp(def);
         let meshes = 0;

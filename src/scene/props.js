@@ -10,6 +10,8 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { decorationTexture, patternList, patternLayers, PATTERN_NAMES, resolveMapping, defaultMapping } from './patterns.js';
+export { PATTERN_NAMES };
 
 const D2R = Math.PI / 180;
 
@@ -133,7 +135,44 @@ export function makeMaterial(spec = {}) {
       m.userData.tile = P.tile;
     }
   }
+  // a pattern or drawing on the surface: applied by buildProp once it knows the part's shape
+  const hasSvg = typeof spec.svg === 'string' && spec.svg.includes('<svg');
+  if (patternList(spec.pattern).length || hasSvg) {
+    m.userData.decoration = {
+      pattern: patternLayers(spec.pattern).map((l) => l.name + (l.color ? ':' + l.color : '')).join('+'), patternColor: spec.patternColor || '', svg: hasSvg ? spec.svg : '',
+      mapping: spec.mapping === 'fit' || spec.mapping === 'tile' ? spec.mapping : '', engrave: !!spec.engrave, color: '#' + m.color.getHexString(),
+    };
+  }
   return m;
+}
+
+// put the decoration on a material: the pattern becomes its color map (base color baked in);
+// engraved, it also dents the surface. tile = meters per repeat the part's UVs were made for.
+function applyDecoration(m, aspect) {
+  const d = m.userData.decoration;
+  if (!d) return null;
+  const dec = decorationTexture({ ...d, aspect });
+  if (!dec) return null;
+  m.map = dec.texture;
+  m.color.set('#ffffff');
+  const procedural = m.bumpMap && m.bumpMap !== dec.texture ? m.bumpMap : null;
+  if (dec.fit) {
+    // a band along the part: the small tiled texture would stretch, so drop it
+    if (procedural) { m.bumpMap = null; if (m.roughnessMap === procedural) m.roughnessMap = null; }
+  } else if (procedural) {
+    // UVs are made in decoration tiles now: rescale the procedural texture to match
+    const k = dec.tile / (m.userData.tile || 0.05);
+    for (const key of ['bumpMap', 'roughnessMap']) {
+      if (m[key] !== procedural) continue;
+      const t = procedural.clone(); t.repeat.set(k, k); t.needsUpdate = true;
+      m[key] = t;
+    }
+  }
+  if (d.engrave) { m.bumpMap = dec.texture; m.bumpScale = 2.5; }
+  m.userData.tile = dec.fit ? 0 : dec.tile;
+  m.userData.decorated = dec.fit ? 'fit' : 'tile';
+  m.needsUpdate = true;
+  return dec;
 }
 
 // ---------------------------------------------------------------- geometry
@@ -156,12 +195,124 @@ function shapeFrom(points, holes) {
   return shape;
 }
 
+// ---------------------------------------------------------------- blades
+// A real blade cross-section (ridge, spine and a sharp edge with hard facets)
+// swept along +Y, edge toward +Z, with the tip shaped per kind.
+// dims: [length, width, thickness, curve (meters the tip sweeps back), tipLength]
+// UVs: u along the blade (0 base, 1 tip), v across (0 spine, 1 edge); "side" = which face (±X).
+const BLADES = {
+  // [x (× half thickness), z (× width, -0.5 spine .. 0.5 edge), sharp crease]
+  katana: { sec: [[0, -0.5, 1], [0.76, -0.46, 1], [1, -0.2, 1], [0.6, 0.16, 0], [0.05, 0.5, 1], [-0.05, 0.5, 1], [-0.6, 0.16, 0], [-1, -0.2, 1], [-0.76, -0.46, 1]],
+    widthTaper: 0.3, thickTaper: 0.45, tipZ: -0.38, tip: (z, k, zt) => (z >= zt ? Math.sqrt(Math.max(0, 1 - k * k)) : 1 - k), tipThick: (k) => Math.pow(1 - k, 0.4), defaults: [0.7, 0.032, 0.0072, 0.018, 0.045] },
+  double: { sec: [[0.04, -0.5, 1], [0.7, -0.25, 0], [1, 0, 1], [0.7, 0.25, 0], [0.04, 0.5, 1], [-0.04, 0.5, 1], [-0.7, 0.25, 0], [-1, 0, 1], [-0.7, -0.25, 0], [-0.04, -0.5, 1]],
+    widthTaper: 0.3, thickTaper: 0.4, tipZ: 0, tip: (z, k) => Math.pow(1 - k, 0.8), tipThick: (k) => Math.pow(1 - k, 0.6), defaults: [0.72, 0.048, 0.0065, 0, 0.12] },
+  knife: { sec: [[1, -0.5, 1], [1, -0.08, 1], [0.05, 0.5, 1], [-0.05, 0.5, 1], [-1, -0.08, 1], [-1, -0.5, 1]],
+    widthTaper: 0, thickTaper: 0.25, tipZ: -0.15, tip: (z, k, zt) => (z >= zt ? Math.sqrt(Math.max(0, 1 - k * k)) : 1 - k * k), tipThick: (k) => Math.pow(1 - k, 0.5), defaults: [0.14, 0.03, 0.0042, 0, 0.055] },
+};
+BLADES.single = BLADES.katana;
+export const BLADE_VARIANTS = ['katana', 'double', 'knife'];
+
+function bladeGeometry(dims, variant) {
+  const B = BLADES[variant] || BLADES.katana;
+  const D = B.defaults;
+  const L = dims[0] || D[0], W = dims[1] || D[1], T = dims[2] || D[2];
+  const C = Number.isFinite(dims[3]) ? dims[3] : D[3];
+  const TL = THREE.MathUtils.clamp(dims[4] || D[4], 0.002, L * 0.9);
+  const sec = B.sec, n = sec.length;
+  // stations: body, then denser through the tip
+  const st = [];
+  const body = L - TL, nb = 36, nt = 18;
+  for (let i = 0; i <= nb; i++) st.push(body * (i / nb));
+  for (let i = 1; i < nt; i++) st.push(body + TL * (i / nt));
+  const pos = [], uv = [], side = [], idx = [];
+  const ring = (s) => {
+    const t = s / L, k = s > body ? (s - body) / TL : 0;
+    const wid = W * (1 - B.widthTaper * t), th = T * (1 - B.thickTaper * t) * B.tipThick(k);
+    const zc = -C * t * t;
+    return sec.map(([x, z]) => {
+      const zz = B.tipZ + (z - B.tipZ) * B.tip(z, k, B.tipZ);
+      return [x * th / 2, s, zc + zz * wid];
+    });
+  };
+  // vertex per section point, doubled at sharp creases (one per facet)
+  const rings = [];
+  for (const s of st) {
+    const pts = ring(s);
+    const ids = pts.map((pt, i) => {
+      const a = pos.length / 3;
+      const copies = sec[i][2] ? 2 : 1;
+      for (let c = 0; c < copies; c++) {
+        pos.push(...pt);
+        const sx = c === 0 ? (sec[(i - 1 + n) % n][0] + sec[i][0]) : (sec[i][0] + sec[(i + 1) % n][0]);
+        uv.push(s / L, sec[i][1] + 0.5);
+        side.push(sx < 0 ? -1 : 1);
+      }
+      return copies === 2 ? [a, a + 1] : [a, a];
+    });
+    rings.push(ids);
+  }
+  // tip point (one per facet so every facet keeps its own normal)
+  const tipZ = -C + B.tipZ * W * (1 - B.widthTaper);
+  for (let r = 0; r < rings.length - 1; r++) {
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const a0 = rings[r][i][1], b0 = rings[r][j][0], a1 = rings[r + 1][i][1], b1 = rings[r + 1][j][0];
+      idx.push(a0, b0, b1, a0, b1, a1);
+    }
+  }
+  const last = rings[rings.length - 1];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const tp = pos.length / 3;
+    pos.push(0, L, tipZ);
+    uv.push(1, B.tipZ + 0.5);
+    side.push(sec[i][0] + sec[j][0] < 0 ? -1 : 1);
+    idx.push(last[i][1], last[j][0], tp);
+  }
+  // flat base cap
+  const first = ring(0), c0 = pos.length / 3;
+  pos.push(0, 0, first.reduce((a, p) => a + p[2], 0) / n); uv.push(0, 0.5); side.push(1);
+  const capIds = first.map((pt) => { const a = pos.length / 3; pos.push(...pt); uv.push(0, 0.5); side.push(1); return a; });
+  for (let i = 0; i < n; i++) idx.push(c0, capIds[(i + 1) % n], capIds[i]);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('side', new THREE.Float32BufferAttribute(side, 1));
+  g.setIndex(idx);
+  // face the triangles outward (the section winds either way)
+  orientOutward(g, (y) => -C * (y / L) * (y / L));
+  g.computeVertexNormals();
+  g.userData.uvKind = 'blade';
+  g.userData.uvSize = { along: L, across: W };
+  return g;
+}
+
+// flip triangles whose normal points toward the blade's spine line
+function orientOutward(g, zAt) {
+  const p = g.attributes.position, ix = g.index.array;
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3(), m = new THREE.Vector3(), o = new THREE.Vector3();
+  for (let i = 0; i < ix.length; i += 3) {
+    a.fromBufferAttribute(p, ix[i]); b.fromBufferAttribute(p, ix[i + 1]); c.fromBufferAttribute(p, ix[i + 2]);
+    n.subVectors(c, b).cross(o.subVectors(a, b));
+    if (n.lengthSq() < 1e-20) continue;
+    m.addVectors(a, b).add(c).multiplyScalar(1 / 3);
+    const out = o.set(m.x, 0, m.z - zAt(m.y));
+    // caps (normal mostly along Y) face away from the blade body
+    const dir = Math.abs(n.y) > 0.9 * n.length() ? (m.y < 1e-6 ? -n.y : n.y) : n.dot(out);
+    if (dir < 0) { const t = ix[i + 1]; ix[i + 1] = ix[i + 2]; ix[i + 2] = t; }
+  }
+}
+
 export function partGeometry(p) {
   const d = Array.isArray(p.dims) ? p.dims.map((v) => Math.abs(num(v))) : [];
   const axis = ['x', 'y', 'z'].includes(p.axis) ? p.axis : 'y';
   const segs = THREE.MathUtils.clamp(Math.round(num(p.segments, 24)), 3, 64);
   const bevel = Math.max(0, num(p.bevel));
-  let g = null;
+  const TAU = Math.PI * 2;
+  // uvKind says what the shape's own UVs mean: wrap = (around, along), wrapAlong = (along, around),
+  // blade = (along, across), native = keep, project = none worth keeping
+  let g = null, kind = 'project', size = null;
+  const profileLen = (pts) => pts.reduce((a, v, i) => (i ? a + v.distanceTo(pts[i - 1]) : 0), 0);
   switch (p.shape) {
     case 'box': case 'roundbox': {
       const [w = 0.1, h = 0.1, dd = 0.1] = d;
@@ -173,31 +324,38 @@ export function partGeometry(p) {
       const [rt = 0.05, rb = rt, len = 0.1] = d;
       g = new THREE.CylinderGeometry(p.shape === 'cone' ? 0 : rt, rb, len, segs, 1, false);
       AXIS_FROM_Y[axis](g);
+      kind = 'wrap'; size = { around: TAU * Math.max(rt, rb), along: len };
       break;
     }
     case 'tube': {
       const [ro = 0.05, ri = ro * 0.7, len = 0.1] = d;
       const inner = Math.min(ri, ro * 0.98);
-      g = new THREE.LatheGeometry([new THREE.Vector2(inner, -len / 2), new THREE.Vector2(ro, -len / 2), new THREE.Vector2(ro, len / 2), new THREE.Vector2(inner, len / 2), new THREE.Vector2(inner, -len / 2)], segs);
+      const pts = [new THREE.Vector2(inner, -len / 2), new THREE.Vector2(ro, -len / 2), new THREE.Vector2(ro, len / 2), new THREE.Vector2(inner, len / 2), new THREE.Vector2(inner, -len / 2)];
+      g = new THREE.LatheGeometry(pts, segs);
       AXIS_FROM_Y[axis](g);
+      kind = 'wrap'; size = { around: TAU * ro, along: profileLen(pts) };
       break;
     }
     case 'sphere': {
       const [rx = 0.05, ry = rx, rz = rx] = d;
       g = new THREE.SphereGeometry(1, Math.max(12, segs), Math.max(8, Math.round(segs * 0.6)));
       g.scale(rx || 0.05, ry || rx || 0.05, rz || rx || 0.05);
+      kind = 'native'; size = { around: TAU * Math.max(rx, rz || rx), along: Math.PI * (ry || rx) };
       break;
     }
     case 'capsule': {
       const [r = 0.03, len = 0.1] = d;
       g = new THREE.CapsuleGeometry(r, Math.max(0, len - 2 * r), 6, Math.max(8, segs));
       AXIS_FROM_Y[axis](g);
+      kind = 'wrap'; size = { around: TAU * r, along: Math.max(len, 2 * r) };
       break;
     }
     case 'torus': {
       const [R = 0.05, r = 0.01, arc = 360] = d;
-      g = new THREE.TorusGeometry(R, Math.min(r, R), 10, Math.max(12, segs), THREE.MathUtils.clamp(arc || 360, 1, 360) * D2R);
+      const a = THREE.MathUtils.clamp(arc || 360, 1, 360) * D2R;
+      g = new THREE.TorusGeometry(R, Math.min(r, R), 10, Math.max(12, segs), a);
       AXIS_FROM_Z[axis](g);
+      kind = 'wrapAlong'; size = { around: TAU * Math.min(r, R), along: a * R };
       break;
     }
     case 'extrude': {
@@ -215,6 +373,7 @@ export function partGeometry(p) {
       if (pts.length < 2) return null;
       g = new THREE.LatheGeometry(pts, Math.max(8, segs));
       AXIS_FROM_Y[axis](g);
+      kind = 'wrap'; size = { around: TAU * Math.max(...pts.map((v) => v.x), 1e-3), along: profileLen(pts) };
       break;
     }
     case 'helix': {
@@ -225,10 +384,19 @@ export function partGeometry(p) {
       curve.getPoint = (t, out = new THREE.Vector3()) => out.set(Math.cos(t * turns * 2 * Math.PI) * R, (t - 0.5) * len, Math.sin(t * turns * 2 * Math.PI) * R);
       g = new THREE.TubeGeometry(curve, Math.max(32, Math.round(turns * 16)), Math.min(r, R), 6, false);
       AXIS_FROM_Y[axis](g);
+      kind = 'wrapAlong'; size = { around: TAU * Math.min(r, R), along: Math.hypot(TAU * R * Math.abs(turns), len) };
       break;
+    }
+    case 'blade': {
+      const dd = Array.isArray(p.dims) ? p.dims.map((v) => num(v)) : [];
+      g = bladeGeometry([Math.abs(dd[0] || 0), Math.abs(dd[1] || 0), Math.abs(dd[2] || 0), dd[3], Math.abs(dd[4] || 0)], p.variant);
+      AXIS_FROM_Y[axis](g);
+      return g;
     }
     default: return null;
   }
+  g.userData.uvKind = kind;
+  if (size) g.userData.uvSize = size;
   return g;
 }
 
@@ -248,24 +416,71 @@ function metricUV(g, tile) {
   g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
 }
 
+// [length the texture's u runs along, width v runs across] of a part, in meters
+function uvExtent(e) {
+  if (e.size) return [e.size.along, e.size.around ?? e.size.across];
+  const s = e.box.getSize(new THREE.Vector3());
+  const ext = [s.x, s.y, s.z].sort((a, b) => b - a);
+  return [ext[0], ext[1]];
+}
+
+// one band over the whole part: u along its length, v across (0..1). Fit textures are
+// two-sided atlases (front = left half, back = right half, read back to front).
+const atlasU = (u, back) => (back ? 0.5 + (1 - u) * 0.5 : u * 0.5);
+function fitUV(e) {
+  const g = e.g, uv = g.attributes.uv;
+  if (e.kind === 'blade' && uv && g.attributes.side) {
+    const sd = g.attributes.side;
+    for (let i = 0; i < uv.count; i++) uv.setX(i, atlasU(uv.getX(i), sd.getX(i) < 0));
+    uv.needsUpdate = true;
+    return;
+  }
+  if (e.kind !== 'project' && uv) {
+    // round parts have no back: they use the front half
+    for (let i = 0; i < uv.count; i++) {
+      const along = e.kind === 'wrap' ? uv.getY(i) : uv.getX(i), across = e.kind === 'wrap' ? uv.getX(i) : uv.getY(i);
+      uv.setXY(i, atlasU(along, false), across);
+    }
+    uv.needsUpdate = true;
+    return;
+  }
+  // flat-ish parts: project onto the two longest sides
+  const p = g.attributes.position, n = g.attributes.normal;
+  const s = e.box.getSize(new THREE.Vector3()), mn = e.box.min;
+  const [A, B, C] = [0, 1, 2].sort((a, b) => s.getComponent(b) - s.getComponent(a));
+  const out = new Float32Array(p.count * 2);
+  for (let i = 0; i < p.count; i++) {
+    const u = (p.getComponent(i, A) - mn.getComponent(A)) / Math.max(s.getComponent(A), 1e-9);
+    const v = (p.getComponent(i, B) - mn.getComponent(B)) / Math.max(s.getComponent(B), 1e-9);
+    out[i * 2] = atlasU(u, !!n && n.getComponent(i, C) < 0); out[i * 2 + 1] = v;
+  }
+  g.setAttribute('uv', new THREE.BufferAttribute(out, 2));
+}
+
+// repeating pattern at a fixed size (meters per tile), seamless around round parts
+function tileUV(e, tile) {
+  const uv = e.g.attributes.uv;
+  if (!uv || !e.size) return;
+  const { along } = e.size, around = e.size.around ?? e.size.across;
+  for (let i = 0; i < uv.count; i++) {
+    const u = uv.getX(i), v = uv.getY(i);
+    if (e.kind === 'blade') { uv.setXY(i, (u * along) / tile, (v * around) / tile); continue; }
+    const k = Math.max(1, Math.round(around / tile)), t = around / k;
+    if (e.kind === 'wrap') uv.setXY(i, (v * along) / t, u * k);
+    else if (e.kind === 'wrapAlong') uv.setXY(i, (u * along) / t, v * k);
+    else uv.setXY(i, u * k, (v * along) / t);
+  }
+  uv.needsUpdate = true;
+}
+
 // ---------------------------------------------------------------- build
 const MOVING = /^(slide|bolt|trigger|hammer|magazine|mag|pump|forend|charging|cylinder_gun|barrel_move)/i;
 const vec3 = (a, d = [0, 0, 0]) => new THREE.Vector3(...(Array.isArray(a) && a.length >= 3 ? a.slice(0, 3).map((v) => num(v)) : d));
 
-// spec -> THREE.Group with userData.prop {kind, anchors, moving, ...}
-export function buildProp(spec) {
-  const root = new THREE.Group();
-  root.name = String(spec.name || 'Prop').slice(0, 40);
-  const mats = new Map();
-  for (const ms of spec.materials || []) mats.set(String(ms.name), makeMaterial(ms));
-  const matOf = (name) => {
-    if (!mats.has(name)) mats.set(name, makeMaterial({ name: name || 'default', color: '#7a7d82', metalness: 0.3, roughness: 0.5 }));
-    return mats.get(name);
-  };
-  // part transforms (relative to parent part)
-  const parts = (spec.parts || []).filter((p) => p && p.shape).slice(0, 400);
+// each part's matrix in the prop frame (parts can be placed relative to a parent part)
+function partFrames(parts) {
   const byName = new Map();
-  parts.forEach((p, i) => { p._i = i; if (p.name && !byName.has(p.name)) byName.set(p.name, p); });
+  parts.forEach((p) => { if (p.name && !byName.has(p.name)) byName.set(p.name, p); });
   const local = (p) => {
     const m = new THREE.Matrix4();
     const e = new THREE.Euler(...(Array.isArray(p.rot) ? p.rot.slice(0, 3).map((v) => num(v) * D2R) : [0, 0, 0]), 'XYZ');
@@ -280,27 +495,98 @@ export function buildProp(spec) {
     world.set(p, m);
     return m;
   };
+  return { byName, worldOf };
+}
+
+// Extra parts added to a preset that touch nothing (neither the model nor a part that
+// does) -> their indices. Decorations made of loose shapes hovering over a blade.
+export function floatingParts(spec, firstExtra) {
+  const parts = (spec.parts || []).filter((p) => p && p.shape).slice(0, 400);
+  if (firstExtra >= parts.length) return [];
+  const { worldOf } = partFrames(parts);
+  const boxes = parts.map((p) => {
+    const g = partGeometry(p);
+    if (!g) return null;
+    g.applyMatrix4(worldOf(p));
+    g.computeBoundingBox();
+    const b = g.boundingBox.clone().expandByScalar(0.004);
+    g.dispose();
+    return b;
+  });
+  const attached = new Set();
+  for (let i = 0; i < firstExtra; i++) if (boxes[i]) attached.add(i);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (let i = firstExtra; i < parts.length; i++) {
+      if (attached.has(i) || !boxes[i]) continue;
+      if ([...attached].some((j) => boxes[j].intersectsBox(boxes[i]))) { attached.add(i); grew = true; }
+    }
+  }
+  const out = [];
+  for (let i = firstExtra; i < parts.length; i++) if (!attached.has(i)) out.push(i);
+  return out;
+}
+
+// spec -> THREE.Group with userData.prop {kind, anchors, moving, ...}
+export function buildProp(spec) {
+  const root = new THREE.Group();
+  root.name = String(spec.name || 'Prop').slice(0, 40);
+  const mats = new Map();
+  for (const ms of spec.materials || []) mats.set(String(ms.name), makeMaterial(ms));
+  const matOf = (name) => {
+    if (!mats.has(name)) mats.set(name, makeMaterial({ name: name || 'default', color: '#7a7d82', metalness: 0.3, roughness: 0.5 }));
+    return mats.get(name);
+  };
+  // part transforms (relative to parent part)
+  const parts = (spec.parts || []).filter((p) => p && p.shape).slice(0, 400);
+  const { byName, worldOf } = partFrames(parts);
   // which moving part (if any) each part rides on
   const movingRoot = (p, depth = 0) => {
     if (MOVING.test(p.name || '') || p.moving) return p;
     const par = p.parent && byName.get(p.parent);
     return par && par !== p && depth < 32 ? movingRoot(par, depth + 1) : null;
   };
-  const groups = new Map(); // key -> {mover, mat, geos}
+  // geometry per part, in its own frame first (decorations map onto the part's shape)
+  const entries = [];
   for (const p of parts) {
     const g0 = partGeometry(p);
     if (!g0) continue;
-    const mat = matOf(p.material);
+    const kind = g0.userData.uvKind || 'project', size = g0.userData.uvSize || null;
     let g = g0.index ? g0.toNonIndexed() : g0;
     if (g !== g0) g0.dispose();
+    // remove attributes mergeGeometries can't line up
+    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv', 'side'].includes(k)) g.deleteAttribute(k);
+    if (!g.attributes.normal) g.computeVertexNormals();
+    g.clearGroups();
+    entries.push({ p, g, mat: matOf(p.material), kind, size, box: kind === 'project' ? new THREE.Box3().setFromBufferAttribute(g.attributes.position) : null });
+  }
+  // decorations: a band ("fit") is drawn at the proportions of the largest part it covers
+  const decorated = new Map();
+  for (const m of new Set(entries.map((e) => e.mat))) {
+    const mode = resolveMapping(m.userData.decoration);
+    if (!mode) continue;
+    let aspect = 8, best = -1;
+    for (const e of entries) {
+      if (e.mat !== m) continue;
+      const [a, b] = uvExtent(e);
+      if (a * b > best) { best = a * b; aspect = a / Math.max(b, 1e-6); }
+    }
+    const dec = applyDecoration(m, aspect);
+    if (dec) decorated.set(m, dec);
+  }
+  const groups = new Map(); // key -> {mover, mat, geos}
+  for (const e of entries) {
+    const { p, g, mat } = e;
+    const dec = decorated.get(mat);
+    if (dec && dec.fit) fitUV(e);
+    else if (dec && e.kind !== 'project') tileUV(e, dec.tile);
+    if (g.attributes.side) g.deleteAttribute('side');
     const mover = movingRoot(p);
     // into the mover's frame (or the prop's)
     const M = worldOf(p).clone();
     if (mover) M.premultiply(worldOf(mover).clone().invert());
     g.applyMatrix4(M);
-    // remove attributes mergeGeometries can't line up
-    for (const k of Object.keys(g.attributes)) if (!['position', 'normal', 'uv'].includes(k)) g.deleteAttribute(k);
-    g.clearGroups();
+    if (!dec || (!dec.fit && e.kind === 'project')) metricUV(g, (dec ? dec.tile : mat.userData.tile) || 0.05);
     const key = (mover ? mover.name : '') + '|' + (p.material || '');
     if (!groups.has(key)) groups.set(key, { mover, mat, geos: [] });
     groups.get(key).geos.push(g);
@@ -317,7 +603,6 @@ export function buildProp(spec) {
     return n;
   };
   for (const [, grp] of groups) {
-    for (const g of grp.geos) metricUV(g, grp.mat.userData.tile || 0.05);
     const merged = grp.geos.length === 1 ? grp.geos[0] : mergeGeometries(grp.geos, false);
     if (!merged) continue;
     if (grp.geos.length > 1) for (const g of grp.geos) g.dispose();
@@ -435,6 +720,7 @@ function pistolSpec(o = {}) {
     name: o.name || 'Pistol', kind: 'gun', preset: 'pistol', materials: baseMaterials(st), parts: [...parts, ...serr],
     anchors: { grip: [0, -0.056, -0.058], support: [0.020, -0.066, -0.048], muzzle: [0, 0.025, 0.121], eject: [-0.013, 0.036, 0.024], sight: [0, 0.047, 0] },
     slide: 'slide', slideTravel: 0.024, fireRate: 4, caliber: '9mm', action: 'semi',
+    decorate: { cover: ['polymer', 'steel'], engrave: ['steel'] },
   };
 }
 
@@ -539,6 +825,7 @@ function rifleSpec(o = {}) {
     slide: v === 'shotgun' ? 'pump' : 'bolt', slideTravel: v === 'shotgun' ? 0.07 : 0.032,
     fireRate: { rifle: 10, smg: 14, sniper: 0.8, shotgun: 1.2 }[v], caliber: { rifle: '5.56', smg: '9mm', sniper: '.308', shotgun: '12ga' }[v],
     auto: v === 'rifle' || v === 'smg', action: v === 'shotgun' ? 'pump' : v === 'sniper' ? 'bolt' : 'auto',
+    decorate: v === 'shotgun' ? { cover: ['wood', 'alu'], engrave: ['alu'] } : { cover: ['alu', 'polymer'], engrave: ['alu'] },
   };
 }
 
@@ -546,48 +833,47 @@ function rifleSpec(o = {}) {
 function bladeSpec(o = {}) {
   const v = o.variant || 'sword';
   const st = o.style || 'silver';
-  const steel = { name: 'blade', color: st === 'gold' ? '#d4b05a' : st === 'black' ? '#2b2d31' : '#cfd3d8', metalness: 0.95, roughness: 0.18, texture: 'brushed' };
-  const mats = [steel, { name: 'guard', color: st === 'gold' ? '#b08a3a' : '#5b5e63', metalness: 0.9, roughness: 0.3, texture: 'scratched' },
-    { name: 'wrap', color: v === 'katana' ? '#1d2747' : '#4a2f1c', metalness: 0, roughness: 0.8, texture: v === 'katana' ? 'knurled' : 'leather' },
-    { name: 'dark', color: '#0d0d0f', roughness: 0.5 }, { name: 'ray', color: '#ecebe4', roughness: 0.6, texture: 'stipple' }];
+  const gold = st === 'gold', black = st === 'black';
+  const steelColor = gold ? '#d8b55e' : black ? '#2b2d31' : '#d3d7dc';
+  const steel = { name: 'blade', color: steelColor, metalness: 0.95, roughness: 0.16, texture: 'brushed' };
+  if (v === 'katana') Object.assign(steel, { pattern: 'hamon', patternColor: black ? '#8d9299' : '#ffffff', mapping: 'fit' });
+  if (v === 'sword') Object.assign(steel, { pattern: 'fuller', patternColor: gold ? '#7a5e22' : black ? '#141518' : '#7b8087', mapping: 'fit', engrave: true });
+  const fittings = gold || v === 'katana' ? '#b8913f' : '#5b5e63';
+  const mats = [steel, { name: 'guard', color: v === 'katana' && !gold ? '#2b2a29' : fittings, metalness: 0.9, roughness: 0.32, texture: 'scratched' },
+    { name: 'wrap', color: v === 'katana' ? (st === 'red' ? '#6e1414' : st === 'blue' ? '#1d2b5c' : st === 'white' ? '#d8d6cf' : '#16161a') : '#4a2f1c', metalness: 0, roughness: 0.85, texture: v === 'katana' ? 'fabric' : 'leather', ...(v === 'katana' ? { pattern: 'wrap', patternColor: '#ecebe4', mapping: 'tile' } : {}) },
+    { name: 'gold', color: '#c9a44c', metalness: 1, roughness: 0.28 }, { name: 'dark', color: '#0d0d0f', roughness: 0.5 }, { name: 'peg', color: '#c8b48a', roughness: 0.7, texture: 'wood' }];
   const parts = [];
   if (v === 'knife') {
-    parts.push(ext('blade', 'blade', 0.0035, [[0.0, 0.0], [0.016, 0.0], [0.017, 0.08], [0.008, 0.125], [0.0, 0.135], [-0.004, 0.10], [-0.012, 0.02], [-0.012, 0.0]], { axis: 'x', bevel: 0.0014 }));
-    parts.push(box('bolster', 'guard', [0, -0.004, 0.002], [0.016, 0.008, 0.036], { bevel: 0.002 }));
-    parts.push(box('handle', 'wrap', [0, -0.058, 0.002], [0.020, 0.10, 0.026], { bevel: 0.008 }));
-    for (const y of [-0.03, -0.085]) parts.push(cyl('rivet', 'guard', [0, y, 0.002], [0.003, 0.003, 0.0215], 'x', { segments: 12 }));
-    return { name: o.name || 'Knife', kind: 'melee', preset: 'knife', materials: mats, parts, anchors: { grip: [0, -0.055, 0.0], muzzle: [0, 0.135, 0] } };
+    parts.push({ name: 'blade', shape: 'blade', variant: 'knife', material: 'blade', pos: [0, 0.002, 0.002], dims: [0.135, 0.03, 0.0042, 0, 0.055] });
+    parts.push(box('bolster', 'guard', [0, -0.004, 0.002], [0.016, 0.012, 0.036], { bevel: 0.002 }));
+    parts.push(box('handle', 'wrap', [0, -0.062, 0.002], [0.020, 0.105, 0.027], { bevel: 0.008 }));
+    parts.push(box('butt', 'guard', [0, -0.117, 0.002], [0.021, 0.008, 0.028], { bevel: 0.003 }));
+    for (const y of [-0.03, -0.09]) parts.push(cyl('rivet', 'guard', [0, y, 0.002], [0.003, 0.003, 0.0215], 'x', { segments: 12 }));
+    return { name: o.name || 'Knife', kind: 'melee', preset: 'knife', materials: mats, parts, anchors: { grip: [0, -0.058, 0.0], muzzle: [0, 0.137, -0.002] }, decorate: { cover: ['blade', 'wrap'], engrave: ['blade'] } };
   }
   if (v === 'katana') {
-    // curved blade: build the outline along a gentle arc
-    const L = 0.70, pts = [];
-    const back = [], edge = [];
-    for (let i = 0; i <= 14; i++) {
-      const t = i / 14, y = t * L, curve = -0.025 * t * t;
-      const w = 0.030 - t * 0.006;
-      back.push([curve - w * 0.35, y]);
-      edge.push([curve + w * 0.65, y]);
-    }
-    edge[edge.length - 1] = [edge[edge.length - 1][0] - 0.012, L + 0.03];
-    pts.push(...back, ...edge.reverse());
-    parts.push(ext('blade', 'blade', 0.0055, pts, { axis: 'x', bevel: 0.0024 }));
-    parts.push(cyl('habaki', 'guard', [0, 0.006, 0], [0.012, 0.012, 0.03], 'y', { segments: 14 }));
-    parts.push({ name: 'tsuba', shape: 'cylinder', material: 'guard', axis: 'y', pos: [0, -0.012, 0], dims: [0.042, 0.042, 0.007], segments: 32 });
-    parts.push(cyl('handle', 'wrap', [0, -0.15, 0], [0.0145, 0.0155, 0.26], 'y', { segments: 20 }));
-    for (let i = 0; i < 8; i++) parts.push({ name: 'ray diamond', shape: 'sphere', material: 'ray', pos: [0.0148, -0.04 - i * 0.03, 0], dims: [0.0012, 0.009, 0.006], segments: 10 });
-    for (let i = 0; i < 8; i++) parts.push({ name: 'ray diamond', shape: 'sphere', material: 'ray', pos: [-0.0148, -0.04 - i * 0.03, 0], dims: [0.0012, 0.009, 0.006], segments: 10 });
-    parts.push(cyl('kashira', 'guard', [0, -0.285, 0], [0.016, 0.015, 0.012], 'y', { segments: 18 }));
-    return { name: o.name || 'Katana', kind: 'melee', preset: 'katana', materials: mats, parts, anchors: { grip: [0, -0.07, 0], support: [0, -0.20, 0], muzzle: [0, 0.73, -0.02] } };
+    const L = 0.70, curve = 0.02;
+    parts.push({ name: 'blade', shape: 'blade', variant: 'katana', material: 'blade', pos: [0, 0.0, 0], dims: [L, 0.032, 0.0074, curve, 0.045] });
+    parts.push(box('habaki', 'gold', [0, 0.017, -0.0005], [0.0108, 0.034, 0.035], { bevel: 0.0025 }));
+    for (const y of [-0.0015, -0.0175]) parts.push({ name: 'seppa', shape: 'cylinder', material: 'gold', axis: 'y', pos: [0, y, 0], dims: [0.03, 0.03, 0.002], segments: 32 });
+    parts.push({ name: 'tsuba', shape: 'cylinder', material: 'guard', axis: 'y', pos: [0, -0.0095, 0], dims: [0.04, 0.04, 0.0055], segments: 40 });
+    parts.push({ name: 'tsuba rim', shape: 'torus', material: 'guard', axis: 'y', pos: [0, -0.0095, 0], dims: [0.0398, 0.0034, 360], segments: 48 });
+    parts.push({ name: 'fuchi', shape: 'cylinder', material: 'guard', axis: 'y', pos: [0, -0.0255, 0], dims: [0.0168, 0.0164, 0.013], segments: 24 });
+    parts.push({ name: 'handle', shape: 'cylinder', material: 'wrap', axis: 'y', pos: [0, -0.157, 0], dims: [0.0156, 0.0148, 0.25], segments: 28 });
+    for (const [x, y] of [[0.0152, -0.10], [-0.0152, -0.19]]) parts.push({ name: 'menuki', shape: 'sphere', material: 'gold', pos: [x, y, 0], dims: [0.003, 0.014, 0.007], segments: 14 });
+    parts.push(cyl('mekugi', 'peg', [0, -0.07, 0], [0.0026, 0.0026, 0.0322], 'x', { segments: 10 }));
+    parts.push({ name: 'kashira', shape: 'lathe', material: 'guard', axis: 'y', pos: [0, -0.282, 0], segments: 24, profile: [[0, -0.008], [0.011, -0.0075], [0.0145, -0.005], [0.0152, 0.0], [0.0152, 0.006], [0, 0.006]] });
+    return { name: o.name || 'Katana', kind: 'melee', preset: 'katana', materials: mats, parts, anchors: { grip: [0, -0.075, 0], support: [0, -0.205, 0], muzzle: [0, L, -curve - 0.006] }, decorate: { cover: ['blade'], engrave: ['blade'] } };
   }
-  // longsword
-  parts.push(ext('blade', 'blade', 0.0055, [[-0.022, 0.0], [0.022, 0.0], [0.020, 0.55], [0.012, 0.66], [0.0, 0.72], [-0.012, 0.66], [-0.020, 0.55]], { axis: 'x', bevel: 0.0026 }));
-  for (const x of [0.0033, -0.0033]) parts.push(box('fuller', 'dark', [x, 0.25, 0], [0.0008, 0.42, 0.007], { bevel: 0.0003 }));
+  // longsword: double-edged with a fuller
+  parts.push({ name: 'blade', shape: 'blade', variant: 'double', material: 'blade', pos: [0, 0, 0], dims: [0.74, 0.05, 0.0068, 0, 0.13] });
   parts.push(box('crossguard', 'guard', [0, -0.010, 0], [0.026, 0.020, 0.21], { bevel: 0.006 }));
   for (const z of [0.105, -0.105]) parts.push({ name: 'guard end', shape: 'sphere', material: 'guard', pos: [0, -0.010, z], dims: [0.013], segments: 16 });
+  parts.push(box('ricasso block', 'guard', [0, 0.004, 0], [0.012, 0.012, 0.03], { bevel: 0.003 }));
   parts.push(cyl('grip', 'wrap', [0, -0.11, 0], [0.0145, 0.0165, 0.18], 'y', { segments: 18 }));
   parts.push({ name: 'grip wrap', shape: 'helix', material: 'wrap', axis: 'y', pos: [0, -0.11, 0], dims: [0.0158, 0.0022, 0.17, 10] });
   parts.push({ name: 'pommel', shape: 'lathe', material: 'guard', axis: 'y', pos: [0, -0.215, 0], segments: 24, profile: [[0, -0.022], [0.014, -0.020], [0.022, -0.008], [0.022, 0.006], [0.012, 0.018], [0, 0.020]] });
-  return { name: o.name || 'Sword', kind: 'melee', preset: 'sword', materials: mats, parts, anchors: { grip: [0, -0.07, 0], support: [0, -0.16, 0], muzzle: [0, 0.72, 0] } };
+  return { name: o.name || 'Sword', kind: 'melee', preset: 'sword', materials: mats, parts, anchors: { grip: [0, -0.07, 0], support: [0, -0.16, 0], muzzle: [0, 0.74, 0] }, decorate: { cover: ['blade'], engrave: ['blade'] } };
 }
 
 function batSpec(o = {}) {
@@ -599,6 +885,7 @@ function batSpec(o = {}) {
       cyl('tape', 'tape', [0, -0.03, 0], [0.0135, 0.0135, 0.2], 'y', { segments: 20 }),
     ],
     anchors: { grip: [0, -0.06, 0], support: [0, 0.02, 0], muzzle: [0, 0.70, 0] },
+    decorate: { cover: ['wood'], engrave: ['wood'] },
   };
 }
 
@@ -614,6 +901,46 @@ export const PROP_PRESETS = {
   knife: { words: ['knife', 'dagger', 'combat knife', 'kunai'], make: (o) => bladeSpec({ ...o, variant: 'knife' }) },
   bat: { words: ['bat', 'baseball bat', 'club'], make: (o) => batSpec(o) },
 };
+
+// Put a pattern / drawing on a spec's materials. d: {pattern, patternColor, svg, mapping, engrave, material}.
+// Without a material name it goes where that kind of pattern belongs on the model (camo over
+// the whole gun, engraving on the slide, flowers on a blade). A blade keeps its temper line.
+const COVER = new Set(['camo', 'digital', 'stripes', 'flames', 'hex', 'dots', 'stars', 'hearts', 'scales']);
+export function decorateSpec(spec, d) {
+  if (!spec || !d) return spec;
+  const layers = patternLayers(d.pattern);
+  const svg = typeof d.svg === 'string' && d.svg.includes('<svg') ? d.svg : '';
+  if (!layers.length && !svg) return spec;
+  const cover = layers.some((l) => COVER.has(l.name));
+  spec.materials = spec.materials || [];
+  let targets = d.material && spec.materials.some((m) => m.name === d.material) ? [d.material] : null;
+  if (!targets && spec.decorate) targets = cover ? spec.decorate.cover : spec.decorate.engrave;
+  if (!targets) {
+    // the material most parts use (skipping glass, lights and tiny dark details)
+    const n = new Map();
+    for (const p of spec.parts || []) n.set(p.material, (n.get(p.material) || 0) + 1);
+    const skip = (m) => !m || (m.opacity ?? 1) < 0.9 || m.texture === 'glow' || (m.emissiveIntensity || 0) > 0.5;
+    const best = spec.materials.filter((m) => !skip(m)).sort((a, b) => (n.get(b.name) || 0) - (n.get(a.name) || 0))[0];
+    targets = best ? [best.name] : [];
+  }
+  const engraveKind = !cover && spec.kind !== 'melee';
+  for (const name of targets) {
+    const m = spec.materials.find((x) => x.name === name);
+    if (!m) continue;
+    const add = layers.map((l) => l.name + ':' + (l.color || d.patternColor || '')).map((x) => x.replace(/:$/, ''));
+    const addNames = new Set(layers.map((l) => l.name));
+    const keep = !cover && m.pattern && defaultMapping(m.pattern) === 'fit'
+      ? patternLayers(m.pattern).filter((l) => !addNames.has(l.name)).map((l) => l.name + ':' + (l.color || m.patternColor || '#ffffff')) : [];
+    m.pattern = [...keep, ...add].join('+');
+    // kept layers carry their own color; new layers use the asked color or a readable one
+    if (d.patternColor) m.patternColor = d.patternColor;
+    else if (keep.length) delete m.patternColor;
+    if (svg) m.svg = svg;
+    m.mapping = d.mapping || (keep.length || (svg && !layers.length) ? 'fit' : defaultMapping(m.pattern));
+    m.engrave = d.engrave !== undefined && d.engrave !== null ? !!d.engrave : engraveKind || !!m.engrave;
+  }
+  return spec;
+}
 
 export function presetSpec(name, opts = {}) {
   const p = PROP_PRESETS[name];
