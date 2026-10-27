@@ -20,7 +20,7 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 - **Retargeting.** Drop a Mixamo (or other humanoid) animation file onto any humanoid character and it is retargeted automatically: Mixamo, Unreal, Unity/VRM, Blender/Rigify and 3ds Max Biped naming all work. You can also copy clips between characters and mirror clips left/right.
 - **AI assistant** (the AI tab) creates animations from plain English. See below.
 - **Potato mode.** Five quality levels, Potato → Ultra. The app picks one for your device and steps down automatically when it lags. You can change it any time with the quality button.
-- **Exports**: a `.glb` of the whole scene (reopen it later to keep editing), animation clips as JSON, PNG screenshots, and WebM video of the animation.
+- **Exports**: a `.glb` of the whole scene (reopen it later to keep editing), **FBX or GLB for other apps** with presets for Roblox Studio, Unity, Unreal, Blender and Godot (see below), animation clips as JSON, PNG screenshots, and WebM video of the animation.
 - **Undo/redo** for edits, keys and poses.
 
 ## Supported files
@@ -91,9 +91,13 @@ The built-in motions work on any humanoid rig, so the same "walk" fits a Mixamo 
 
 ### Models made by the AI
 
-The built-in models (pistol, rifle, SMG, sniper rifle, pump shotgun, sword, katana, knife, baseball bat) are detailed procedural models: bevelled outlines, slide serrations, sights, rails, pins and grooves, with metal, polymer, rubber and wood surfaces. Add a colour (black, tan, olive, silver, gold, wood, white, red, pink, blue). They work offline.
+The built-in models (pistol, rifle, SMG, sniper rifle, pump shotgun, sword, katana, knife, baseball bat) are detailed procedural models: bevelled outlines, slide serrations, sights, rails, pins and grooves, with metal, polymer, rubber and wood surfaces. Blades have a real cross-section (spine, ridge line, sharp edge, curved katana tip and temper line). Add a colour (black, tan, olive, silver, gold, wood, white, red, pink, blue) and a pattern: `make a katana with gold flowers and swing it`, `an engraved silver pistol`, `pink camo rifle`. Patterns: flowers, sakura, vines, scroll engraving, damascus, camo, digital camo, hex, stripes, flames, stars, hearts, scales, dots. They work offline.
 
-With Claude you can ask for anything else ("make a retro ray gun", "make a lightsaber and swing it", "a revolver with a long barrel"). Claude designs it from parts (extruded outlines, lathed shapes, rounded boxes, tubes) with physically based materials, says where the hands go and where the muzzle is, and animates the character using it. You can also:
+With Claude you can ask for anything else ("make a retro ray gun", "make a lightsaber and swing it", "a revolver with a long barrel", "a katana with a dragon drawn on the blade"). Claude builds it as a custom model at game-asset quality rather than falling back to a built-in one: extruded outlines for the silhouette, smooth lofted bodies, lathed round parts, swept tubes and cables, real blades, mirrored left/right parts, bevels and small details, physically based materials, and patterns or its own SVG drawings painted onto surfaces. It says where the hands go and where the muzzle is, and animates the character using it.
+
+**Claude checks its own work.** After the first draft, WebBlend renders the model from four sides (right, front, top, three-quarter on a 10 cm grid, with the grip and muzzle marked) and runs an inspection (parts that failed to build, pieces floating or not touching, the grip off the model, a gun not pointing forward, too few parts). Claude gets the renders and the report, compares them with your request and reference images, and sends back an improved model. Turn it off under Settings → AI if you want faster answers. Modeling requests use Claude's most capable setting automatically (Settings → AI → Effort: Auto).
+
+You can also:
 
 - **Attach reference images**: the picture button next to the prompt, or paste / drop images onto it. Claude copies a pose, a motion, or an object's shape and colours from them (hosted page and API key).
 - **Let it look things up**: with an API key, Claude can search the web for references (real dimensions, parts, colours) before modelling something specific. Turn it off under Settings → AI.
@@ -102,6 +106,19 @@ With Claude you can ask for anything else ("make a retro ray gun", "make a light
 **Holding things.** Select a held prop (or the character) to get Shoot / Swing, Aim / Guard, move it to the other hand, Flip it, or Remove it. Nudge it in the hand with the gizmo and aiming follows. Any model you import (a gun from Sketchfab, a tool...) can be put in a character's hand with **Give to a character** in its properties; WebBlend guesses the front, the grip and the muzzle, and Flip turns it around if it guessed wrong.
 
 Claude gets a map of each character: how tall each body part is, which bone is which part (Japanese bone names translated to English), what moving each bone carries along (rotating a thigh moves the whole leg, so it bends knees with the knee setting instead), and the extra bones it can key, grouped as hair, ears, eyes, face, tail, fingers, clothes and so on. The Scene list also shows an English translation next to Japanese names, and its filter searches both.
+
+## Export to Roblox, Unity, Unreal, Blender, Godot
+
+**File → Export for Roblox, Unity, Unreal, Blender…** Pick where it's going and the dialog sets the format and options, and shows how to import it there:
+
+| Platform | File | Notes |
+|---|---|---|
+| Roblox Studio | `.fbx` (zip: the model plus one `.fbx` per animation) | Meters with the FBX unit scale, textures embedded (max 1024 px), material colours baked into textures, plain English bone names. Import with Home → Import 3D; bring each animation in through the Animation Editor's Import → From FBX Animation. Warns about meshes over Roblox's 20,000-triangle limit. |
+| Unity | `.fbx` | Meters, every clip in one file (they show up in the Animation tab of the import settings). |
+| Unreal Engine | `.fbx` | Centimeters; rigged models import as a Skeletal Mesh with every clip as an Animation Sequence. |
+| Blender, Godot, web | `.glb` | glTF keeps shape keys and PBR materials; FBX is available too. |
+
+The FBX is binary FBX 7.4 with meshes, normals, UVs, material slots, embedded textures, skeletons with skin weights and a bind pose, and one animation take per clip (constraints and IK are baked into the bones). "Animation only" writes just the motion for a rig you already imported. Shape keys (face morphs) are not written to FBX; use GLB for those.
 
 ## Performance and low-memory PCs (4 GB)
 
@@ -129,7 +146,7 @@ Claude gets a map of each character: how tall each body part is, which bone is w
 
 ## Saving your work
 
-Use **File → Save scene (.glb)**. Opening that file again restores every model with its clips and mix settings. The `.glb` also opens in Blender, Unity, Unreal, Godot and other tools.
+Use **File → Save scene (.glb)**. Opening that file again restores every model with its clips and mix settings. The `.glb` also opens in Blender, Unity, Unreal, Godot and other tools; for Roblox use the FBX export above.
 
 ## Building from source
 
@@ -150,10 +167,12 @@ node tools/test-blend.mjs truth.json test-assets/testfiles/*.blend   # .blend vs
 node tools/test-humanoid.mjs                                         # rig detection, pose solving, retargeting
 node tools/test-touch.mjs test-assets/assets/hero.blend              # hands placed on body spots, feet planted
 node tools/test-props.mjs                                            # built-in models, holding, aiming, shooting effects
+node tools/test-decor.mjs                                            # blades, lofts, sweeps, mirroring, patterns
 node tools/test-ai.mjs                                               # offline AI prompt parsing
 node tools/e2e.cjs test-assets/assets ./out                          # full app in headless Chromium
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer
-node tools/e2e-ai.cjs                                                # Claude integrations with mocked responses
+node tools/e2e-ai.cjs                                                # Claude integrations (incl. the model self-review) with mocked responses
+node tools/e2e-export.cjs ./out [python-with-bpy]                    # FBX export read back by three.js and, if given, Blender
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
 node tools/test-pose-truth.mjs rig.blend truth.json                # any rig vs Blender (truth from tools/blender/pose_truth.py)

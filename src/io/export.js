@@ -5,6 +5,8 @@ import { zipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { clipWithNames, clipWithUuids } from '../anim/clips.js';
 import { bakeConstraints } from '../anim/constraints.js';
 import { inArtifact } from '../core/util.js';
+import { buildFBX } from './fbx.js';
+import { translateName } from '../core/jp.js';
 
 let downloadsCap;
 async function downloads() {
@@ -96,6 +98,99 @@ export async function exportGLB(app, models, filename) {
     app.world.updateMatrixWorld(true);
     app.needsEval = true;
     app.viewport.requestRender();
+  }
+}
+
+// "腕.L" -> "arm.L": plain names for apps that mangle anything else (Roblox)
+export function asciiName(name) {
+  const t = translateName(name) || String(name || '');
+  return t.normalize('NFKD').replace(/[^\x20-\x7e]/g, '').replace(/[^\w.\- ]+/g, '_').replace(/\s+/g, '_').replace(/_{2,}/g, '_').replace(/^_+|_+$/g, '') || 'node';
+}
+
+// Models -> FBX file(s). opts: clips 'all' | 'active' | 'none', unit 'm' | 'cm', fps,
+// maxTexture, bakeColors, ascii (plain names), splitClips (model file + one animation
+// file per clip, as Roblox's Animation Editor wants), animationOnly.
+// -> { files: [{ name, bytes }], report }
+export async function makeFBX(app, models, opts = {}) {
+  const fps = opts.fps || app.settings.get('fps') || 30;
+  const wasPlaying = app.transport && app.transport.playing;
+  if (wasPlaying) app.pause();
+  // everything is written in the rest pose; the scene goes back exactly as it was
+  const saved = [];
+  for (const m of models) m.root.traverse((o) => saved.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone(), o.morphTargetInfluences ? o.morphTargetInfluences.slice() : null]));
+  const restore = () => { for (const [o, p, q, sc, mi] of saved) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(sc); if (mi) for (let i = 0; i < mi.length; i++) o.morphTargetInfluences[i] = mi[i]; } for (const m of models) m.root.updateMatrixWorld(true); app.needsEval = true; app.viewport?.requestRender(); };
+  const prepared = [];
+  try {
+    for (const m of models) {
+      m.resetPose();
+      const base = new Map();
+      m.root.traverse((o) => base.set(o, [o.position.clone(), o.quaternion.clone(), o.scale.clone()]));
+      const entries = opts.clips === 'none' ? [] : opts.clips === 'active' ? [m.activeClip || m.clips[0]].filter(Boolean) : m.clips;
+      const clips = entries.map((e) => {
+        const src = m.constraints ? bakeConstraints(m, clipWithUuids(e.clip, m.root), fps) : clipWithUuids(e.clip, m.root);
+        src.name = e.clip.name;
+        return src;
+      });
+      for (const [o, p, q, sc] of [...base].map(([o, v]) => [o, ...v])) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(sc); }
+      m.root.updateMatrixWorld(true);
+      prepared.push({ model: m, root: m.root, clips, base });
+    }
+  } catch (e) { restore(); throw e; }
+  const sample = (pm, clip, nodes, rate) => {
+    const { root, base } = prepared.find((x) => x.root === pm.root);
+    const mixer = new THREE.AnimationMixer(root);
+    mixer.clipAction(clip).play();
+    const n = Math.max(2, Math.round(clip.duration * rate) + 1);
+    const t = new Float32Array(n);
+    const out = new Map(nodes.map((o) => [o, { t, p: new Float32Array(n * 3), q: new Float32Array(n * 4), s: new Float32Array(n * 3) }]));
+    for (let i = 0; i < n; i++) {
+      t[i] = Math.min(clip.duration, i / rate);
+      for (const [o, [p, q, sc]] of base) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(sc); }
+      mixer.setTime(t[i]);
+      for (const o of nodes) { const d = out.get(o); o.position.toArray(d.p, i * 3); o.quaternion.toArray(d.q, i * 4); o.scale.toArray(d.s, i * 3); }
+    }
+    mixer.stopAllAction(); mixer.uncacheRoot(root);
+    for (const [o, [p, q, sc]] of base) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(sc); }
+    root.updateMatrixWorld(true);
+    return out;
+  };
+  const worldInverse = app.world ? app.world.matrixWorld.clone().invert() : new THREE.Matrix4();
+  const common = { unit: opts.unit || 'm', fps, maxTexture: opts.maxTexture || 2048, bakeColors: !!opts.bakeColors, asciiNames: opts.ascii ? asciiName : null, worldInverse, sample };
+  const baseName = safeName(opts.filename || (models.length === 1 ? models[0].name : 'scene'));
+  const jobs = [];
+  if (opts.splitClips && prepared.some((p) => p.clips.length)) {
+    // the model (rig + meshes, no motion), then each clip as its own animation file
+    jobs.push({ name: `${baseName}.fbx`, models: prepared.map((p) => ({ root: p.root, clips: [] })), skipMeshes: !!opts.animationOnly });
+    for (const p of prepared) for (const c of p.clips) jobs.push({ name: `${baseName} - ${safeName(c.name)}.fbx`, models: [{ root: p.root, clips: [c] }], skipMeshes: true, anim: true });
+    if (opts.animationOnly) jobs.shift();
+  } else {
+    jobs.push({ name: `${baseName}.fbx`, models: prepared.map((p) => ({ root: p.root, clips: p.clips })), skipMeshes: !!opts.animationOnly });
+  }
+  // the pose-dependent part of every file is written synchronously; textures follow
+  const pending = jobs.map((j) => buildFBX(j.models, { ...common, skipMeshes: j.skipMeshes, textures: !j.skipMeshes, clipName: (_, c) => c.name }));
+  restore();
+  if (wasPlaying) app.play();
+  const built = await Promise.all(pending);
+  const report = built[0].report;
+  report.clips = built.reduce((a, b) => a + b.report.clips, 0);
+  report.morphs = models.reduce((a, m) => { let n = 0; m.root.traverse((o) => { if (o.morphTargetInfluences && o.morphTargetInfluences.length) n++; }); return a + n; }, 0);
+  return { files: jobs.map((j, i) => ({ name: j.name, bytes: built[i].bytes })), report };
+}
+
+export async function exportFBX(app, models, opts = {}) {
+  if (!models.length) { app.toast('Nothing to export', 'warn'); return null; }
+  try {
+    const { files, report } = await makeFBX(app, models, opts);
+    const blob = files.length === 1
+      ? new Blob([files[0].bytes], { type: 'application/octet-stream' })
+      : new Blob([zipSync(Object.fromEntries(files.map((f) => [f.name, f.bytes])))], { type: 'application/zip' });
+    const name = files.length === 1 ? files[0].name : files[0].name.replace(/\.fbx$/, '') + ' (fbx).zip';
+    await saveFile(blob, name, app);
+    return { files, report };
+  } catch (e) {
+    console.error(e);
+    app.toast('FBX export failed: ' + (e.message || e), 'error', 6000);
+    return null;
   }
 }
 

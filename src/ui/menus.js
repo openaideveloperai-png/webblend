@@ -3,6 +3,7 @@ import { h, icon } from './dom.js';
 import { dropdown } from './toast.js';
 import { PRIMITIVES } from '../scene/primitives.js';
 import { exportGLB, screenshot, recordVideo, exportClipJSON } from '../io/export.js';
+import { openExportDialog } from './export-dialog.js';
 import { ACCEPT } from '../io/importer.js';
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -62,6 +63,7 @@ export function initMenus(app, ui) {
       { label: 'Add animation to selected model…', icon: 'bone', disabled: !app.selection.model, action: () => openAnimationFor(app, app.selection.model) },
       { sep: true },
       { label: 'Save scene (.glb, reopen to keep editing)', icon: 'download', kbd: MOD + 'E', disabled: !app.models.length, action: () => exportGLB(app, app.models, 'webblend-scene') },
+      { label: 'Export for Roblox, Unity, Unreal, Blender…', icon: 'download', disabled: !app.models.length, action: () => openExportDialog(app) },
       { label: 'Export selected model as GLB', icon: 'download', disabled: !app.selection.model, action: () => exportGLB(app, [app.selection.model]) },
       { label: 'Export active clip as JSON', icon: 'download', disabled: !app.selection.model?.activeClip, action: () => exportClipJSON(app, app.selection.model, app.selection.model.activeClip) },
       { sep: true },
