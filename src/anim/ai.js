@@ -246,8 +246,17 @@ export function parseFaceWords(text) {
   add(/\bwink(s|ed|ing)?\b/, 'wink');
   add(/\bopen(s|ed|ing)?\s+(?:(?:her|his|their|the|its)\s+)*mouth\b|\bsay(s|ing)?\s+a+h+\b|\b(surprised|shocked|gasp(s|ed|ing)?)\b/, 'open');
   add(/\b(pout(s|ed|ing)?|kiss(y|es|ing)?\s*face|pucker(s|ed|ing)?|duck\s*face|blow(s|ing)?\s+a\s+kiss)\b/, 'round');
-  add(/\btongue\s+out\b|\bstick(s|ing)?\s+(?:(?:her|his|their|its|the|a)\s+)*tongue\b|\bblep\b|\bbleh+\b|\bsilly\s+face\b|\braspberry\b/, 'tongue');
+  add(/\b(tongue|tounge|toungue|tonge|ounge)\s+(is\s+)?out\b|\bstick(s|ing)?\s+(?:(?:her|his|their|its|the|a)\s+)*(tongue|tounge)\b|\bblep\b|\bbleh+\b|\bsilly\s+face\b|\braspberry\b/, 'tongue');
   return out;
+}
+
+// what the request says about the mouth itself: 'closed' ("the mouth isn't open",
+// "lips curving around the tongue"), 'open' ("open her mouth wide"), or null
+export function mouthWish(text) {
+  const t = String(text || '').toLowerCase().replace(/[’']/g, '');
+  if (/\b(mouth|lips?)\s+(is|are)?\s*(nt|not|isnt|arent|never|no)\s+(all\s+|wide\s+|fully\s+|too\s+|so\s+)*(open|wide)|\b(closed|shut)\s+(mouth|lips)|\b(mouth|lips)\s+(closed|shut)|\blips?\s+(\w+\s+){0,2}(curv|wrap|clos|seal|hug|purs|around|round)|\b(curv|wrap|clos|hug)\w*\s+(\w+\s+){0,2}(around|round)\s+(the\s+|her\s+|his\s+|a\s+)?(tongue|finger)|\b(dont|do not|without|no)\s+(\w+\s+){0,2}open(ing)?\s+(the\s+|her\s+|his\s+|their\s+)?mouth|\bnot\s+(all\s+|wide\s+)?open/.test(t)) return 'closed';
+  if (/\b(wide\s+open|open(s|ed|ing)?\s+(her|his|their|the|its)?\s*mouth|mouth\s+(wide\s+)?open|gap(e|es|ing)|yawn)/.test(t)) return 'open';
+  return null;
 }
 
 export function parsePrompt(text) {
@@ -402,6 +411,7 @@ export class AIAssistant {
 
   // Offline: returns {results:[{model, clip}], message, understood}
   runOffline(prompt) {
+    this.prompt = String(prompt || '');
     const pr = parsePropRequest(prompt);
     if (pr) { const r = this.runProps(pr, prompt); if (r) return r; }
     if (wantsCustomModel(prompt) && !parsePrompt(prompt).steps.some((st) => st.human.length || st.object.length || st.touch.touch || st.hands || st.face.length)) {
@@ -432,7 +442,7 @@ export class AIAssistant {
             : Object.entries(touch).map(([sd, sp]) => (sp === 'crossed' ? `${sd} arm crossed` : typeof sp === 'object' ? `${sd} ${sp.finger} finger ${sp.depth > 0.2 ? 'in' : 'to'} the ${spotName(sp)}` : `${sd} hand on ${spotName(sp)}`)).join(', ');
           const still = HUMANOID[key].still || key === 'still';
           segs.push(bakeHumanoid(rig, key, { ...opts, touch, hands: step.hands, lockLegs: step.touch.lockLegs || still, duration: opts.duration || (HUMANOID[key].loop ? Math.max(3, HUMANOID[key].cycle) : undefined), name: (base ? HUMANOID[key].label + ' + ' : '') + where.charAt(0).toUpperCase() + where.slice(1) }));
-          for (const sp of Object.values(touch)) if (typeof sp === 'object' && sp.spot === 'mouth' && sp.depth > 0.05) faceWants.push({ kind: 'round', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.35, value: 0.6 }, { kind: 'open', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.3, value: 0.22 });
+          for (const sp of Object.values(touch)) if (typeof sp === 'object' && sp.spot === 'mouth' && sp.depth > 0.05) faceWants.push({ kind: 'round', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.35, value: 0.4 }, { kind: 'open', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.3, value: mouthWish(prompt) === 'open' ? 0.3 : 0.06 });
           continue;
         }
         if (rig && step.human.length) {
@@ -493,7 +503,8 @@ export class AIAssistant {
         try {
           if (mouthProbe(model)) {
             const keys0 = faceWants.length ? faceKeysFor(model, faceWants, clip.duration).keys : [];
-            const res = clearMouth(model, clip, keys0);
+            const wish = mouthWish(prompt);
+            const res = clearMouth(model, clip, keys0, { share: wish === 'closed' ? 0 : null });
             if (res.keys) {
               const face = faceTracks(model, res.keys, clip.duration);
               const taken = new Set(face.tracks.map((t) => t.name));
@@ -643,7 +654,7 @@ ${params}
 - Held poses (hand on lap, hands on hips, hand on chest...) should look calm: after the hands arrive, keep the body nearly still with only subtle breathing (chestPitch about ±1.5, tiny headPitch), and loop only that breathing.
 - objectKeys: position = offset from the object's current place in multiples of its size; rotation = degrees (x,y,z euler) added to its current rotation; scale = multipliers; opacity uses x (0-1); color uses x,y,z as r,g,b 0-1.
 - boneKeys work on ANY bone listed in the bone map (face handles, hair, ears, tail, wings, clothes, breasts, extra spine bones, robot parts...), on top of the body pose at that moment. x / y / z = degrees about the CHARACTER's axes through the bone's joint: x+ swings the part forward and down (like a nod), y+ turns it toward the character's left, z+ tilts it toward the character's right. mx / my / mz = slide it in cm along the character's left / up / forward (for [move] control handles like lips and jaw; small values, about the listed range). For a model without a humanoid these are the model's own x / y / z axes. Values are offsets from where the bone would be, so 0 = unchanged. Prefer humanoidKeys / handTouches / finger params for the body, arms, hands and fingers, and faceKeys for expressions; use boneKeys for everything else, and only on bones the bone map lists (not the "driven automatically" ones).
-- faceKeys blend the face / pose controls listed for the model (shape keys like blink or smile, mouth shapes, poses saved in the file, the jaw): value 0 = off, 1 = full, mixable (e.g. "mouth_u" 0.6 + a smile 0.3). Ease them in and out over 0.15-0.4 s, and blink now and then in longer clips if there's a blink control. Mouth shapes that wrap around something: combine a rounded / pursed shape (u, o, kiss, pout) with a little jaw opening, and lip handles via boneKeys if the bone map lists them. "{measured: ...}" says what a mouth control really does on this character (how far it opens the lips, how far the tongue comes out): use it to pick controls (e.g. a tongue out needs a control that measures "tongue out"; "tongueOut" / "tongueCurl" push the tongue out along a curve and curl its tip). One eye only (a wink): use a control for that eye (names ending in .L = the character's left eye, .R = right, or a wink shape key), never a both-eyes blink. The app keeps the lips apart around anything passing through them (the tongue, a finger), opening the mouth just as much as needed, so nothing clips through the lips; still, open the mouth a little yourself when the tongue comes out, and keep the tongue out (and the finger in) for a moment before taking it back.
+- faceKeys blend the face / pose controls listed for the model (shape keys like blink or smile, mouth shapes, poses saved in the file, the jaw): value 0 = off, 1 = full, mixable (e.g. "mouth_u" 0.6 + a smile 0.3). Ease them in and out over 0.15-0.4 s, and blink now and then in longer clips if there's a blink control. Mouth shapes that wrap around something: combine a rounded / pursed shape (u, o, kiss, pout) with a little jaw opening, and lip handles via boneKeys if the bone map lists them. "{measured: ...}" says what a mouth control really does on this character (how far it opens the lips, how far the tongue comes out): use it to pick controls (e.g. a tongue out needs a control that measures "tongue out"; "tongueOut" / "tongueCurl" push the tongue out along a curve and curl its tip). One eye only (a wink): use a control for that eye (names ending in .L = the character's left eye, .R = right, or a wink shape key), never a both-eyes blink. SOFT LIPS: the lips are soft, like real ones: the app wraps them live around anything passing between them (the tongue, a finger, a held object): they part only where it passes, squish and curve around it, and stay closed beside it, and the jaw drops only a little. So for a tongue out or a finger in the mouth do NOT open the mouth yourself: keep mouth-open controls at 0-0.15 unless the user asks for an open mouth (a slight pout / "u" 0.2-0.4 helps the lips hug a finger). Follow the user's words about the mouth exactly (closed, lips around it, slightly open, wide open). A cute tongue out ("bleh") is tongueOut 0.3-0.5 with tongueCurl about -0.2; keep the tongue out (and the finger in) for a moment before taking it back.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
 ${this.propRules()}
@@ -917,6 +928,7 @@ ${PRESET_DOC}
   }
 
   async askClaude(prompt, { signal, onText, images, onStatus } = {}) {
+    this.prompt = String(prompt || '');
     const provider = this.provider();
     if (provider !== 'claude-ai' && provider !== 'api') throw new Error('No Claude connection available');
     const imgs = (images || []).slice(0, 5);
@@ -1144,7 +1156,7 @@ Your clip JSON:
 ${JSON.stringify(clip.userData.spec)}`);
     const text = `${this.instructions(prompt)}
 
-You already answered this request; the app built your clips and measured them on the character${sheets.length ? ', and rendered close-ups of the face during the motion (the images; letters and times on each frame)' : ''}. Look very closely: nothing may clip (the tongue or a finger through the lips or teeth, a hand or finger into the face or body, lips pushing through each other), the lips should part naturally around whatever passes between them, the tongue should come out curved (not as a stiff stick), one-eye winks must close only that eye, and the motion should read clearly and look natural. Fix every PROBLEM and everything wrong you see (keep what already works) and reply with the COMPLETE corrected JSON in the same format: the fixed clips (same names), and "props": []. If a clip already looks right, leave it out of "clips".
+You already answered this request; the app built your clips and measured them on the character${sheets.length ? ', and rendered close-ups of the face during the motion (the images; letters and times on each frame)' : ''}. Look very closely: nothing may clip (the tongue or a finger through the lips or teeth, a hand or finger into the face or body, lips pushing through each other), the lips should wrap snugly around whatever passes between them (the app's soft lips do this: parted only where it passes, closed beside it) and the mouth must be only as open as the user asked, the tongue should come out curved (not as a stiff stick), one-eye winks must close only that eye, and the motion should read clearly and look natural. Fix every PROBLEM and everything wrong you see (keep what already works) and reply with the COMPLETE corrected JSON in the same format: the fixed clips (same names), and "props": []. If a clip already looks right, leave it out of "clips".
 
 ${parts.join('\n\n')}`;
     const answer = await this.callClaude(text, { signal, images: sheets, schema: this.schema(), onText: (t) => onStatus?.(`Claude is fixing the motion… (${Math.round(t.length / 100) / 10}k chars)`) });
@@ -1472,15 +1484,25 @@ ${parts.join('\n\n')}`;
       for (let i = tracks.length - 1; i >= 0; i--) if (taken.has(tracks[i].name)) tracks.splice(i, 1);
       tracks.push(...face.tracks);
     };
+    // "the mouth isn't open / the lips curve around the tongue": the mouth-open controls stay
+    // nearly shut and the soft lips do the wrapping
+    const wish = rig ? mouthWish(this.prompt) : null;
+    if (wish === 'closed' && Array.isArray(c.faceKeys) && c.faceKeys.length) {
+      let fx = null;
+      try { fx = mouthEffects(model); } catch { fx = null; }
+      const opens = (n) => { const e = fx && fx.get(n); return e ? e.open > 0.004 && e.tongue < 0.004 : /^(mouth[_ ]?)?(a|aa|ah|o|oh|open)$|jaw ?open|mouth ?open|wide/i.test(String(n)); };
+      c.faceKeys = c.faceKeys.map((k) => (k && opens(k.control) && +k.value > 0.12 ? { ...k, value: 0.12 } : k));
+    }
     if (Array.isArray(c.faceKeys) && c.faceKeys.length) putFace(c.faceKeys);
-    // the lips part around the tongue or a finger instead of clipping through them
+    // the lips wrap around the tongue or a finger instead of it clipping through them
     let mouthReport = null;
     if (rig && tracks.length) {
       try {
         if (mouthProbe(model)) {
           const unknownFace = face.unknown;
-          const res = clearMouth(model, new THREE.AnimationClip(name, duration, tracks.slice()), Array.isArray(c.faceKeys) ? c.faceKeys : []);
+          const res = clearMouth(model, new THREE.AnimationClip(name, duration, tracks.slice()), Array.isArray(c.faceKeys) ? c.faceKeys : [], { share: wish === 'closed' ? 0 : null });
           mouthReport = res.report;
+          if (mouthReport) mouthReport.wish = wish;
           if (res.keys) { putFace(res.keys); face.unknown = unknownFace; }
         }
       } catch (e) { console.warn('mouth clearance', e); }

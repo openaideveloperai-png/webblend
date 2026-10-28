@@ -18,6 +18,7 @@ import { Importer, unsupportedMessage } from '../io/importer.js';
 import { optimizeTextures } from '../io/textures.js';
 import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITIVES } from '../scene/primitives.js';
 import { onDecorationReady } from '../scene/patterns.js';
+import { updateSoftLips } from '../anim/softlips.js';
 
 const _v = new THREE.Vector3();
 
@@ -220,6 +221,8 @@ export class App extends Emitter {
       m2.poses = model.poses.map((p) => ({ ...p, deltas: p.deltas.map((d) => ({ ...d, node: byUuid.get(map.get(d.node.uuid)) })).filter((d) => d.node) }));
     }
     model.clips.forEach((e, i) => { const e2 = m2.clips[i]; if (e2) { m2.setPlaying(e2, e.playing); m2.setWeight(e2, e.weight); m2.setSpeed(e2, e.speed); m2.setLoop(e2, e.loop); } });
+    if (model.softLips !== undefined) m2.softLips = model.softLips;
+    if (model.softLipsSoftness !== undefined) m2.softLipsSoftness = model.softLipsSoftness;
     this.toast(`Duplicated "${model.name}"`, 'ok');
     return m2;
   }
@@ -820,6 +823,8 @@ export class App extends Emitter {
     this.world.updateMatrixWorld(true);
     // bone constraints (control bones driving deform bones, IK legs...)
     for (const m of this.models) if (m.constraints && m.root.visible && m.solveConstraints()) m.root.updateMatrixWorld(true);
+    // soft lips wrap around the tongue / a finger (only works when something's near the mouth)
+    for (const m of this.models) if (m.humanoid) { try { updateSoftLips(m); } catch (e) { console.warn('soft lips', e); m.softLips = false; } }
     for (const m of this.models) m.updateHelpers();
     for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); this.updateCameraHelper(m, h); }
     if (this.selBox.visible && (tr.playing || this._drag)) this.updateSelBox();

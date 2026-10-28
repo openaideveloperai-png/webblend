@@ -178,8 +178,10 @@ ok('scan description', /finger bones/.test(describeRig(model)));
   ok('mouth: what each control does is measured', fx && Math.abs(fx.get('mouth_open').open - 0.012) < 0.002 && fx.get('tongue_out').tongue > 0.02, JSON.stringify(fx && [...fx].map(([k, v]) => [k, +(v.open * 100).toFixed(1), +(v.tongue * 100).toFixed(1)])));
   const keys = [{ t: 0, control: 'tongue_out', value: 0 }, { t: 0.6, control: 'tongue_out', value: 1 }, { t: 2, control: 'tongue_out', value: 1 }];
   const clip = new THREE.AnimationClip('t', 2, faceTracks(m2, keys, 2).tracks);
+  // (soft lips switched off here: tools/test-softlips.mjs covers lips wrapping around the tongue)
+  m2.softLips = false;
   const res = clearMouth(m2, clip, keys);
-  ok('mouth: a tongue out through closed lips gets the lips parted, no clipping left', res.report && res.report.clipCm > 0.3 && res.report.opened === 'mouth_open' && res.report.clipAfterCm <= 0.15 && res.keys.some((k) => k.control === 'mouth_open' && k.value > 0.5), JSON.stringify(res.report));
+  ok('mouth: without soft lips, a tongue out through closed lips gets the lips parted, no clipping left', res.report && res.report.clipCm > 0.3 && res.report.opened === 'mouth_open' && res.report.clipAfterCm <= 0.15 && res.keys.some((k) => k.control === 'mouth_open' && k.value > 0.5), JSON.stringify(res.report));
 }
 
 // ---- the self-check

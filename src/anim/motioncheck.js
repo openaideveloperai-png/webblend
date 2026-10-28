@@ -151,8 +151,18 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
   } finally { S.done(); }
   if (plan.face && plan.face.length) lines.push(`- face controls used: ${plan.face.join(', ')}`);
   const mo = clip.userData && clip.userData.mouth;
-  if (mo) lines.push(`- mouth: ${mo.tongueOutCm > 0.1 ? `tongue out up to ${mo.tongueOutCm} cm; ` : ''}${mo.fingerIn ? 'a finger goes between the lips; ' : ''}${mo.opened ? `the lips were parted with "${mo.opened}" (open up to ${mo.openCm} cm) so nothing clips through them${mo.clipAfterCm > 0.1 ? `, still ${mo.clipAfterCm} cm short` : ''}` : mo.clipCm > 0.1 ? `${mo.clipCm} cm of clipping through the lips${mo.unfixed ? ' (' + mo.unfixed + ')' : ''}` : 'nothing clips through the lips'}`);
-  if (mo && !mo.opened && mo.clipCm > 0.3) issues.push(`something passes through the closed lips (${mo.clipCm} cm): open the mouth there (a control that measures "opens the lips", the jaw, or the lip handles)`);
+  if (mo) {
+    const bits = [];
+    if (mo.tongueOutCm > 0.1) bits.push(`tongue out up to ${mo.tongueOutCm} cm`);
+    if (mo.fingerIn) bits.push('a finger goes between the lips');
+    if (mo.soft && mo.wrapCm > 0.05) bits.push(`the soft lips wrap around it (pushed up to ${mo.wrapCm} cm, closed beside it)`);
+    if (mo.opened) bits.push(`the mouth opened a little with "${mo.opened}" (lips ${mo.openCm} cm apart)`);
+    const left = mo.soft || mo.opened ? mo.clipAfterCm || 0 : mo.clipCm;
+    bits.push(left > 0.1 ? `still ${left} cm clipping through the lips${mo.unfixed ? ' (' + mo.unfixed + ')' : ''}` : 'nothing clips through the lips');
+    lines.push(`- mouth: ${bits.join('; ')}`);
+    if (left > 0.3) issues.push(`something passes through the lips (${left} cm): ${mo.soft ? 'take the tongue / finger less deep, or open the mouth a little there' : 'open the mouth there (a control that measures "opens the lips", the jaw, or the lip handles)'}`);
+    if (mo.wish === 'closed' && mo.openCm > 0.5) issues.push(`the request wants the mouth NOT open (lips wrapped around the tongue / finger), but the lips are ${mo.openCm} cm apart: lower the mouth-open keys to 0-0.12`);
+  }
   // a fingertip touch presses on (or into) its spot on purpose
   const exempt = (t, side, finger) => {
     const ks = (plan.touches || []).filter((k) => k.hand === side && k.finger && k.finger !== 'palm').sort((a, b) => a.t - b.t);

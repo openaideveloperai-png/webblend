@@ -1,6 +1,7 @@
 // Exports: GLB (models + animations), animation JSON, screenshots, video.
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import { detachSoftLips } from '../anim/softlips.js';
 import { zipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { clipWithNames, clipWithUuids } from '../anim/clips.js';
 import { bakeConstraints } from '../anim/constraints.js';
@@ -72,6 +73,7 @@ export async function exportGLB(app, models, filename) {
   const parents = models.map((m) => [m, m.root.parent]);
   const hidden = [];
   const clips = [];
+  let restoreSoft = null;
   try {
     for (const m of models) {
       // editor-only markers stay out of the file
@@ -86,6 +88,8 @@ export async function exportGLB(app, models, filename) {
       }
     }
     const exporter = new GLTFExporter();
+    // the live soft-lips offsets aren't part of the model
+    restoreSoft = detachSoftLips(models);
     const result = await exporter.parseAsync(group, { binary: true, animations: clips, onlyVisible: true, includeCustomExtensions: false, maxTextureSize: app.settings.maxTexture() });
     const blob = new Blob([result], { type: 'model/gltf-binary' });
     await saveFile(blob, (filename || safeName(group.name)) + '.glb', app);
@@ -93,6 +97,7 @@ export async function exportGLB(app, models, filename) {
     console.error(e);
     app.toast('GLB export failed: ' + (e.message || e), 'error', 6000);
   } finally {
+    if (restoreSoft) restoreSoft();
     for (const o of hidden) o.visible = true;
     for (const [m, parent] of parents) (parent || app.world).add(m.root);
     app.world.updateMatrixWorld(true);

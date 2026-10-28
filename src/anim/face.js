@@ -187,12 +187,16 @@ export function faceControls(model) {
       const span = root ? rig.rest.get(tip).pos.distanceTo(rig.rest.get(root).pos) : 0;
       const range = (info.get(tip) && info.get(tip).rangeCm) ? info.get(tip).rangeCm / 100 / unitsScale(model) : 0;
       const L = THREE.MathUtils.clamp(Math.max(span * 1.4, range * 1.2), rig.height * 0.008, rig.height * 0.04);
+      // where the lips are (forward), so the tongue comes straight out between them and
+      // only bends down once it's past them (the lips wrap around it there)
+      let lipsF = null;
+      try { const sp = rig.spot('mouth', 'right'), hr = rig.rest.get(rig.map.head); if (sp && sp.hit && hr) lipsF = sp.local.clone().applyQuaternion(hr.Wq).add(hr.pos).dot(rig.fwd); } catch { lipsF = null; }
       const parts = handles.map((b, k) => {
         const f = handles.length === 1 ? 1 : 0.3 + 0.7 * (k / (handles.length - 1));
         const Pw = b.parent && rig.rest.get(b.parent) ? rig.rest.get(b.parent).Wq.clone() : rig.rest.get(b).Pq.clone();
-        return { bone: b, f, toLocal: Pw.invert() };
+        return { bone: b, f, toLocal: Pw.invert(), ahead: lipsF === null ? null : fw(b) - lipsF };
       });
-      list.push({ id: 'tongueOut', kind: 'tongue', mode: 'out', name: 'tongueOut', label: 'stick the tongue out (curves down a little; 0.3 = the tip shows, 1 = all the way)', group: 'mouth', parts, L, fwd: rig.fwd.clone(), up: rig.up.clone() });
+      list.push({ id: 'tongueOut', kind: 'tongue', mode: 'out', name: 'tongueOut', label: 'stick the tongue out (straight out between the lips, bending down past them; 0.3 = the tip shows, 1 = all the way)', group: 'mouth', parts, L, fwd: rig.fwd.clone(), up: rig.up.clone() });
       list.push({ id: 'tongueCurl', kind: 'tongue', mode: 'curl', name: 'tongueCurl', label: 'curl the tongue tip up (use with tongueOut; negative curls it down)', group: 'mouth', parts, L, fwd: rig.fwd.clone(), up: rig.up.clone() });
     }
   }
@@ -270,8 +274,11 @@ export function faceTracks(model, keys, duration, fps = 30) {
           const r = model.rest.get(pt.bone);
           const o = blended.get(pt.bone) || { q: r.q.clone(), p: r.p.clone(), s: r.s.clone() };
           // out: forward, drooping more toward the tip; curl: the tip comes up and back
+          const out = c.L * 0.9 * v * pt.f;
+          let droop = c.L * 0.3 * v * pt.f * pt.f;
+          if (pt.ahead !== null && pt.ahead !== undefined) { const past = Math.max(0, pt.ahead + out); droop = 0.45 * past * Math.min(1, past / (0.25 * c.L)); }
           const d = c.mode === 'out'
-            ? c.fwd.clone().multiplyScalar(c.L * 0.9 * v * pt.f).addScaledVector(c.up, -c.L * 0.3 * v * pt.f * pt.f)
+            ? c.fwd.clone().multiplyScalar(out).addScaledVector(c.up, -droop)
             : c.up.clone().multiplyScalar(c.L * 0.32 * v * (pt.f > 0.95 ? 1 : -0.35 * pt.f)).addScaledVector(c.fwd, -c.L * 0.1 * v * (pt.f > 0.95 ? 1 : 0));
           o.p.add(d.applyQuaternion(pt.toLocal));
           blended.set(pt.bone, o);

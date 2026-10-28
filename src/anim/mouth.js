@@ -7,14 +7,15 @@
 import * as THREE from 'three';
 import { faceControls, faceTracks } from './face.js';
 import { translateName } from '../core/jp.js';
+import { softLips, softLipsOn } from './softlips.js';
 
 const V = () => new THREE.Vector3();
-const TONGUE = /tongue|舌|べろ/i;
+export const TONGUE = /tongue|舌|べろ/i;
 const LIP = /lip|唇|くちびる/i;
 const UPPER = /upper|上|top|_u\b|\.u\b/i;
 const LOWER = /lower|下|bottom|_d\b|\.d\b|_l\b(?!eft)/i;
-const NOT_FACE = /hair|bang|ahoge|髪|毛|ear|耳|horn|角|eye|目|瞳|brow|眉|lash|teeth|歯/i;
-const nameOf = (b) => b.name + ' ' + (translateName(b.name) || '');
+export const NOT_FACE = /hair|bang|ahoge|髪|毛|ear|耳|horn|角|eye|目|瞳|brow|眉|lash|teeth|歯/i;
+export const nameOf = (b) => b.name + ' ' + (translateName(b.name) || '');
 
 // ---------------------------------------------------------------- evaluating with the rig on
 // Plays a clip on a scratch mixer with the model's constraints solved, so lip and
@@ -66,7 +67,7 @@ export function evaluator(model) {
   };
 }
 
-const EMPTY = new THREE.AnimationClip('rest', 1, []);
+export const EMPTY = new THREE.AnimationClip('rest', 1, []);
 
 // ---------------------------------------------------------------- finding the lips and the tongue
 // -> probe { head, axes (head-local up / forward / left), upper, lower, tongue: [{mesh, i}],
@@ -140,7 +141,7 @@ export function mouthProbe(model) {
 }
 
 // head-relative coordinates in world units: x = character's left, y = up, z = forward
-function headFrame(head, axes) {
+export function headFrame(head, axes) {
   const q = new THREE.Quaternion(), hp = V(), w = V();
   const ax = { up: V(), fwd: V(), lat: V() };
   const update = () => {
@@ -251,35 +252,46 @@ export function mouthEffects(model) {
 }
 
 // ---------------------------------------------------------------- keeping the lips apart
-// Plays the clip with the rig on; wherever the tongue or a finger passes the lips and
-// they're open less than its thickness, opens the mouth just enough (with the control
-// that opens it the most cleanly). -> { keys (the new faceKeys) | null, report }
-export function clearMouth(model, clip, faceKeys = []) {
+// Plays the clip with the rig on. Where the tongue or a finger passes the lips: with soft
+// lips (the default) the lips wrap around it and the jaw only drops a little (share = how
+// much of the tongue's thickness the mouth opens; 0 = the lips do it all); without them the
+// mouth opens just enough (with the control that opens it the most cleanly).
+// -> { keys (the new faceKeys) | null, report }
+export function clearMouth(model, clip, faceKeys = [], { share = null } = {}) {
   const probe = mouthProbe(model);
   if (!probe) return { keys: null, report: null };
   const fx = mouthEffects(model) || new Map();
   // the control that opens the lips with the least else going on
   const opener = [...fx].filter(([, e]) => e.open > 0.003 && e.tongue < 0.004).sort((a, b) => b[1].open - a[1].open)[0];
+  const soft = softLipsOn(model) ? softLips(model) : null;
+  if (share === null) share = soft ? 0.3 : 1;
   const fps = 15;
   const n = Math.max(2, Math.round(clip.duration * fps) + 1);
   const times = Array.from({ length: n }, (_, i) => (i / (n - 1)) * clip.duration);
   const sample = (c) => {
     const ev = evaluator(model);
     const res = [];
-    try { for (const t of times) { ev.at(c, t); res.push(measureMouth(model, probe)); } } finally { ev.done(); }
+    try { for (const t of times) { ev.at(c, t); const m = measureMouth(model, probe); if (soft) m.soft = soft.update({ write: false }); res.push(m); } } finally { ev.done(); }
     return res;
   };
   const margin = 0.0015;
   const need = (m) => Math.max(m.tongueOut > 0.0015 ? m.thick + margin : 0, ...m.fingers.map((f) => f.thick + margin));
+  const softLeft = (list) => Math.max(0, ...list.map((m) => (m.soft ? m.soft.leftCm : 0)));
+  const softPush = (list) => Math.max(0, ...list.map((m) => (m.soft ? m.soft.pushCm : 0)));
   const before = sample(clip);
   const deficit = before.map((m) => Math.max(0, need(m) - m.gap));
   const worst = Math.max(...deficit);
-  const report = { tongueOutCm: +(Math.max(0, ...before.map((m) => m.tongueOut)) * 100).toFixed(1), fingerIn: before.some((m) => m.fingers.length), clipCm: +(worst * 100).toFixed(1), opened: null };
-  if (!(worst > 0.001) || !opener) { if (worst > 0.001) report.unfixed = 'no control opens this mouth'; return { keys: null, report }; }
+  const report = { tongueOutCm: +(Math.max(0, ...before.map((m) => m.tongueOut)) * 100).toFixed(1), fingerIn: before.some((m) => m.fingers.length), clipCm: +(worst * 100).toFixed(1), opened: null, soft: !!soft, openCm: +(Math.max(0, ...before.map((m) => m.gap)) * 100).toFixed(1) };
+  if (soft) { report.wrapCm = +softPush(before).toFixed(1); report.clipAfterCm = +softLeft(before).toFixed(1); }
+  if (!(worst > 0.001)) return { keys: null, report };
+  if (!opener || share <= 0) {
+    if (!opener && !soft) report.unfixed = 'no control opens this mouth';
+    return { keys: null, report };
+  }
   const [name, eff] = opener;
   // extra opening over time: open a little before it's needed, close after
   const lead = Math.max(1, Math.round(0.15 * fps));
-  let extra = deficit.map((d) => d / eff.open);
+  let extra = deficit.map((d) => (d * share) / eff.open);
   extra = extra.map((_, i) => Math.max(...extra.slice(i, i + lead + 1), ...extra.slice(Math.max(0, i - 1), i + 1)));
   extra = extra.map((x, i) => (extra[Math.max(0, i - 1)] + 2 * x + extra[Math.min(n - 1, i + 1)]) / 4);
   const own = faceKeys.filter((k) => k && k.control === name).sort((a, b) => a.t - b.t);
@@ -292,7 +304,7 @@ export function clearMouth(model, clip, faceKeys = []) {
     const a = own[i], b = own[i + 1], u = (t - a.t) / Math.max(1e-6, b.t - a.t);
     return (+a.value || 0) + ((+b.value || 0) - (+a.value || 0)) * u * u * (3 - 2 * u);
   };
-  let scale = 1.15;
+  let scale = soft ? 1 : 1.15;
   let keys = null, after = null;
   for (let pass = 0; pass < 3; pass++) {
     keys = faceKeys.filter((k) => !k || k.control !== name).concat(times.map((t, i) => ({ t, control: name, value: Math.min(1, ownAt(t) + extra[i] * scale) })));
@@ -300,13 +312,21 @@ export function clearMouth(model, clip, faceKeys = []) {
     const taken = new Set(face.tracks.map((t) => t.name));
     const test = new THREE.AnimationClip(clip.name, clip.duration, clip.tracks.filter((t) => !taken.has(t.name)).concat(face.tracks));
     after = sample(test);
-    const left = Math.max(...after.map((m) => Math.max(0, need(m) - m.gap)));
-    if (left <= 0.001) break;
-    scale *= 1 + left / Math.max(0.002, worst);
+    if (soft) {
+      // the lips wrap around the rest; open more only if they can't (still clipping)
+      const left = softLeft(after) / 100;
+      if (left <= 0.0015 || share >= 1) break;
+      scale *= 1 + left / Math.max(0.002, worst * share);
+    } else {
+      const left = Math.max(...after.map((m) => Math.max(0, need(m) - m.gap)));
+      if (left <= 0.001) break;
+      scale *= 1 + left / Math.max(0.002, worst);
+    }
   }
   report.opened = name;
   report.openCm = +(Math.max(...after.map((m) => m.gap)) * 100).toFixed(1);
-  report.clipAfterCm = +(Math.max(...after.map((m) => Math.max(0, need(m) - m.gap))) * 100).toFixed(1);
+  report.clipAfterCm = soft ? +softLeft(after).toFixed(1) : +(Math.max(...after.map((m) => Math.max(0, need(m) - m.gap))) * 100).toFixed(1);
+  if (soft) report.wrapCm = +softPush(after).toFixed(1);
   return { keys, report };
 }
 
@@ -360,6 +380,8 @@ export function faceHits(model, clip, { exempt = null } = {}) {
   if (!surf) return [];
   const probe = mouthProbe(model);
   const head = rig.map.head;
+  // with soft lips, whatever touches the lips gets wrapped by them, not clipped
+  const soft = softLipsOn(model) ? softLips(model) : null;
   const hits = [];
   const ev = evaluator(model);
   try {
@@ -388,6 +410,7 @@ export function faceHits(model, clip, { exempt = null } = {}) {
           if (bi < 0 || Math.sqrt(best) > 0.03) continue;
           const depth = -((p.x - surf.pts[bi]) * surf.nrm[bi] + (p.y - surf.pts[bi + 1]) * surf.nrm[bi + 1] + (p.z - surf.pts[bi + 2]) * surf.nrm[bi + 2]);
           if (depth < 0.01) continue; // deeper than a centimeter: smaller is surface noise (ears and hair are left out)
+          if (soft && soft.covers(p.x, p.y, p.z)) continue;
           // a finger between parted lips is fine
           if (m && (m.fingers.some((f) => f.side === side && f.finger === k) || (probe && m.gap > 0.003 && Math.abs(p.x - probe.latC) < probe.halfWidth && Math.abs(p.y - probe.mouthUp) < m.gap + 0.006 && p.z < probe.lipFront + 0.004))) continue;
           hits.push({ t: +t.toFixed(2), what, cm: +(depth * 100).toFixed(1) });

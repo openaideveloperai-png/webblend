@@ -5,6 +5,7 @@ import { propDesc, morphLabel } from '../anim/clips.js';
 import { rafThrottle, evalExpr } from '../core/util.js';
 import { propOf, heldProps, bakeHoldClip, attachProp } from '../anim/props-anim.js';
 import { bakeVFX, removeVFX } from '../anim/vfx.js';
+import { softLips } from '../anim/softlips.js';
 
 const R2D = THREE.MathUtils.RAD2DEG, D2R = THREE.MathUtils.DEG2RAD;
 
@@ -251,6 +252,20 @@ export function initProperties(app, ui) {
         propActions(holder, heldHere)));
     } else if (obj === model.root && model.humanoid && model.adopt) {
       for (const pr of heldProps(model)) root.append(sec('Holding · ' + pr.name, propActions(model, pr)));
+    }
+    // soft lips: the lips wrap around the tongue / a finger / something held to the mouth
+    const soft = obj === model.root && model.humanoid ? softLips(model) : null;
+    if (soft) {
+      const on = h('input', { type: 'checkbox', checked: model.softLips !== false || undefined, 'aria-label': 'Soft lips' });
+      const range = h('input', { type: 'range', min: 0.3, max: 2, step: 0.05, value: model.softLipsSoftness ?? 1, 'aria-label': 'Lip softness' });
+      const val = h('span', { class: 'val' }, fmt(model.softLipsSoftness ?? 1, 2));
+      const redraw = () => { app.needsEval = true; app.viewport.requestRender(); };
+      on.addEventListener('change', () => { model.softLips = on.checked; if (!on.checked) soft.clear(); else soft.update({ force: true }); redraw(); });
+      range.addEventListener('input', () => { model.softLipsSoftness = parseFloat(range.value); val.textContent = fmt(model.softLipsSoftness, 2); soft.update({ force: true }); redraw(); });
+      root.append(sec('Soft lips',
+        h('div', { class: 'field' }, h('label', {}, 'Wrap'), h('label', { class: 'toggle' }, on)),
+        h('div', { class: 'field' }, h('label', { title: 'How far the lips give way around what presses them' }, 'Softness'), range, val),
+        h('div', { class: 'hint' }, 'The lips wrap, squish and curve around the tongue, a finger or anything held to the mouth, live (like Shrinkwrap + Smooth on a lip vertex group). They part only where it passes.')));
     }
     const holders = app.models.filter((m) => m !== model && m.humanoid);
     if (obj === model.root && !model.humanoid && !obj.isLight && !obj.isCamera && model.meshes.length && holders.length) {
