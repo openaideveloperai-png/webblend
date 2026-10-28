@@ -2,7 +2,8 @@
 import { h, icon, clear } from './dom.js';
 import { dropdown, promptDialog, confirmDialog } from './toast.js';
 import { openAnimationFor } from './menus.js';
-import { reverseClip, simplifyClip, allKeyTimes } from '../anim/clips.js';
+import { reverseClip, simplifyClip, allKeyTimes, setKey } from '../anim/clips.js';
+import { blendPoses } from '../anim/face.js';
 import { exportClipJSON } from '../io/export.js';
 
 export function initAnimations(app, ui) {
@@ -57,6 +58,46 @@ export function initAnimations(app, ui) {
     return items;
   };
 
+  // poses saved in the file (single-frame actions, e.g. a face rig's mouth shapes)
+  const posesSection = (model) => {
+    const weights = model._poseWeights || (model._poseWeights = new Map());
+    const nodes = new Set();
+    for (const p of model.poses) for (const d of p.deltas) nodes.add(d.node);
+    const apply = () => {
+      for (const n of nodes) { const r = model.rest.get(n); if (r) { n.position.copy(r.p); n.quaternion.copy(r.q); n.scale.copy(r.s); } }
+      const b = blendPoses(model, model.poses.map((p) => ({ pose: p, w: weights.get(p.name) || 0 })));
+      for (const [n, o] of b) { n.position.copy(o.p); n.quaternion.copy(o.q); n.scale.copy(o.s); }
+      model.root.updateMatrixWorld(true);
+      app.needsEval = true;
+      app.viewport.requestRender();
+    };
+    const rows = model.poses.map((p) => {
+      const val = h('span', { class: 'clip-meta', style: { minWidth: '2.6em', textAlign: 'right' } }, `${Math.round((weights.get(p.name) || 0) * 100)}%`);
+      const r = h('input', { type: 'range', min: 0, max: 1, step: 0.01, value: weights.get(p.name) || 0, 'aria-label': `${p.name} amount` });
+      r.addEventListener('input', () => { weights.set(p.name, parseFloat(r.value)); val.textContent = `${Math.round(parseFloat(r.value) * 100)}%`; apply(); });
+      return h('div', { class: 'field pose-row', title: `${p.deltas.length} bone${p.deltas.length > 1 ? 's' : ''} (${p.group})` }, h('label', {}, p.name), r, val);
+    });
+    const key = () => {
+      const entry = app.ensureClip(model);
+      const t = app.localTime(entry);
+      app.editClip(model, entry, (clip) => {
+        for (const n of nodes) {
+          const rr = model.rest.get(n);
+          setKey(clip, model.root, n, 'quaternion', t, n.quaternion.toArray(), app.keyEps());
+          if (rr && (rr.p.distanceToSquared(n.position) > 1e-14 || model.poses.some((p) => p.deltas.some((d) => d.node === n && d.dp.lengthSq() > 0)))) setKey(clip, model.root, n, 'position', t, n.position.toArray(), app.keyEps());
+          if (rr && rr.s.distanceToSquared(n.scale) > 1e-12) setKey(clip, model.root, n, 'scale', t, n.scale.toArray(), app.keyEps());
+        }
+      }, 'Key pose mix');
+      app.toast(`Keyed the pose mix at ${t.toFixed(2)} s in "${entry.clip.name}"`, 'ok', 1500);
+    };
+    return sec(`Poses saved in the file · ${model.poses.length}`,
+      h('div', { class: 'hint', style: { marginBottom: '6px' } }, 'One-frame poses from the file (mouth shapes, hand poses…). Mix them with the sliders, then key the result. The AI uses them too, e.g. "say aah", "make a kissy face".'),
+      ...rows,
+      h('div', { class: 'btns' },
+        h('button', { class: 'btn sm amber', onclick: key }, icon('key'), 'Key this mix'),
+        h('button', { class: 'btn sm', onclick: () => { weights.clear(); apply(); render(); } }, 'Reset')));
+  };
+
   const render = () => {
     clear(root);
     const model = app.selection.model;
@@ -100,6 +141,8 @@ export function initAnimations(app, ui) {
         h('div', { class: 'field' }, h('label', {}, 'Solo'), h('label', { class: 'toggle' }, (() => { const c = h('input', { type: 'checkbox', checked: model.clips.every((x) => x === e || !x.playing) || undefined }); c.addEventListener('change', () => { model.soloActive(c.checked); app.needsEval = true; app.viewport.requestRender(); render(); }); return c; })(), 'Only play this clip')),
         h('div', { class: 'hint' }, 'Keys you add go into this clip. Drag keys in the timeline to retime them; right-click for interpolation.')));
     }
+
+    if (model.poses && model.poses.length) root.append(posesSection(model));
 
     root.append(sec('Playback',
       h('div', { class: 'btns' },

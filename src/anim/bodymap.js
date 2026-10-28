@@ -1,6 +1,6 @@
 // A plain-text map of a character for the AI: how tall each body part is,
 // which bone is which part (Japanese names translated), what moving each one
-// carries along, and the extra bones (hair, ears, tail, fingers...) it can key.
+// carries along. Every other bone is mapped by rigscan.js.
 import * as THREE from 'three';
 import { translateName } from '../core/jp.js';
 
@@ -11,21 +11,6 @@ const PART_NAMES = {
   leftUpperLeg: 'left thigh', leftLowerLeg: 'left shin (knee)', leftFoot: 'left foot', leftToes: 'left toes',
   rightUpperLeg: 'right thigh', rightLowerLeg: 'right shin (knee)', rightFoot: 'right foot', rightToes: 'right toes',
 };
-
-// order matters: the first group a bone matches wins
-const GROUPS = [
-  ['fingers', /thumb|index|middle finger|ring finger|little|pinky|finger|digit/],
-  ['hair', /hair|bangs|ahoge|twin ?tail|ponytail|braid|sideburn|fringe/],
-  ['eyes', /\beyes?\b|pupil|iris/],
-  ['face', /mouth|lip|tongue|teeth|jaw|cheek|brow|eyelid|nose|face|expression|chin/],
-  ['ears', /\bears?\b/],
-  ['horns', /horn/],
-  ['tail', /tail/],
-  ['wings', /wing/],
-  ['chest physics', /breast|bust|boob|oppai/],
-  ['skirt / clothes', /skirt|sleeve|ribbon|\btie\b|hat|cape|hood|hem|collar|cloth|jacket|coat|belt|string|ornament|accessor|glove|sock|shoe|dress|scarf/],
-];
-const SKIP = /^(mch|def|org|wgt)[-_.]|_dummy_|_shadow_|\bik\b|ik$|twist|捩|\bend$|_end$|nub$|cancel|キャンセル|physics parent|揺れ物親|rigid|全ての親|master|center|groove|センター|グルーブ|groin|局部/i;
 
 const label = (b) => { const t = translateName(b.name); return t ? `${b.name} (${t})` : b.name; };
 
@@ -91,29 +76,6 @@ export function describeBody(model) {
   const jp = Object.values(rig.map).some((b) => translateName(b.name));
   const mapped = Object.entries(rig.map).filter(([, b]) => b).map(([k, b]) => `${PART_NAMES[k] || k} = ${label(b)}`);
   lines.push(`  Rig${jp ? ' (Japanese bone names translated)' : ''}: ${mapped.join('; ')}.`);
-  lines.push('  Moving a bone carries everything attached below it: hips -> the whole body; spine/chest -> the upper body, arms and head; upper arm -> the whole arm and hand; forearm -> forearm and hand; thigh -> the WHOLE leg with knee and foot; shin -> lower leg and foot. So to bend just a knee use lKnee/rKnee, not the thigh; to turn the head use neck/head params, not the chest. Animate these parts with humanoidKeys / handTouches (they handle all of this), not boneKeys.');
-  // ---- other bones the AI can key
-  const canon = new Set(Object.values(rig.map));
-  const driven = model.drivenBones || new Set();
-  const pool = (model.poseBones || model.bones).filter((b) => !canon.has(b) && !driven.has(b));
-  const groups = new Map();
-  for (const b of pool) {
-    const t = translateName(b.name);
-    const text = (b.name + ' ' + (t || '')).toLowerCase();
-    if (SKIP.test(b.name) || (t && SKIP.test(t))) continue;
-    const g = (GROUPS.find(([, re]) => re.test(text)) || ['other'])[0];
-    if (!groups.has(g)) groups.set(g, []);
-    groups.get(g).push(b);
-  }
-  if (groups.size) {
-    const out = [];
-    for (const [g] of [...GROUPS, ['other']]) {
-      const list = groups.get(g);
-      if (!list || !list.length) continue;
-      const max = g === 'other' ? 12 : 16;
-      out.push(`${g}: ${list.slice(0, max).map(label).join(', ')}${list.length > max ? `, +${list.length - max} more` : ''}`);
-    }
-    lines.push(`  Extra bones for boneKeys (degrees around the bone's own x/y/z, relative to rest): ${out.join('; ')}.`);
-  }
+  lines.push('  Moving a bone carries everything attached below it: hips -> the whole body; spine/chest -> the upper body, arms and head; upper arm -> the whole arm and hand; forearm -> forearm and hand; thigh -> the WHOLE leg with knee and foot; shin -> lower leg and foot. So to bend just a knee use lKnee/rKnee, not the thigh; to turn the head use neck/head params, not the chest. Animate these parts with humanoidKeys / handTouches (they handle all of this); boneKeys on them only add a small extra turn on top.');
   return lines.join('\n');
 }

@@ -60,6 +60,14 @@ const SLASH = { message: 'A dark flower katana with a slash trail.', props: [
       fxEl({ name: 'Dark petals', shape: 'petal', count: 20, life: 1.4, size: 0.03, speed: 1, spread: 120, direction: 'along', gravity: 0.8, drag: 2, spin: 300, inherit: 0.15, color: '#7a1f3d', blend: 'solid' }),
       fxEl({ name: 'Sky sparkle', shape: 'star', attach: 'head', offset: [0, 3, 0], when: 'always', count: 20, life: 1, size: 0.05, color: '#ffffff', blend: 'glow' })] }] };
 const SLASH_FIXED = { message: 'Removed the sparkle floating in the sky and brightened the trail edge.', clips: [{ name: 'Dark slash', vfx: [SLASH.clips[0].vfx[0], SLASH.clips[0].vfx[1], fxEl({ name: 'Tip sparks', preset: 'sparks', attach: 'tip', count: 10 })] }] };
+// Claude's first try only turns the wrist (and names things the rig doesn't have); the
+// app measures it and Claude's fix puts the fingertip to the lips with IK
+const fclip = (o) => ({ name: 'Finger to mouth', target: 'selected', duration: 3, loop: false, preset: 'none', speed: 1, intensity: 1, humanoidKeys: [], handTouches: [], plantFeet: true, objectKeys: [], boneKeys: [], faceKeys: [], useProp: '', aimKeys: [], shots: [], swings: [], vfx: [], ...o });
+const FINGER_BAD = { message: 'She brings her finger to her lips.', props: [], clips: [fclip({ humanoidKeys: [{ t: 0, values: [{ param: 'rHandPitch', value: 0 }] }, { t: 1.5, values: [{ param: 'rHandPitch', value: 35 }] }],
+  boneKeys: [{ t: 1, bone: 'NoSuchBone', x: 10, y: 0, z: 0, mx: 0, my: 0, mz: 0 }], faceKeys: [{ t: 1, control: 'mouth_u', value: 1 }] })] };
+const tch = (t, w, depth) => ({ t, hand: 'right', spot: 'mouth', weight: w, finger: 'index', mode: 'tip', depth });
+const FINGER_FIXED = { message: 'Now the whole arm brings the index fingertip to her lips, then slips it in a little.', props: [], clips: [fclip({ handTouches: [tch(0, 0, 0), tch(1.2, 1, 0), tch(2, 1, 0.3), tch(3, 1, 0.3)],
+  humanoidKeys: [{ t: 0, values: [{ param: 'headRoll', value: 0 }] }, { t: 1.5, values: [{ param: 'headRoll', value: 6 }] }] })] };
 const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
 (async () => {
@@ -238,6 +246,55 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
     ok('the effect modeled as a prop was skipped', !st.stray && /Skipped "Slash effect"/.test(st.msg), st.msg.slice(0, 220));
     ok('the message says the effects were checked', /Checked the effects: Removed the sparkle/.test(st.msg));
     ok('no page errors (effects)', errors.length === 0, errors.slice(0, 3).join(' | '));
+    await page.close();
+  }
+  // ---------------- fingers and the motion check: the app measures the clip, Claude fixes it
+  {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    const calls = [];
+    await page.route('https://api.anthropic.com/**', async (route) => {
+      const body = JSON.parse(route.request().postData() || '{}');
+      calls.push(body);
+      const text = JSON.stringify(body.messages);
+      const answer = /You already answered this request/.test(text) ? FINGER_FIXED : FINGER_BAD;
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'access-control-allow-origin': '*' }, body: sse(JSON.stringify(answer)) });
+    });
+    await page.goto('file://' + path.resolve(__dirname, '../index.html'));
+    await page.waitForTimeout(1200);
+    await page.evaluate(() => { const a = window.webblend; a.settings.setApiKey('sk-ant-test-key', false); a.emit('settings', 'apiKey'); const m = a.models[0]; for (const e of [...m.clips]) m.removeClip(e); a.select(m.root, m); });
+    await page.click('#btn-ai');
+    await page.fill('#ai-prompt', 'make her put a finger in her mouth cutely, make sure to get the hand on the face first then move the finger');
+    await page.press('#ai-prompt', 'Enter');
+    await page.waitForFunction(() => !document.querySelector('.msg .thinking'), null, { timeout: 60000 });
+    await page.waitForTimeout(500);
+    const textOf = (b) => { const c = b.messages[0].content; return Array.isArray(c) ? c.find((x) => x.type === 'text').text : c; };
+    const main = calls.find((b) => b.output_config && b.output_config.format && !/You already answered/.test(JSON.stringify(b.messages)));
+    const mt = main ? textOf(main) : '';
+    const sch = main && main.output_config.format.schema.properties.clips.items;
+    ok('Claude gets the finger params, fingertip touches, the bone map and faceKeys', /lIndex/.test(mt) && /fingertip/.test(mt) && /finger bones: pose them with the finger params/.test(mt) && /Never animate only the wrist/.test(mt) && sch && sch.properties.handTouches.items.properties.finger.enum.includes('index') && !!sch.properties.faceKeys && sch.properties.boneKeys.items.required.includes('my'));
+    const review = calls.find((b) => /You already answered this request/.test(JSON.stringify(b.messages)));
+    const rt = review ? textOf(review) : '';
+    ok('the app measured the first try and sent the problems back', /neither hand goes anywhere/.test(rt) && /"NoSuchBone"/.test(rt) && /"mouth_u"/.test(rt), rt.slice(rt.indexOf('PROBLEMS'), rt.indexOf('PROBLEMS') + 300));
+    const st = await page.evaluate(() => {
+      const a = window.webblend; const m = a.models[0];
+      const e = m.clips.find((c) => c.clip.name === 'Finger to mouth');
+      if (!e) return { clips: m.clips.map((c) => c.clip.name) };
+      const chk = a.ai.checkClip(m, e.clip, { prompt: 'finger in her mouth' });
+      // the live app plays it: the fingertip is at the lips at 2.5 s
+      a.setTime(2.5); a.tick(0);
+      const tip = m.root.getObjectByName('RightHandIndex4');
+      const sp = m.humanoid.spot('mouth', 'right'); const hb = m.humanoid.map.head;
+      const head = new tip.position.constructor(); hb.getWorldPosition(head);
+      const tipW = tip.getWorldPosition(new tip.position.constructor());
+      return { clips: m.clips.length, issues: chk.issues, text: chk.text, tipToHead: +(tipW.distanceTo(head) * 100).toFixed(1), msg: [...document.querySelectorAll('.msg.bot')].pop().textContent };
+    });
+    ok('the fixed clip replaced the first one, and it checks out', st.clips === 1 && st.issues && st.issues.length === 0 && /fingertip on the mouth: touching/.test(st.text), JSON.stringify(st.issues || st.clips));
+    ok('in the app the fingertip is at the face', st.tipToHead > 3 && st.tipToHead < 16, st.tipToHead + ' cm from the head joint');
+    ok('the message says the motion was checked', /Checked the motion: Now the whole arm/.test(st.msg || ''), (st.msg || '').slice(0, 200));
+    ok('no page errors (motion check)', errors.length === 0, errors.slice(0, 3).join(' | '));
     await page.close();
   }
   // ---------------- API key path

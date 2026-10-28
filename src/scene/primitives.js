@@ -91,6 +91,23 @@ export function makeEmpty() {
 
 // ---------------------------------------------------------------- mannequin
 
+// five fingers per hand (Mixamo names; the 4th bone of each is the tip marker).
+// T-pose: palm down, fingers along x, thumb toward the front (+z)
+const FINGERS = {
+  Thumb: [[0.722, 1.413, 0.032], [0.748, 1.405, 0.058], [0.77, 1.4, 0.074], [0.79, 1.397, 0.085]],
+  Index: [[0.79, 1.42, 0.028], [0.826, 1.42, 0.03], [0.85, 1.42, 0.031], [0.869, 1.42, 0.031]],
+  Middle: [[0.794, 1.42, 0.009], [0.834, 1.42, 0.01], [0.861, 1.42, 0.01], [0.882, 1.42, 0.01]],
+  Ring: [[0.791, 1.42, -0.01], [0.828, 1.42, -0.011], [0.853, 1.42, -0.012], [0.872, 1.42, -0.012]],
+  Pinky: [[0.783, 1.42, -0.028], [0.811, 1.42, -0.03], [0.83, 1.42, -0.031], [0.845, 1.42, -0.031]],
+};
+function fingerBones(S, sx) {
+  const out = [];
+  for (const [f, pts] of Object.entries(FINGERS)) {
+    pts.forEach((p, i) => out.push([`${S}Hand${f}${i + 1}`, i ? `${S}Hand${f}${i}` : `${S}Hand`, [p[0] * sx, p[1], p[2]]]));
+  }
+  return out;
+}
+
 const BONES = [
   // name, parent, world position (meters, T-pose, facing +Z, character's left = +X)
   ['Hips', null, [0, 0.95, 0]],
@@ -104,12 +121,12 @@ const BONES = [
   ['LeftArm', 'LeftShoulder', [0.18, 1.42, 0]],
   ['LeftForeArm', 'LeftArm', [0.45, 1.42, 0]],
   ['LeftHand', 'LeftForeArm', [0.7, 1.42, 0]],
-  ['LeftHandEnd', 'LeftHand', [0.84, 1.42, 0]],
+  ...fingerBones('Left', 1),
   ['RightShoulder', 'Spine2', [-0.05, 1.41, 0]],
   ['RightArm', 'RightShoulder', [-0.18, 1.42, 0]],
   ['RightForeArm', 'RightArm', [-0.45, 1.42, 0]],
   ['RightHand', 'RightForeArm', [-0.7, 1.42, 0]],
-  ['RightHandEnd', 'RightHand', [-0.84, 1.42, 0]],
+  ...fingerBones('Right', -1),
   ['LeftUpLeg', 'Hips', [0.1, 0.9, 0]],
   ['LeftLeg', 'LeftUpLeg', [0.1, 0.5, 0.01]],
   ['LeftFoot', 'LeftLeg', [0.1, 0.09, -0.01]],
@@ -197,7 +214,11 @@ export function makeMannequin(name = 'Mannequin') {
     add(limb(P(S + 'Arm'), P(S + 'ForeArm'), 0.05), S + 'Arm', body);
     add(sphere(P(S + 'ForeArm'), 0.047), S + 'ForeArm', dark);
     add(limb(P(S + 'ForeArm'), P(S + 'Hand'), 0.042), S + 'ForeArm', body);
-    add(box([0.77 * sx, 1.42, 0], [0.13, 0.035, 0.085], 0.5), S + 'Hand', skin);
+    add(box([0.75 * sx, 1.42, 0], [0.095, 0.03, 0.08], 0.5), S + 'Hand', skin);
+    for (const f of Object.keys(FINGERS)) {
+      const r = f === 'Thumb' ? 0.0105 : f === 'Pinky' ? 0.0075 : 0.0088;
+      for (let i = 1; i <= 3; i++) add(limb(P(`${S}Hand${f}${i}`), P(`${S}Hand${f}${i + 1}`), r, 6), `${S}Hand${f}${i}`, skin);
+    }
     add(sphere([0.1 * sx, 0.9, 0], 0.075), S + 'UpLeg', dark);
     add(limb(P(S + 'UpLeg'), P(S + 'Leg'), 0.07), S + 'UpLeg', body);
     add(sphere(P(S + 'Leg'), 0.058), S + 'Leg', dark);

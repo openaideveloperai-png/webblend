@@ -155,13 +155,17 @@ export function initAIPanel(app, ui) {
       const spec = await ai.askClaude(prompt, { signal: busy.signal, images: imgs, onStatus: status, onText: (t) => status(`Claude is writing${/"parts"\s*:\s*\[\s*\{/.test(t) ? ' the model' : ' keyframes'}… (${Math.round(t.length / 100) / 10}k chars)`) });
       const { results, notes, props } = ai.buildFromSpec(spec);
       const added = applyResults(results);
+      // the app measures the motion (hands reaching their spots, names that exist) and Claude fixes it
+      let moveNote = '';
+      try { moveNote = await ai.reviewMotion(prompt, results, { signal: busy.signal, onStatus: status }); } catch (e) { if (busy.signal.aborted || e?.code === 'cancelled') throw e; console.warn('motion review failed', e); }
+      if (moveNote) spec.reviewedMotion = moveNote;
       // Claude watches its effects play and fixes them
       let fxNote = '';
       try { fxNote = await ai.reviewEffects(prompt, results, { signal: busy.signal, onStatus: status }); } catch (e) { if (busy.signal.aborted || e?.code === 'cancelled') throw e; console.warn('effects review failed', e); }
       if (fxNote) spec.reviewedFx = fxNote;
       thinking.remove();
       const made = (props || []).map((p) => (p.standalone ? `Made "${p.prop.name}".` : `Made "${p.prop.name}" and put it in ${p.model.name}'s ${p.prop.userData.hold.side} hand.`)).join(' ');
-      const text = (spec && spec.message ? spec.message + ' ' : '') + (spec && spec.reviewed ? `(Looked it over: ${spec.reviewed.replace(/\.?$/, '.')}) ` : '') + (spec && spec.reviewedFx ? `(Checked the effects: ${spec.reviewedFx.replace(/\.?$/, '.')}) ` : '') + (made ? made + ' ' : '') + (results.length ? results.map((r) => `"${r.clip.name}" on ${r.model.name} (${r.clip.duration.toFixed(1)}s).`).join(' ') : props && props.length ? '' : 'No animation came back.') + (notes.length ? ' ' + notes.join(' ') : '');
+      const text = (spec && spec.message ? spec.message + ' ' : '') + (spec && spec.reviewed ? `(Looked it over: ${spec.reviewed.replace(/\.?$/, '.')}) ` : '') + (spec && spec.reviewedMotion ? `(Checked the motion: ${spec.reviewedMotion.replace(/\.?$/, '.')}) ` : '') + (spec && spec.reviewedFx ? `(Checked the effects: ${spec.reviewedFx.replace(/\.?$/, '.')}) ` : '') + (made ? made + ' ' : '') + (results.length ? results.map((r) => `"${r.clip.name}" on ${r.model.name} (${r.clip.duration.toFixed(1)}s).`).join(' ') : props && props.length ? '' : 'No animation came back.') + (notes.length ? ' ' + notes.join(' ') : '');
       const ok = results.length || (props && props.length);
       const el = msg('bot', text, ok ? '' : 'err');
       el.append(actions(added, prompt, false, props || []));

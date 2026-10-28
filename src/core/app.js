@@ -10,6 +10,7 @@ import { setKey, snapshotClip, restoreClip, findTrackIndex, hasKeyAt, deleteKeys
 import { detectHumanoid, retargetClip } from '../anim/humanoid.js';
 import { attachProp, detachProp, propOf, restoreFX, isProp, wrapAsProp } from '../anim/props-anim.js';
 import { ConstraintSolver, hasConstraints } from '../anim/constraints.js';
+import { isPoseClip, poseFromClip } from '../anim/face.js';
 import { vmdModelClip, vmdMorphTracks } from '../io/mmd.js';
 import { ikChain, solveIK } from '../anim/ik.js';
 import { AIAssistant } from '../anim/ai.js';
@@ -73,7 +74,24 @@ export class App extends Emitter {
     const model = new Model(this, root, opts);
     this.models.push(model);
     if (root.isCamera) this.attachCameraHelper(model);
-    for (const clip of opts.animations || []) model.addClip(clip, { play: false, warnDropped: false });
+    // single-frame actions (a rig's mouth shapes, saved poses) are poses, not clips:
+    // they go to Animations -> Poses and the AI can blend them
+    model.poses = [];
+    const stills = [];
+    for (const clip of opts.animations || []) {
+      if (isPoseClip(clip)) {
+        const pose = poseFromClip(model, clip);
+        if (pose && !pose.empty) model.poses.push(pose); else stills.push(clip.name);
+        continue;
+      }
+      model.addClip(clip, { play: false, warnDropped: false });
+    }
+    if (model.poses.length || stills.length) {
+      const parts = [];
+      if (model.poses.length) parts.push(`${model.poses.length} pose${model.poses.length > 1 ? 's' : ''} saved in the file (${model.poses.slice(0, 4).map((p) => p.name).join(', ')}${model.poses.length > 4 ? '…' : ''}) ${model.poses.length > 1 ? 'are' : 'is'} under Animations → Poses, and the AI can use ${model.poses.length > 1 ? 'them' : 'it'}`);
+      if (stills.length) parts.push(`${stills.slice(0, 3).map((n) => `"${n}"`).join(', ')}${stills.length > 3 ? ` and ${stills.length - 3} more` : ''} ${stills.length > 1 ? 'are single frames' : 'is a single frame'} identical to the rest pose (no motion in ${stills.length > 1 ? 'them' : 'it'}), so ${stills.length > 1 ? 'they were' : 'it was'} left out`);
+      model.importNotes = parts;
+    }
     if (model.clips.length) {
       // play the first clip so the user sees motion right away
       model.setPlaying(model.clips[0], true);
@@ -195,6 +213,12 @@ export class App extends Emitter {
       return c;
     });
     const m2 = this.addModel(clone, { name: clone.name, kind: model.kind, source: model.source, format: model.format, animations: clips });
+    // poses saved in the file follow to the copy's nodes
+    if (model.poses && model.poses.length) {
+      const byUuid = new Map();
+      clone.traverse((o) => byUuid.set(o.uuid, o));
+      m2.poses = model.poses.map((p) => ({ ...p, deltas: p.deltas.map((d) => ({ ...d, node: byUuid.get(map.get(d.node.uuid)) })).filter((d) => d.node) }));
+    }
     model.clips.forEach((e, i) => { const e2 = m2.clips[i]; if (e2) { m2.setPlaying(e2, e.playing); m2.setWeight(e2, e.weight); m2.setSpeed(e2, e.speed); m2.setLoop(e2, e.loop); } });
     this.toast(`Duplicated "${model.name}"`, 'ok');
     return m2;
@@ -970,9 +994,10 @@ export class App extends Emitter {
       this.select(newModels[0].root, newModels[0]);
       this.viewport.frameAll();
     }
+    for (const m of newModels) for (const n of m.importNotes || []) infoNotes.push(`${m.name}: ${n}`);
     if (!primaries.length && !images.length && !unsupported.length) report.push('No 3D models found in what you dropped.');
     const errors = report.filter(Boolean);
-    if (added || infoNotes.length) this.toast((added ? `Imported ${added} item${added > 1 ? 's' : ''}. ` : '') + infoNotes.slice(0, 3).join('. ') + (infoNotes.length > 3 ? '…' : ''), 'ok', 4500);
+    if (added || infoNotes.length) this.toast((added ? `Imported ${added} item${added > 1 ? 's' : ''}. ` : '') + infoNotes.slice(0, 3).join('. ') + (infoNotes.length > 3 ? '…' : ''), 'ok', infoNotes.length ? 9000 : 4500);
     if (errors.length) this.emit('report', errors);
     this.emit('models');
   }

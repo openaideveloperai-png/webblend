@@ -31,6 +31,16 @@ const JP = [
 ].sort((a, b) => b[0].length - a[0].length);
 const HAS_JP = /[\u3040-\u30ff\u4e00-\u9fff]/;
 const FINGER = /(thumb|index|middle|ring|pinky|little|finger|digit|metacarpal|carpal)/;
+// bones under a hand that aren't finger joints (IK handles, MMD guides, twist helpers)
+const FINGER_SKIP = /(ik|helper|dummy|twist|guide|target|pole|ctrl|control|mch|split|bend|socket|weapon|prop|attach|ガイド|曲切)/;
+function fingerKind(flat) {
+  if (/thumb|pollex/.test(flat)) return 'thumb';
+  if (/index|pointer|forefinger/.test(flat)) return 'index';
+  if (/middle/.test(flat)) return 'middle';
+  if (/ring/.test(flat) && !/string|earring/.test(flat)) return 'ring';
+  if (/pinky|pinkie|little/.test(flat)) return 'little';
+  return null;
+}
 
 function words(name) {
   let s = String(name || '');
@@ -321,9 +331,12 @@ export class HumanoidRig {
     }
     this._spots = null;
     this._fingers = null;
+    this._hands = null;
+    this._weighted = null;
     this._scan = null;
     this._skullTop = undefined;
     this._eyes = undefined;
+    this._mouth = undefined;
     // direction of each limb in character space (rest)
     this.restDirChar = {};
     for (const k of ['leftUpperArm', 'leftLowerArm', 'rightUpperArm', 'rightLowerArm', 'leftUpperLeg', 'leftLowerLeg', 'rightUpperLeg', 'rightLowerLeg', 'leftHand', 'rightHand', 'leftFoot', 'rightFoot']) {
@@ -348,7 +361,12 @@ export class HumanoidRig {
   solve(specIn) {
     let spec = specIn;
     const touches = ['left', 'right'].filter((s) => spec[s + 'Hand'] && spec[s + 'Hand'].touch && spec[s + 'Hand'].touch.weight > 0 && this.map[s + 'UpperArm'] && this.map[s + 'LowerArm'] && this.map[s + 'Hand']);
-    if (!touches.length && !spec.plantFeet && !spec.hold) return this.solveFK(spec).out;
+    // finger poses first: a fingertip touch needs to know where the tip is
+    const heldSides = new Set();
+    if (spec.hold && this.map.rightHand && this.map.leftHand) { heldSides.add(spec.hold.side); if (spec.hold.support > 0) heldSides.add(spec.hold.side === 'right' ? 'left' : 'right'); }
+    const fingerLocals = {};
+    for (const side of ['left', 'right']) if (!heldSides.has(side)) fingerLocals[side] = this.fingerPose(side, this.fingerSpec(side, spec[side + 'Hand']));
+    if (!touches.length && !spec.plantFeet && !spec.hold) { const out = this.solveFK(spec).out; this.applyLocals(out, fingerLocals); return out; }
     const merge = (base, extra) => {
       const m = { ...base };
       for (const [k, v] of Object.entries(extra)) m[k] = { ...(base[k] || {}), ...v, rot: k.endsWith('Hand') || k.endsWith('Foot') ? undefined : (base[k] || {}).rot };
@@ -408,10 +426,11 @@ export class HumanoidRig {
     const held = spec.hold && this.map.rightHand && this.map.leftHand ? spec.hold : null;
     for (const side of touches) {
       if (held && (side === held.side || (held.support > 0 && side !== held.side))) continue; // hands busy holding
-      Object.assign(extra, this.touchSpec(side, spec[side + 'Hand'].touch, f));
+      Object.assign(extra, this.touchSpec(side, spec[side + 'Hand'].touch, f, fingerLocals[side]));
     }
     if (held) Object.assign(extra, this.holdSpec(held, f));
     const out = this.solveFK(merge(sp, extra)).out;
+    this.applyLocals(out, fingerLocals);
     if (held) {
       this.curlFingers(out, held.side, held.curl ?? 1);
       if (held.support > 0) this.curlFingers(out, held.side === 'right' ? 'left' : 'right', 0.75 * held.support);
@@ -543,11 +562,15 @@ export class HumanoidRig {
     fing.addScaledVector(palm, -fing.dot(palm)).normalize();
     const ax = this.handAxes[side];
     const wrist = contact.clone().addScaledVector(palm, -0.22 * ax.palmLen).addScaledVector(fing, -0.55 * ax.palmLen);
-    return { spot, contact, palm, fing, wrist, hint: toModel(spot.hint) };
+    return { spot, contact, palm, fing, wrist, hint: toModel(spot.hint), toModel };
   }
 
-  // spec overrides that put one hand's palm on a body spot
-  touchSpec(side, touch, first) {
+  // spec overrides that put one hand's palm (or a fingertip) on a body spot
+  touchSpec(side, touch, first, locals) {
+    if (touch.finger && touch.finger !== 'palm' && this.handRig(side)) {
+      const r = this.fingerTouchSpec(side, touch, first, locals);
+      if (r) return r;
+    }
     const g = this.touchGoal(side, touch, first);
     if (!g) return {};
     const { palm, fing, wrist } = g;
@@ -765,6 +788,279 @@ export class HumanoidRig {
     return list;
   }
 
+  // ---- hands: finger chains found by name (any naming: Mixamo, VRM, Rigify, MMD,
+  // Unreal...) or by shape, with their curl / spread axes and fingertips.
+  // -> { chains: {thumb|index|middle|ring|little: {bones: [{bone, role, ang, curlL, spreadL, spreadF, acrossL}], path, tipLocal, len}}, n, f, t }
+  handRig(side) {
+    if (!this._hands) this._hands = {};
+    if (this._hands[side] !== undefined) return this._hands[side];
+    const hb = this.map[side + 'Hand'], ax = this.handAxes && this.handAxes[side];
+    let res = null;
+    try { if (hb && ax) res = this.buildHandRig(side, hb, ax); } catch (e) { console.warn('hand rig', e); }
+    this._hands[side] = res;
+    return res;
+  }
+
+  weightedSet() {
+    if (this._weighted) return this._weighted;
+    const set = new Set();
+    this.root.traverse((o) => {
+      if (!o.isSkinnedMesh || !o.skeleton) return;
+      const si = o.geometry.attributes.skinIndex, sw = o.geometry.attributes.skinWeight;
+      if (!si || !sw) return;
+      const used = new Uint8Array(o.skeleton.bones.length);
+      for (let i = 0; i < si.count; i++) for (let k = 0; k < 4; k++) if (sw.getComponent(i, k) > 1e-3) used[si.getComponent(i, k)] = 1;
+      o.skeleton.bones.forEach((b, i) => { if (used[i]) set.add(b); });
+    });
+    for (const b of this.bones) if (b.children.some((c) => !c.isBone && (c.isMesh || c.children.length))) set.add(b);
+    this._weighted = set;
+    return set;
+  }
+
+  buildHandRig(side, hb, ax) {
+    const hr = this.rest.get(hb);
+    const nW = ax.n.clone().applyQuaternion(hr.Wq).normalize();
+    const fW = ax.f.clone().applyQuaternion(hr.Wq).normalize();
+    const weighted = this.weightedSet();
+    const anyWeights = weighted.size > 0;
+    const named = { thumb: [], index: [], middle: [], ring: [], little: [] };
+    const tipBones = {};
+    const visit = (b) => {
+      for (const c of b.children) {
+        if (!c.isBone || !this.rest.has(c)) continue;
+        const flat = words(c.name).join('');
+        if (FINGER_SKIP.test(flat)) continue;
+        const which = fingerKind(flat);
+        if (which) { if (/(tip|end|nub|top)$/.test(flat)) tipBones[which] = c; else named[which].push(c); }
+        visit(c);
+      }
+    };
+    visit(hb);
+    // one parent-to-child chain per finger
+    const chainOf = (list) => {
+      if (!list.length) return [];
+      const sorted = list.slice().sort((a, b) => depth(a) - depth(b));
+      const chain = [sorted[0]];
+      for (;;) {
+        const cur = chain[chain.length - 1];
+        const next = sorted.filter((b) => !chain.includes(b) && isAncestor(cur, b)).sort((a, b) => depth(a) - depth(b))[0];
+        if (!next) break;
+        chain.push(next);
+      }
+      return chain;
+    };
+    const chains = {};
+    for (const k of Object.keys(named)) { const c = chainOf(named[k]); if (c.length) chains[k] = c; }
+    // no finger names: chains under the hand, told apart by where they sit
+    if (!Object.keys(chains).length) {
+      const roots = [];
+      const collect = (b, d) => {
+        for (const c of b.children) {
+          if (!c.isBone || !this.rest.has(c)) continue;
+          const flat = words(c.name).join('');
+          if (FINGER_SKIP.test(flat)) continue;
+          const ch = [c];
+          let x = c;
+          for (;;) { const kids = x.children.filter((k) => k.isBone && this.rest.has(k)); if (kids.length !== 1) break; x = kids[0]; ch.push(x); }
+          if (ch.length >= 2) roots.push(ch);
+          else if (d < 1) collect(c, d + 1);
+        }
+      };
+      collect(hb, 0);
+      if (roots.length >= 2) {
+        const hp = hr.pos;
+        const ang = (ch) => { const v = this.rest.get(ch[0]).pos.clone().sub(hp); const w = this.rest.get(ch[ch.length - 1]).pos.clone().sub(this.rest.get(ch[0]).pos); return w.normalize().angleTo(fW); };
+        let thumb = null;
+        if (roots.length >= 3) { thumb = roots.slice().sort((a, b) => ang(b) - ang(a))[0]; if (ang(thumb) < 0.5) thumb = null; }
+        const others = roots.filter((c) => c !== thumb);
+        const tSide = this.thumbSide(side, nW, fW, thumb ? this.rest.get(thumb[0]).pos : null, hp);
+        others.sort((a, b) => this.rest.get(b[0]).pos.clone().sub(hp).dot(tSide) - this.rest.get(a[0]).pos.clone().sub(hp).dot(tSide));
+        if (thumb) chains.thumb = thumb;
+        ['index', 'middle', 'ring', 'little'].slice(0, others.length).forEach((k, i) => { chains[k] = others[i]; });
+        if (others.length > 4) chains.little = others[others.length - 1];
+      }
+    }
+    if (!Object.keys(chains).length) return null;
+    const tW = this.thumbSide(side, nW, fW, chains.thumb ? this.rest.get(chains.thumb[0]).pos : null, hr.pos);
+    const SPREAD = { index: 1, middle: 0.1, ring: -0.8, little: -1.5 };
+    const out = { chains: {}, n: nW, f: fW, t: tW };
+    for (const [k, list0] of Object.entries(chains)) {
+      let list = list0.slice();
+      // an unweighted leaf at the end is a tip marker (Mixamo "Index4"), not a joint
+      let tipBone = tipBones[k] || null;
+      if (list.length >= 2 && anyWeights) {
+        const last = list[list.length - 1];
+        if (!weighted.has(last) && !last.children.some((c) => c.isBone)) { tipBone = tipBone || last; list = list.slice(0, -1); }
+      }
+      const pts = list.map((b) => this.rest.get(b).pos);
+      const segs = [];
+      for (let i = 0; i < pts.length - 1; i++) segs.push(pts[i + 1].clone().sub(pts[i]));
+      let lastLen = 0, lastDir = null;
+      if (tipBone) { const v = this.rest.get(tipBone).pos.clone().sub(pts[pts.length - 1]); if (v.length() > 1e-6) { lastLen = v.length(); lastDir = v.normalize(); } }
+      const prev = segs.length ? segs[segs.length - 1] : null;
+      if (!lastDir) {
+        lastDir = prev ? prev.clone().normalize() : fW.clone();
+        const bl = list[list.length - 1].userData && list[list.length - 1].userData.rest && list[list.length - 1].userData.rest.len;
+        const guess = prev ? prev.length() * 0.85 : ax.palmLen * 0.35;
+        lastLen = bl > guess * 0.4 && bl < guess * 2.5 ? bl : guess;
+      }
+      segs.push(lastDir.clone().multiplyScalar(lastLen));
+      // joint roles: metacarpal (barely bends), then the three phalanges
+      const n = list.length;
+      const nameMeta = (b) => { const ws = words(b.name); return ws.includes('0') || /metacarpal|palm|carpal/.test(ws.join('')); };
+      const roles = [];
+      const thumb = k === 'thumb';
+      let metas = thumb ? (n >= 3 ? n - 2 : 0) : Math.max(0, n - 3);
+      if (!thumb && n === 3 && nameMeta(list[0])) metas = 1;
+      for (let i = 0; i < n; i++) roles.push(i < metas ? 'meta' : ['prox', 'mid', 'dist'][Math.min(2, thumb ? (i - metas) * 2 : i - metas)]);
+      const ANG = thumb ? { meta: 20, prox: 42, mid: 55, dist: 55 } : { meta: k === 'little' ? 8 : k === 'ring' ? 5 : 2, prox: 82, mid: 100, dist: 68 };
+      if (!thumb && n - metas === 2) { ANG.prox = 85; ANG.mid = 110; }
+      const bones = list.map((b, i) => {
+        const Wq = this.rest.get(b).Wq;
+        const inv = Wq.clone().invert();
+        const d = segs[i].clone().normalize();
+        let curlW = new THREE.Vector3().crossVectors(d, nW);
+        if (curlW.lengthSq() < 0.05) curlW.crossVectors(fW, nW);
+        curlW.normalize();
+        const e = { bone: b, role: roles[i], ang: ANG[roles[i]], curlL: curlW.applyQuaternion(inv).normalize() };
+        const first = thumb ? i === 0 : roles[i] === 'prox' && (i === 0 || roles[i - 1] === 'meta');
+        if (first) {
+          // spread: turn about the palm normal, + toward the thumb side
+          const toward = new THREE.Vector3().crossVectors(nW, d).dot(tW) >= 0 ? 1 : -1;
+          if (!thumb) { e.spreadL = nW.clone().multiplyScalar(toward).applyQuaternion(inv).normalize(); e.spreadF = SPREAD[k] ?? 0; }
+          else e.acrossL = nW.clone().multiplyScalar(-toward).applyQuaternion(inv).normalize(); // thumb folds across the palm
+        }
+        return e;
+      });
+      const lastB = list[n - 1];
+      out.chains[k] = {
+        bones,
+        path: pathBetween(hb, list[0]) || [],
+        tipLocal: segs[n - 1].clone().applyQuaternion(this.rest.get(lastB).Wq.clone().invert()),
+        len: segs.reduce((a, v) => a + v.length(), 0) - (metas ? segs.slice(0, metas).reduce((a, v) => a + v.length(), 0) : 0),
+      };
+    }
+    return out;
+  }
+
+  // unit vector (model, rest) from the palm's middle toward the thumb
+  thumbSide(side, nW, fW, thumbPos, handPos) {
+    let t = side === 'left' ? new THREE.Vector3().crossVectors(nW, fW) : new THREE.Vector3().crossVectors(fW, nW);
+    if (thumbPos) {
+      const v = thumbPos.clone().sub(handPos);
+      v.addScaledVector(fW, -v.dot(fW));
+      if (v.lengthSq() > 1e-12 && v.dot(t) < 0) t.negate();
+    }
+    return t.normalize();
+  }
+
+  // finger values for one hand: params, or an automatic hand shape while a fingertip touches
+  fingerSpec(side, hand) {
+    if (!hand) return null;
+    let F = hand.fingers ? { ...hand.fingers } : null;
+    const t = hand.touch;
+    if (t && t.weight > 0 && t.finger && t.finger !== 'palm' && !hand.fingersSet) {
+      const use = t.finger === 'two' ? ['index', 'middle'] : [t.finger];
+      const auto = { thumb: use.includes('thumb') ? 0.05 : 0.55, index: 0.85, middle: 0.85, ring: 0.9, little: 0.95, spread: 0 };
+      for (const u of use) auto[u] = t.mode === 'pad' ? 0.1 : 0.04;
+      if (t.finger === 'two') auto.spread = 0;
+      F = F || { thumb: 0, index: 0, middle: 0, ring: 0, little: 0, spread: 0 };
+      const w = THREE.MathUtils.clamp(t.weight, 0, 1);
+      for (const k of Object.keys(auto)) F[k] = (F[k] || 0) + (auto[k] - (F[k] || 0)) * w;
+    }
+    return F;
+  }
+
+  // local rotations of the finger bones for {thumb, index, middle, ring, little: curl 0 (rest) .. 1 (fist), spread: degrees}
+  fingerPose(side, F) {
+    if (!F) return null;
+    const H = this.handRig(side);
+    if (!H) return null;
+    const out = new Map();
+    const any = ['thumb', 'index', 'middle', 'ring', 'little', 'spread'].some((k) => Math.abs(F[k] || 0) > 1e-4);
+    if (!any) return null;
+    for (const [k, ch] of Object.entries(H.chains)) {
+      const curl = THREE.MathUtils.clamp(Number(F[k]) || 0, -0.35, 1.25);
+      for (const e of ch.bones) {
+        const q = this.rest.get(e.bone).Lq.clone();
+        if (e.spreadL && F.spread) q.multiply(new THREE.Quaternion().setFromAxisAngle(e.spreadL, THREE.MathUtils.clamp(F.spread, -25, 40) * e.spreadF * D2R));
+        if (e.acrossL && curl > 0) q.multiply(new THREE.Quaternion().setFromAxisAngle(e.acrossL, 28 * curl * D2R));
+        if (curl) q.multiply(new THREE.Quaternion().setFromAxisAngle(e.curlL, e.ang * curl * D2R));
+        out.set(e.bone, q);
+      }
+    }
+    return out;
+  }
+
+  applyLocals(out, bySide) {
+    for (const locals of Object.values(bySide || {})) {
+      if (!locals) continue;
+      for (const [b, q] of locals) { const o = out.get(b); if (o) o.q = q.clone(); }
+    }
+  }
+
+  // fingertip (and finger root) in the hand bone's own frame, for a finger pose
+  fingertip(side, finger, locals) {
+    const H = this.handRig(side);
+    const ch = H && H.chains[finger];
+    if (!ch) return null;
+    let pos = new THREE.Vector3(), Q = new THREE.Quaternion(), root = null;
+    for (const b of [...ch.path, ...ch.bones.map((e) => e.bone)]) {
+      const r = this.rest.get(b);
+      pos = pos.clone().add(r.offLocal.clone().applyQuaternion(Q));
+      if (!root && ch.bones.some((e) => e.bone === b && e.role !== 'meta')) root = pos.clone();
+      Q = Q.clone().multiply((locals && locals.get(b)) || r.Lq);
+    }
+    const tip = pos.clone().add(ch.tipLocal.clone().applyQuaternion(Q));
+    root = root || pos.clone();
+    return { tip, root, dir: tip.clone().sub(root).normalize(), len: Math.max(tip.distanceTo(root), 1e-4), lastQ: Q };
+  }
+
+  // spec overrides that put a fingertip (or a finger's pad) on a body spot, e.g. the lips
+  fingerTouchSpec(side, touch, first, locals) {
+    const g = this.touchGoal(side, touch, first);
+    if (!g) return null;
+    const H = this.handRig(side);
+    const use = touch.finger === 'two' ? ['index', 'middle'] : [touch.finger];
+    const tips = use.map((f) => this.fingertip(side, f, locals)).filter(Boolean);
+    if (!tips.length) return null;
+    const avg = (key) => tips.reduce((a, t) => a.add(t[key]), new THREE.Vector3()).divideScalar(tips.length);
+    const tip = avg('tip'), root = avg('root');
+    const len = tips.reduce((a, t) => a + t.len, 0) / tips.length;
+    const dirL = tip.clone().sub(root).normalize();
+    const m = side === 'left' ? 1 : -1;
+    const key = SPOT_ALIAS[touch.spot] || touch.spot;
+    const def = SPOTS[key] || {};
+    const pad = touch.mode === 'pad';
+    // which way the finger points and the palm faces (model space)
+    let D, P;
+    if (pad) { D = g.fing.clone(); P = g.palm.clone(); if (def.pad) { D = g.toModel(def.pad(m)).normalize(); } }
+    else {
+      D = def.tip ? g.toModel(def.tip(m)).normalize() : g.palm.clone();
+      P = g.toModel(def.tipPalm ? def.tipPalm(m) : new THREE.Vector3(-m * 0.55, -0.83, 0)).normalize();
+    }
+    P.addScaledVector(D, -P.dot(D));
+    if (P.lengthSq() < 1e-6) P.copy(g.fing).addScaledVector(D, -g.fing.dot(D));
+    P.normalize();
+    // hand-local axes: the finger, and the palm normal square to it
+    const nL = this.handAxes[side].n.clone();
+    nL.addScaledVector(dirL, -nL.dot(dirL));
+    if (nL.lengthSq() < 1e-8) return null;
+    nL.normalize();
+    const basis = (a, b) => new THREE.Matrix4().makeBasis(a, b, new THREE.Vector3().crossVectors(a, b));
+    const R = basis(D, P).multiply(basis(dirL, nL).transpose());
+    const handW = new THREE.Quaternion().setFromRotationMatrix(R);
+    // the point that touches: the tip, pushed in by depth (a fraction of the finger), or the pad
+    const depthF = THREE.MathUtils.clamp(Number(touch.depth) || 0, 0, 0.8);
+    const refLocal = pad ? root.clone().lerp(tip, 0.72).addScaledVector(nL, 0.12 * len) : tip;
+    const contact = g.contact.clone();
+    if (!pad) contact.addScaledVector(D, depthF * len - 0.004 * this.hipHeight);
+    const wrist = contact.clone().sub(refLocal.clone().applyQuaternion(handW));
+    (this.lastTouch || (this.lastTouch = {}))[side] = { contact: contact.clone(), palm: P.clone(), finger: use.join('+'), tipLocal: refLocal.clone() };
+    void H;
+    return this.reachSpec(side, wrist, handW, g.hint, touch.weight, first);
+  }
+
   // keep a foot where it stands at rest (legs bend to follow the hips)
   plantSpec(side, first) {
     const ul = this.map[side + 'UpperLeg'], ll = this.map[side + 'LowerLeg'], ft = this.map[side + 'Foot'];
@@ -859,12 +1155,21 @@ export class HumanoidRig {
       if (this.map.head) this.map.head.traverse((o) => { if (o.isBone && o !== this.map.head && EYE_RE.test(o.name) && !NOT_EYE_RE.test(o.name) && sideOf(words(o.name))) eyes.push(this.rest.get(o).pos); });
       if (eyes.length >= 2) this._eyes = { y: eyes.reduce((a, p) => a + upOf(p), 0) / eyes.length, x: eyes.reduce((a, p) => a + Math.abs(latOf(p)), 0) / eyes.length };
     }
+    if (this._mouth === undefined) {
+      this._mouth = null;
+      const ms = [];
+      if (this.map.head) this.map.head.traverse((o) => { if (o.isBone && o !== this.map.head && MOUTH_RE.test(o.name) && !/tongue|舌|corner|角/i.test(o.name)) ms.push(this.rest.get(o)?.pos); });
+      const ys = ms.filter(Boolean).map(upOf);
+      if (ys.length) this._mouth = ys.reduce((a, b) => a + b, 0) / ys.length;
+    }
     const headH = headTop - headY;
     let eyeY = this._eyes ? this._eyes.y : headY + headH * 0.45;
     if (!(eyeY > headY + headH * 0.15 && eyeY < headTop - headH * 0.1)) eyeY = headY + headH * 0.45;
     let eyeX = this._eyes ? this._eyes.x : headH * 0.18;
     if (!(eyeX > headH * 0.05 && eyeX < headH * 0.45)) eyeX = headH * 0.18;
-    const ctx = { m, legY, legX, hipX, kneeX, chestY, neckY, headY, headTop, eyeY, eyeX, shX, shY, kneeY, side };
+    let mouthY = this._mouth ?? headY + (eyeY - headY) * 0.38;
+    if (!(mouthY > headY - headH * 0.15 && mouthY < eyeY - headH * 0.04)) mouthY = headY + (eyeY - headY) * 0.38;
+    const ctx = { m, legY, legX, hipX, kneeX, chestY, neckY, headY, headTop, eyeY, eyeX, shX, shY, kneeY, side, mouthY };
     const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top', depth (fallback), z?}
     const region = def.region || g.region || 'torso';
     // depth is measured from the body part the spot sits on (heads and knees
@@ -979,6 +1284,21 @@ export class HumanoidRig {
     return best;
   }
 
+  // root-space world rotation of a bone in a solved pose (bones not in it keep their rest)
+  solvedWorld(solved) {
+    const memo = new Map();
+    const W = (b) => {
+      if (memo.has(b)) return memo.get(b);
+      const r = this.rest.get(b);
+      const parentW = b.parent && b.parent.isBone && this.rest.has(b.parent) ? W(b.parent) : r.Pq;
+      const v = solved.get(b);
+      const q = parentW.clone().multiply(v ? v.q : r.Lq);
+      memo.set(b, q);
+      return q;
+    };
+    return W;
+  }
+
   apply(solved) {
     for (const [b, v] of solved) {
       b.quaternion.copy(v.q);
@@ -992,6 +1312,7 @@ export class HumanoidRig {
     const n = Math.max(2, Math.round(duration * fps) + 1);
     const times = [];
     const qTracks = new Map();
+    const pTracks = new Map();
     const hipsPos = [];
     const used = new Set();
     let prev = new Map();
@@ -1001,7 +1322,13 @@ export class HumanoidRig {
       const spec = specAt(t);
       for (const k of Object.keys(spec)) if (this.map[k]) used.add(this.map[k]);
       const solved = this.solve(spec);
+      if (opts.post) opts.post(solved, t, spec);
       for (const [b, v] of solved) {
+        if (v.p && b !== this.map.hips) {
+          let pa = pTracks.get(b);
+          if (!pa) { pa = []; for (let j = 0; j < i; j++) pa.push(...this.rest.get(b).Lp.toArray()); pTracks.set(b, pa); }
+          pa.push(v.p.x, v.p.y, v.p.z);
+        } else if (pTracks.has(b)) pTracks.get(b).push(...this.rest.get(b).Lp.toArray());
         let arr = qTracks.get(b);
         if (!arr) qTracks.set(b, (arr = []));
         const q = v.q.clone();
@@ -1019,12 +1346,24 @@ export class HumanoidRig {
       // skip bones that never move
       if (!used.has(b) && !opts.allBones) {
         // keep it if it ever leaves its rest pose (a held grip doesn't change over time)
+        // (rest rotations read from files aren't always exactly unit length: compare
+        // normalized, or float noise turns into tracks on IK handles that switch the rig's IK on)
         const rq = this.rest.get(b).Lq;
+        const rl = rq.length() || 1;
         let moved = false;
-        for (let i = 0; i < vals.length && !moved; i += 4) if (Math.abs(vals[i] * rq.x + vals[i + 1] * rq.y + vals[i + 2] * rq.z + vals[i + 3] * rq.w) < 1 - 1e-8) moved = true;
+        for (let i = 0; i < vals.length && !moved; i += 4) {
+          const l = Math.hypot(vals[i], vals[i + 1], vals[i + 2], vals[i + 3]) * rl;
+          if (Math.abs(vals[i] * rq.x + vals[i + 1] * rq.y + vals[i + 2] * rq.z + vals[i + 3] * rq.w) < l * (1 - 1e-7)) moved = true;
+        }
         if (!moved) continue;
       }
       tracks.push(new THREE.QuaternionKeyframeTrack(b.uuid + '.quaternion', times, vals));
+    }
+    for (const [b, vals] of pTracks) {
+      const L = this.rest.get(b).Lp;
+      let moved = false;
+      for (let i = 0; i < vals.length && !moved; i += 3) if (Math.abs(vals[i] - L.x) + Math.abs(vals[i + 1] - L.y) + Math.abs(vals[i + 2] - L.z) > 1e-7) moved = true;
+      if (moved) tracks.push(new THREE.VectorKeyframeTrack(b.uuid + '.position', times.slice(), vals));
     }
     let hipsMoves = false;
     for (let i = 3; i < hipsPos.length; i++) if (Math.abs(hipsPos[i] - hipsPos[i % 3]) > 1e-6) { hipsMoves = true; break; }
@@ -1061,6 +1400,8 @@ export class HumanoidRig {
 const V = (x, y, z) => new THREE.Vector3(x, y, z);
 // eye bones (not brows, lids or highlights)
 const EYE_RE = /eye|目|瞳/i;
+// lips / mouth bones (not the tongue)
+const MOUTH_RE = /lip|mouth|口|唇|teeth|歯/i;
 const NOT_EYE_RE = /brow|lash|lid|light|眉|まぶた|ハイライト|^(con|mch|ctrl)[._]/i;
 // hair-like bones (romaji, Japanese, English)
 const HAIR_RE = /hair|kami|ahoge|bang|fringe|ponytail|twintail|tail_?hair|髪|アホ毛|あほ毛|もみあげ|ポニ|ツイン|おさげ/i;
@@ -1075,7 +1416,9 @@ export const SPOTS = {
   knee: { label: 'knee', lean: true, ref: (s) => s + 'LowerLeg', at: (c) => ({ x: c.m * c.kneeX, y: c.kneeY + 0.02, from: 'front', depth: 0.07 }), palm: () => V(0, -0.6, -0.8), fingers: () => V(0, -0.7, 0.7), hint: (m) => V(m * 0.8, 0.2, -0.3) },
   back: { label: 'lower back (behind the back)', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.25, from: 'back', depth: 0.11 }), palm: () => V(0, 0, 1), fingers: (m) => V(-m * 0.75, -0.6, 0), hint: (m) => V(m * 0.6, -0.4, -0.8) },
   head: { label: 'top of the head', ref: () => 'head', region: 'head', at: (c) => ({ x: c.m * 0.03, y: c.headTop - 0.06, z: 0, from: 'top', depth: 0.06 }), palm: () => V(0, -1, 0), fingers: (m) => V(-m * 0.8, 0, 0.5), hint: (m) => V(m, 0.5, 0) },
-  face: { label: 'mouth / face', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.28, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
+  mouth: { label: 'mouth / lips (for a finger to the lips or in the mouth use finger "index" with mode "tip"; "pad" lays the finger across the lips, like "shh")', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.mouthY, from: 'front', depth: 0.08 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.55, -0.8, 0.25), tip: (m) => V(m * 0.12, 0.18, -1), tipPalm: (m) => V(-m * 0.55, -0.83, 0), pad: (m) => V(-m * 0.12, 1, 0.05) },
+  nose: { label: 'nose', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.mouthY + (c.eyeY - c.mouthY) * 0.55, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.5, 0.8, 0), hint: (m) => V(m * 0.55, -0.8, 0.25), tip: (m) => V(m * 0.1, 0.1, -1), tipPalm: (m) => V(-m * 0.55, -0.83, 0) },
+  face: { label: 'whole face (palm over the mouth / face)', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.28, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.8, 0.5, 0), hint: (m) => V(m * 0.5, -0.8, 0.3) },
   cheek: { label: 'cheek', ref: () => 'head', region: 'face', at: (c) => ({ x: c.m * 0.06, y: c.headY + (c.headTop - c.headY) * 0.32, z: 0.03, from: 'side', depth: 0.02 }), palm: (m) => V(-m, 0, -0.2), fingers: () => V(0, 1, 0.15), hint: (m) => V(m * 0.4, -0.9, 0.2) },
   chin: { label: 'chin (resting the chin on the hand)', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.headY + (c.headTop - c.headY) * 0.12, from: 'front', depth: 0.08 }), palm: () => V(0, 0.6, -0.8), fingers: (m) => V(-m * 0.5, 0.5, 0.6), hint: (m) => V(m * 0.3, -0.9, 0.3) },
   forehead: { label: 'forehead', ref: () => 'head', region: 'face', at: (c) => ({ x: 0, y: c.eyeY + (c.headTop - c.eyeY) * 0.45, from: 'front', depth: 0.1 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.85, 0.5, 0), hint: (m) => V(m * 0.6, -0.6, 0.4) },
@@ -1089,7 +1432,7 @@ export const SPOTS = {
 export const SPOT_ALIAS = {
   brow: 'forehead', eye: 'eyes', ears: 'ear', backofhead: 'backOfHead', nape: 'backOfHead', throat: 'neck', crossedarms: 'crossed', arms: 'crossed',
   lowerbelly: 'lap', underbelly: 'lap', abdomen: 'belly', stomach: 'belly', tummy: 'belly', waist: 'hip', hips: 'hip', side: 'hip',
-  breast: 'chest', heart: 'heart', mouth: 'face', lips: 'face', jaw: 'chin', leg: 'thigh', thighs: 'thigh', knees: 'knee', lowerback: 'back', behind: 'back',
+  breast: 'chest', heart: 'heart', lips: 'mouth', lip: 'mouth', jaw: 'chin', leg: 'thigh', thighs: 'thigh', knees: 'knee', lowerback: 'back', behind: 'back',
 };
 
 // ---- pose param helpers (used by the motion library and the AI) ----
@@ -1133,6 +1476,10 @@ export const POSE_PARAMS = {
   lHandPitch: [0, 'left wrist bend'], lHandYaw: [0, 'left wrist side'], lHandRoll: [0, 'left wrist twist'],
   rArmRaise: [8, 'right upper arm (same as left)'], rArmSwing: [0, ''], rArmTwist: [0, ''], rElbow: [12, ''], rElbowUp: [0, ''],
   rHandPitch: [0, ''], rHandYaw: [0, ''], rHandRoll: [0, ''],
+  lThumb: [0, 'left thumb curl: 0 = as at rest (straight), 1 = folded into the palm'],
+  lIndex: [0, 'left index finger curl 0..1 (1 = fully curled into a fist)'], lMiddle: [0, 'left middle finger curl 0..1'], lRing: [0, 'left ring finger curl 0..1'], lPinky: [0, 'left little finger curl 0..1'],
+  lSpread: [0, 'left fingers spread apart (degrees, 0-30; negative = pressed together)'],
+  rThumb: [0, 'right thumb curl (same as left)'], rIndex: [0, ''], rMiddle: [0, ''], rRing: [0, ''], rPinky: [0, ''], rSpread: [0, ''],
   lLegSwing: [0, 'left thigh swing forward (+) / back (-)'], lLegSpread: [4, 'left thigh out to the side'],
   lKnee: [3, 'left knee bend 0..150'], lFootPitch: [0, 'left ankle: toes down (+) / up (-)'],
   rLegSwing: [0, ''], rLegSpread: [4, ''], rKnee: [3, ''], rFootPitch: [0, ''],
@@ -1172,6 +1519,9 @@ export function paramsToSpec(p) {
     const up = p[s + 'ElbowUp'] || 0;
     spec[side + 'LowerArm'] = { bend: p[s + 'Elbow'], front: up < 0 ? inward(side, -up) : elbowFront(up) };
     spec[side + 'Hand'] = { rot: [p[s + 'HandPitch'], p[s + 'HandYaw'], p[s + 'HandRoll']] };
+    const fingers = { thumb: p[s + 'Thumb'] || 0, index: p[s + 'Index'] || 0, middle: p[s + 'Middle'] || 0, ring: p[s + 'Ring'] || 0, little: p[s + 'Pinky'] || 0, spread: p[s + 'Spread'] || 0 };
+    if (Object.values(fingers).some((v) => Math.abs(v) > 1e-4)) spec[side + 'Hand'].fingers = fingers;
+    if (p[s + 'FingersSet']) spec[side + 'Hand'].fingersSet = true;
     const touch = p[s + 'Touch'];
     if (touch && touch.spot && touch.weight > 0) spec[side + 'Hand'].touch = touch;
     spec[side + 'UpperLeg'] = { dir: legDir(side, p[s + 'LegSwing'], p[s + 'LegSpread']) };

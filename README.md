@@ -40,6 +40,8 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 
 FBX, BVH and DAE files in centimeters are converted to meters automatically.
 
+Actions that are a single frame (a face rig's mouth shapes, saved hand poses) are poses, not animations: they go to **Animations → Poses saved in the file**, where sliders mix them and **Key this mix** keys the result, and the AI can use them. A single frame identical to the rest pose holds no motion and is left out (WebBlend says so when you open the file).
+
 When a drop holds more than four models (a mod `.jar` often has dozens), a list opens with each model's name, kind and folder; search it, tick the ones you want and they're placed side by side. Data files such as recipes, blockstates and mod info are left out. Pixel-art textures stay crisp.
 
 A character file saved without its skeleton (some exporters write only the posed meshes) can be moved but not posed; WebBlend says so when you open it. Open the original `.blend` / `.pmx` / `.vrm` instead, or save from WebBlend, which keeps the bones. Physics helper meshes in such files (`RB…`, `CL…`, rigid bodies) are hidden.
@@ -84,6 +86,7 @@ Open the **AI** tab (or the AI button at the top) and describe what you want:
 
 - `walk`, `run fast`, `jump then wave`, `walk and wave with the left hand`, `dance like crazy`, `sneak`, `sit down`, `nod twice`, `cheer`
 - Hands on the body: `put her hand on her lap while standing`, `hands on hips`, `left hand on her chest and right hand on her head`, `hands behind her back`, `hand on chin`, `hands on knees`, `cross her arms`, `hands behind her head`, `cover her eyes`, `cover ears`, `facepalm`, `hand on her neck`, `touch her ear`. The app scans the character's own mesh (its proportions, where the face, chest, thighs and knees really are, hair ignored), so the palm lands on that spot (lap, belly, chest, heart, hip, thigh, knee, lower back, head, back of the head, forehead, eyes, ear, face, cheek, chin, neck, other shoulder, arms crossed) and the hand turns to lie flat. Standing poses keep the feet planted and the legs still. If the arms are too short for a spot on the thigh, the hand rests as low as it reaches instead of bending over; only knees make the character bend down (mostly at the hips).
+- Fingers and face: `finger to her lips` (or `shh`), `put a finger in her mouth`, `bite her nails`, `poke her cheek`, `thumbs up`, `peace sign`, `make a fist with the left hand`, `point`, `smile and blink`, `open her mouth`, `pout`. A fingertip touch moves the whole arm with IK so that exact fingertip lands on the spot (measured on the character's own face), curls the other fingers, and for a finger in the mouth rounds the lips if the model has mouth shapes.
 - Props: `make a gun and shoot 3 times`, `give her a rifle and shoot full auto`, `give him a pump shotgun`, `make a gold pistol and aim`, `give her a katana and slash twice`, `drop the gun`. The character holds it at real size in the right (or left) hand with the fingers closed around the grip; aiming uses both hands (pistols out in front, rifles and shotguns shouldered in a bladed stance); every shot adds recoil through the arms, the slide / bolt / pump cycling, a muzzle flash, a tracer and an ejected casing that bounces on the floor. It is all keyframes in one clip, so it scrubs, loops and exports.
 - `make everything bounce`, `spin slowly on the x axis`, `float`, `grow then pulse`, `rainbow colors`
 - On creatures and rigs with tails or tentacles: `wiggle`, `slow sway`
@@ -125,7 +128,16 @@ You can also:
 
 **Holding things.** Select a held prop (or the character) to get Shoot / Swing, Aim / Guard, move it to the other hand, Flip it, or Remove it. Nudge it in the hand with the gizmo and aiming follows. Any model you import (a gun from Sketchfab, a tool...) can be put in a character's hand with **Give to a character** in its properties; WebBlend guesses the front, the grip and the muzzle, and Flip turns it around if it guessed wrong.
 
-Claude gets a map of each character: how tall each body part is, which bone is which part (Japanese bone names translated to English), what moving each bone carries along (rotating a thigh moves the whole leg, so it bends knees with the knee setting instead), and the extra bones it can key, grouped as hair, ears, eyes, face, tail, fingers, clothes and so on. The Scene list also shows an English translation next to Japanese names, and its filter searches both.
+**Every bone, on any rig.** WebBlend scans each model's skeleton, whether it has more bones than usual or fewer: which body part every bone moves (from the skin weights, what hangs below it and the constraints it feeds), whether it's a bone you turn, a control handle you slide (face rigs' lip, jaw and eye-target handles), something the rig drives by itself (stretch / track / IK helpers, physics) or unused. Claude gets that map along with how tall each body part is and which bone is which part (Japanese names translated), and can animate any of them:
+
+- **Fingers**: each finger curls from straight to a fist and spreads, found by name (Mixamo, VRM, Unreal, Rigify, MMD...) or by shape when bones have no useful names. Hand shapes like a fist, pointing, a peace sign or thumbs up, changing over time.
+- **Fingertip touches**: the index (or any finger, or two) goes to a spot on the body (lips, mouth, nose, cheek, chin...): tip first, along the surface like "shh", or a little past it (a finger in the mouth). The arm, elbow and wrist all follow with IK, so asking for the hand at the face and then the finger moves the whole arm in that order.
+- **Face**: shape keys (blink, smile, mouth vowels, brows...), poses saved in the file (a face rig's mouth shapes) and a jaw bone, mixed over time with values 0-1.
+- **Any other bone** (hair, ears, tail, wings, clothes, breasts, extra spine bones, robot parts) turned in the character's own directions (forward, left, tilt) or, for control handles, slid a few centimeters, on top of the body motion.
+
+**The app checks Claude's motion.** After building a clip it measures it on the character: whether each palm or fingertip really reaches the spot it should touch (and how far off it is), how far the hands travel, how curled the fingers are, and any bone or face control name the rig doesn't have. A request about hands where the hands barely move (say, only a wrist turning) counts as a problem. When something is off, Claude gets the measurements and sends a corrected clip, which replaces the first one. Turn it off with the other self-checks under Settings → AI.
+
+The Scene list also shows an English translation next to Japanese names, and its filter searches both.
 
 ## Export to Roblox, Unity, Unreal, Blender, Godot
 
@@ -188,14 +200,15 @@ node tools/test-humanoid.mjs                                         # rig detec
 node tools/test-touch.mjs test-assets/assets/hero.blend              # hands placed on body spots, feet planted
 node tools/test-props.mjs                                            # built-in models, holding, aiming, shooting effects
 node tools/test-decor.mjs                                            # blades, lofts, sweeps, mirroring, patterns
+node tools/test-hands.mjs                                            # fingers, fingertip touches, face controls, file poses, bone scan, motion check
 node tools/test-vfx.mjs                                              # effects: trails follow the blade, timing, presets, checks
 node tools/test-ai.mjs                                               # offline AI prompt parsing
 node tools/e2e.cjs test-assets/assets ./out                          # full app in headless Chromium
 node tools/e2e-formats.cjs test-assets/zoo ./out                     # every importer
-node tools/e2e-ai.cjs                                                # Claude integrations (incl. the model self-review) with mocked responses
+node tools/e2e-ai.cjs                                                # Claude integrations (model, effects and motion self-checks) with mocked responses
 node tools/e2e-export.cjs ./out [python-with-bpy]                    # FBX export read back by three.js and, if given, Blender
 node tools/e2e-archives.cjs ./out                                    # .jar scan (hidden folders, nested jars), Minecraft / GeckoLib / Blockbench models
-node tools/e2e-qol.cjs                                               # effect editor, hide effects, turntable, remembered export platform
+node tools/e2e-qol.cjs                                               # effect editor, hide effects, turntable, export platform, file poses
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
 node tools/test-pose-truth.mjs rig.blend truth.json                # any rig vs Blender (truth from tools/blender/pose_truth.py)

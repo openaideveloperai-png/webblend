@@ -4,12 +4,11 @@
 //    pose system. Uses the viewer's claude.ai account when hosted as an artifact
 //    (window.claude "sample" capability), or the user's API key in a local copy.
 import * as THREE from 'three';
-import { translateName, nameWithTranslation } from '../core/jp.js';
 import { describeBody } from './bodymap.js';
 import { buildProp, presetSpec, findPresetIn, findStyleIn, decorateSpec, floatingParts, PROP_PRESETS, STYLE_NAMES, TEXTURES, PATTERN_NAMES, BLADE_VARIANTS } from '../scene/props.js';
 import { findDecorationIn, COLOR_WORDS } from '../scene/patterns.js';
 import { inspectProp, renderReview, renderFilmstrip } from './model-review.js';
-import { bakeVFX, vfxFromText, vfxWordsIn, VFX_PRESETS, VFX_PRESET_NAMES, PARTICLE_SHAPE_NAMES, MESH_SHAPE_NAMES } from './vfx.js';
+import { bakeVFX, removeVFX, vfxFromText, vfxWordsIn, VFX_PRESETS, VFX_PRESET_NAMES, PARTICLE_SHAPE_NAMES, MESH_SHAPE_NAMES } from './vfx.js';
 
 // what Claude needs to place parts and decorations on the built-in models
 const PRESET_DOC = [
@@ -23,7 +22,11 @@ const PRESET_DOC = [
 import { attachProp, detachProp, bakeHoldClip, heldProps, recoilOf, holdDriver, addShotEffects } from './props-anim.js';
 import Anthropic from '@anthropic-ai/sdk';
 import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChains } from './motions.js';
-import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS } from './humanoid.js';
+import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS, SPOT_ALIAS } from './humanoid.js';
+import { boneKeyPlan, boneKeyPost, boneKeyTracks } from './bonekeys.js';
+import { faceTracks, describeFace, faceKeysFor } from './face.js';
+import { describeRig } from './rigscan.js';
+import { checkMotion } from './motioncheck.js';
 import { inArtifact } from '../core/util.js';
 
 const NUM_WORDS = { once: 1, one: 1, twice: 2, two: 2, three: 3, thrice: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
@@ -151,10 +154,26 @@ export function parseTouches(text) {
     }
   }
   idiom(/\b(thinking|thinker)\s+pose\b|\bchin\s+(on|in)\s+(?:(?:her|his|their|the|a)\s+)*hand\b/g, 'chin', ['right']);
+  // a fingertip instead of the palm: a finger in the mouth, on the lips ("shh"), biting a nail, poking a cheek
+  const P = '(?:(?:her|his|their|the|its|my|your|own|a|one|left|right|index|pointer)\\s+)*';
+  const tip = (re, spot, finger, mode, depth) => {
+    re.lastIndex = 0;
+    let mm;
+    while ((mm = re.exec(t))) {
+      if (NEGATION.test(t.slice(Math.max(0, mm.index - 30), mm.index))) continue;
+      const sideWord = (/\b(left|right)\b/.exec(mm[0]) || /^\s+(?:with|using)\s+(?:(?:her|his|their|the|its|my|your)\s+)?(left|right)\b/.exec(t.slice(mm.index + mm[0].length)) || [])[1];
+      touches.push({ side: sideWord || 'right', spot, finger, mode, depth, at: mm.index + 0.5 });
+    }
+  };
+  tip(new RegExp(`\\b${P}(fingers?|fingertips?)\\s+(?:${P})?(in|into|inside|between)\\s+${P}(mouth|lips)\\b`, 'g'), 'mouth', 'index', 'tip', 0.35);
+  tip(new RegExp(`\\b${P}(fingers?|fingertips?)\\s+(to|on|against|over|across|at)\\s+${P}lips\\b|\\bshh+\\b|\\bshush(es|ed|ing)?\\b|\\b(hush|quiet|secret)\\s+gesture\\b`, 'g'), 'mouth', 'index', 'pad', 0);
+  tip(new RegExp(`\\bbit(e|es|ing)\\s+${P}(finger\\s*)?nails?\\b|\\bnail[- ]?biting\\b|\\bbit(e|es|ing)\\s+${P}fingers?\\b`, 'g'), 'mouth', 'index', 'tip', 0.12);
+  tip(new RegExp(`\\bpok(e|es|ed|ing)\\s+${P}cheeks?\\b|\\b${P}fingers?\\s+(to|on|against|into)\\s+${P}cheeks?\\b`, 'g'), 'cheek', 'index', 'tip', 0.04);
+  tip(new RegExp(`\\bboop(s|ed|ing)?\\b|\\b${P}fingers?\\s+(to|on|against)\\s+${P}nose\\b|\\btouch(es|ed|ing)?\\s+${P}nose\\b`, 'g'), 'nose', 'index', 'tip', 0);
   touches.sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   // later mentions win for the same hand
   const bySide = {};
-  for (const x of touches) bySide[x.side] = x.spot;
+  for (const x of touches) bySide[x.side] = x.finger ? { spot: x.spot, finger: x.finger, mode: x.mode, depth: x.depth } : x.spot;
   const lockLegs = /\b(standing|stand still|stands still|while (she|he|they)('s| is| are)? standing|keep (the |her |his |their )?(legs|feet)|(don'?t|do not|not|never|no) (move|touch|moving|touching|bend|bending|animate)( (the|her|his|their))? (legs?|feet|knees?)|legs? (still|straight)|without moving)\b/.test(t);
   return { touch: Object.keys(bySide).length ? bySide : null, lockLegs };
 }
@@ -187,14 +206,59 @@ export function parsePropRequest(text) {
   return any ? { preset, make, shoot: shootWord, swing, count, auto, burst, aim, hold, drop, side, style, decoration } : null;
 }
 
+// hand shapes said in words: "thumbs up", "peace sign", "make a fist", "point"
+const HAND_SHAPE_NAMES = {};
+const HAND_SHAPES = {
+  thumbsUp: { thumb: 0, index: 1, middle: 1, ring: 1, little: 1, spread: 0 },
+  peace: { thumb: 0.85, index: 0, middle: 0, ring: 0.95, little: 0.95, spread: 15 },
+  fist: { thumb: 1, index: 1, middle: 1, ring: 1, little: 1, spread: 0 },
+  point: { thumb: 0.6, index: 0, middle: 0.9, ring: 0.95, little: 0.95, spread: 0 },
+  open: { thumb: 0, index: 0, middle: 0, ring: 0, little: 0, spread: 22 },
+  relaxed: { thumb: 0.15, index: 0.15, middle: 0.2, ring: 0.25, little: 0.3, spread: 3 },
+};
+for (const [k, v] of Object.entries(HAND_SHAPES)) HAND_SHAPE_NAMES[k] = [v, { thumbsUp: 'thumbs up', peace: 'peace sign', fist: 'fist', point: 'pointing', open: 'open', relaxed: 'relaxed' }[k]];
+export function parseHandShapes(text) {
+  const t = String(text || '').toLowerCase();
+  const out = {};
+  const put = (re, shape, plural) => {
+    const m = re.exec(t);
+    if (!m || NEGATION.test(t.slice(Math.max(0, m.index - 30), m.index))) return;
+    const near = t.slice(Math.max(0, m.index - 25), m.index + m[0].length + 25);
+    const side = /\bleft\b/.test(near) ? ['left'] : /\bright\b/.test(near) ? ['right'] : /\bboth\b/.test(near) || plural(m[0]) ? ['left', 'right'] : ['right'];
+    for (const sd of side) out[sd] = HAND_SHAPES[shape];
+  };
+  put(/\b(two\s+)?thumbs?[- ]up\b/, 'thumbsUp', (w) => /two/.test(w));
+  put(/\b(peace|v)[- ](sign|signs|hand)\b|\bpeace\b/, 'peace', (w) => /signs/.test(w));
+  put(/\b(make|makes|making|clench(es|ed|ing)?|ball(s|ed|ing)?)\s+(?:(?:a|her|his|their|both|the)\s+)*fists?\b|\bfists?\b/, 'fist', (w) => /fists/.test(w));
+  put(/\bpoint(s|ed|ing)?\b/, 'point', () => false);
+  put(/\b(open|spread)\s+(?:(?:her|his|their|the|both)\s+)*(hands?|fingers|palms?)\b|\bjazz hands\b/, 'open', (w) => /hands|fingers|palms|jazz/.test(w));
+  return Object.keys(out).length ? out : null;
+}
+
+// face words: "smile", "blink", "wink", "open her mouth", "pout"...
+export function parseFaceWords(text) {
+  const t = String(text || '').toLowerCase();
+  const out = [];
+  const add = (re, kind) => { const m = re.exec(t); if (m && !NEGATION.test(t.slice(Math.max(0, m.index - 30), m.index))) out.push(kind); };
+  add(/\b(smil(e|es|ed|ing)|grin(s|ned|ning)?|happy face)\b/, 'smile');
+  add(/\bblink(s|ed|ing)?\b/, 'blink');
+  add(/\bwink(s|ed|ing)?\b/, 'wink');
+  add(/\bopen(s|ed|ing)?\s+(?:(?:her|his|their|the|its)\s+)*mouth\b|\bsay(s|ing)?\s+a+h+\b|\b(surprised|shocked|gasp(s|ed|ing)?)\b/, 'open');
+  add(/\b(pout(s|ed|ing)?|kiss(y|es|ing)?\s*face|pucker(s|ed|ing)?|duck\s*face|blow(s|ing)?\s+a\s+kiss)\b/, 'round');
+  return out;
+}
+
 export function parsePrompt(text) {
   const clean = String(text || '').toLowerCase().replace(/[“”"]/g, '').trim();
   const stepTexts = clean.split(/\s*(?:,?\s*\bthen\b|,?\s*\bafter that\b|,?\s*\bfollowed by\b|;|->|→|\band then\b)\s*/).filter(Boolean);
   const steps = stepTexts.map((st) => ({
     text: st,
     touch: parseTouches(st),
+    hands: parseHandShapes(st),
+    face: parseFaceWords(st),
     human: findMotions(st, HUMANOID),
-    object: findMotions(st, OBJECT),
+    // "blink" / "thumbs up" mean the face or hand, not making the whole model flicker or rise
+    object: findMotions(st, OBJECT).filter((o) => !((o.key === 'blink' && parseFaceWords(st).includes('blink')) || ((o.key === 'rise' || o.key === 'move') && parseHandShapes(st)))),
     chain: findMotions(st, CHAIN),
     opts: parseModifiers(st),
   }));
@@ -226,7 +290,7 @@ export function wantsCustomModel(text) {
 }
 
 export function isSimplePrompt(text) {
-  if (wantsCustomModel(text)) return false;
+  if (wantsCustomModel(text) && !parseHandShapes(text)) return false;
   // prop requests the built-in models cover ("make a gun and shoot 3 times")
   const pr = parsePropRequest(text);
   if (pr) {
@@ -235,10 +299,12 @@ export function isSimplePrompt(text) {
     return unknown.length === 0 && (!!pr.preset || pr.shoot || pr.aim || pr.drop || pr.swing);
   }
   const p = parsePrompt(text);
-  if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length || s.touch.touch)) return false;
+  if (!p.steps.every((s) => s.human.length || s.object.length || s.chain.length || s.touch.touch || s.hands || s.face.length)) return false;
   const words = String(text).toLowerCase().replace(/[^a-z0-9\s'-]/g, ' ').split(/\s+/).filter(Boolean);
   const motionWords = new Set(['hand', 'hands', 'palm', 'palms', 'arm', 'arms', 'put', 'place', 'rest', 'resting', 'touch', 'touching', 'over', 'onto', 'under', 'below', 'behind', 'against', 'other', 'own', 'top', 'lower', 'pose', 'posing', 'still',
-    'cross', 'crosses', 'crossed', 'crossing', 'fold', 'folds', 'folded', 'folding', 'cover', 'covers', 'covered', 'covering', 'hide', 'hides', 'hiding', 'plug', 'plugs', 'facepalm', 'facepalms', 'gasp', 'gasps', 'yawn', 'yawns', 'thinking', 'thinker', 'peekaboo']);
+    'cross', 'crosses', 'crossed', 'crossing', 'fold', 'folds', 'folded', 'folding', 'cover', 'covers', 'covered', 'covering', 'hide', 'hides', 'hiding', 'plug', 'plugs', 'facepalm', 'facepalms', 'gasp', 'gasps', 'yawn', 'yawns', 'thinking', 'thinker', 'peekaboo',
+    'finger', 'fingers', 'fingertip', 'into', 'inside', 'shh', 'shhh', 'shush', 'hush', 'quiet', 'gesture', 'bite', 'bites', 'biting', 'nail', 'nails', 'fingernail', 'poke', 'pokes', 'poking', 'boop', 'nose',
+    'thumb', 'thumbs', 'peace', 'sign', 'fist', 'fists', 'clench', 'open', 'spread', 'jazz', 'smile', 'smiles', 'smiling', 'grin', 'blink', 'blinks', 'blinking', 'wink', 'winks', 'winking', 'pout', 'pouts', 'pouting', 'kiss', 'kissy', 'pucker', 'surprised', 'say', 'aah', 'ah', 'cute', 'cutely']);
   for (const [w] of SPOT_WORDS) for (const part of w.split(/\s+/)) motionWords.add(part);
   for (const t of [HUMANOID, OBJECT, CHAIN]) for (const m of Object.values(t)) for (const w of m.words) for (const part of w.split(/\s+/)) motionWords.add(part);
   const unknown = words.filter((w) => !FILLER.has(w) && !motionWords.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
@@ -336,7 +402,7 @@ export class AIAssistant {
   runOffline(prompt) {
     const pr = parsePropRequest(prompt);
     if (pr) { const r = this.runProps(pr, prompt); if (r) return r; }
-    if (wantsCustomModel(prompt) && !parsePrompt(prompt).steps.some((st) => st.human.length || st.object.length || st.touch.touch)) {
+    if (wantsCustomModel(prompt) && !parsePrompt(prompt).steps.some((st) => st.human.length || st.object.length || st.touch.touch || st.hands || st.face.length)) {
       return { results: [], message: `Without Claude I can only make the built-in models: ${Object.keys(PROP_PRESETS).join(', ')}. Add an API key in Settings → AI (or use the hosted page) and Claude can model anything you describe.`, understood: false };
     }
     const parsed = parsePrompt(prompt);
@@ -348,6 +414,8 @@ export class AIAssistant {
     for (const { model, object } of targets) {
       const rig = object === model.root ? model.humanoid : null;
       const segs = [];
+      const faceWants = [];
+      for (const st of parsed.steps) for (const k of st.face) faceWants.push({ kind: k });
       for (const step of parsed.steps) {
         const opts = { ...parsed.global, ...step.opts };
         if (rig && step.touch.touch) {
@@ -357,10 +425,12 @@ export class AIAssistant {
           const touch = { ...step.touch.touch };
           if (key === 'sit') for (const sd of ['left', 'right']) if (touch[sd] === 'lap') touch[sd] = 'thigh';
           const BOTH = { crossed: 'arms crossed', eyes: 'covering the eyes', ear: 'covering the ears', backOfHead: 'hands behind the head', hip: 'hands on hips', lap: 'hands on lap' };
+          const spotName = (sp) => { const k = typeof sp === 'string' ? sp : sp.spot; return SPOTS[k] ? SPOTS[k].label.replace(/ \(.*\)/, '').replace(/ \/ lips$/, '') : k; };
           const where = touch.left && touch.left === touch.right && BOTH[touch.left] ? BOTH[touch.left]
-            : Object.entries(touch).map(([sd, sp]) => (sp === 'crossed' ? `${sd} arm crossed` : `${sd} hand on ${SPOTS[sp] ? SPOTS[sp].label.replace(/ \(.*\)/, '') : sp}`)).join(', ');
+            : Object.entries(touch).map(([sd, sp]) => (sp === 'crossed' ? `${sd} arm crossed` : typeof sp === 'object' ? `${sd} ${sp.finger} finger ${sp.depth > 0.2 ? 'in' : 'to'} the ${spotName(sp)}` : `${sd} hand on ${spotName(sp)}`)).join(', ');
           const still = HUMANOID[key].still || key === 'still';
-          segs.push(bakeHumanoid(rig, key, { ...opts, touch, lockLegs: step.touch.lockLegs || still, duration: opts.duration || (HUMANOID[key].loop ? Math.max(3, HUMANOID[key].cycle) : undefined), name: (base ? HUMANOID[key].label + ' + ' : '') + where.charAt(0).toUpperCase() + where.slice(1) }));
+          segs.push(bakeHumanoid(rig, key, { ...opts, touch, hands: step.hands, lockLegs: step.touch.lockLegs || still, duration: opts.duration || (HUMANOID[key].loop ? Math.max(3, HUMANOID[key].cycle) : undefined), name: (base ? HUMANOID[key].label + ' + ' : '') + where.charAt(0).toUpperCase() + where.slice(1) }));
+          for (const sp of Object.values(touch)) if (typeof sp === 'object' && sp.spot === 'mouth' && sp.depth > 0.05) faceWants.push({ kind: 'round', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.35, value: 0.6 }, { kind: 'open', at: Math.min(0.7, (segs[segs.length - 1].duration || 3) * 0.3) + 0.3, value: 0.22 });
           continue;
         }
         if (rig && step.human.length) {
@@ -371,10 +441,15 @@ export class AIAssistant {
             const firstIsGesture = !!LAYERABLE[base.key] && !LAYERABLE[second.key];
             const [b, l] = firstIsGesture ? [second, base] : [base, second];
             if (LAYERABLE[l.key]) layer = { key: l.key, side: opts.side, channels: LAYERABLE[l.key](opts) };
-            segs.push(bakeHumanoid(rig, b.key, { ...opts, layer, name: HUMANOID[b.key].label + (layer ? ' + ' + HUMANOID[l.key].label : '') }));
+            segs.push(bakeHumanoid(rig, b.key, { ...opts, layer, hands: step.hands, name: HUMANOID[b.key].label + (layer ? ' + ' + HUMANOID[l.key].label : '') }));
           } else {
-            segs.push(bakeHumanoid(rig, base.key, { ...opts, name: HUMANOID[base.key].label }));
+            segs.push(bakeHumanoid(rig, base.key, { ...opts, hands: step.hands || (base.key === 'point' ? { [opts.side === 'left' ? 'left' : 'right']: parseHandShapes('point').right } : null), name: HUMANOID[base.key].label }));
           }
+        } else if (rig && (step.hands || step.face.length)) {
+          // a hand shape or a face on its own: the body stays calm
+          const what = [step.hands ? Object.keys(step.hands).map((sd) => `${sd} hand ${Object.entries(HAND_SHAPE_NAMES).find(([, v]) => JSON.stringify(v[0]) === JSON.stringify(step.hands[sd]))?.[1][1] || 'shape'}`).join(', ') : '', step.face.join(', ')].filter(Boolean).join(', ');
+          const present = step.hands ? Object.keys(step.hands).filter((sd) => [HAND_SHAPES.thumbsUp, HAND_SHAPES.peace].includes(step.hands[sd])) : [];
+          segs.push(bakeHumanoid(rig, 'still', { ...opts, hands: step.hands, present, lockLegs: true, duration: opts.duration || 3, name: what.charAt(0).toUpperCase() + what.slice(1) }));
         } else if (!rig && model.bones.length && (step.chain.length || (!step.object.length && step.human.length))) {
           const start = object.isBone ? object : null;
           const chains = boneChains(model.bones, start).filter((c) => c.length >= 2);
@@ -401,6 +476,16 @@ export class AIAssistant {
         else segs.push(bakeObject(object, 'float', { size: this.sizeOf(model, object), name: 'Float' }));
       }
       const clip = segs.length > 1 ? concatClips(segs) : segs[0];
+      // smile, blink, mouth shapes: the model's own face controls
+      if (faceWants.length && (model.bones.length || (model.morphMeshes && model.morphMeshes.length))) {
+        const { keys, missing } = faceKeysFor(model, faceWants, clip.duration);
+        if (keys.length) {
+          const face = faceTracks(model, keys, clip.duration);
+          const taken = new Set(face.tracks.map((t) => t.name));
+          clip.tracks = clip.tracks.filter((t) => !taken.has(t.name)).concat(face.tracks);
+        }
+        if (missing.length) notes.push(`${model.name} has no ${missing.join(' / ')} control${missing.length > 1 ? 's' : ''} (no matching shape keys or face bones).`);
+      }
       // "punch with fire fists", "spin with a glowing aura"
       const fx = model.adopt ? vfxFromText(prompt, { melee: false, gun: false }) : [];
       if (fx.length) { bakeVFX(model, clip, fx, {}); notes.push(`Added ${fx.map((e) => e.name.toLowerCase()).join(', ')}.`); }
@@ -483,18 +568,16 @@ export class AIAssistant {
     const lines = [];
     for (const m of app.models) {
       const h = m.humanoid;
-      const type = h ? 'humanoid character (use humanoidKeys / humanoid presets)' : m.bones.length ? `rigged model with ${m.bones.length} bones (use boneKeys)` : m.root.isLight ? 'light' : m.root.isCamera ? 'camera' : 'object (use objectKeys / object presets)';
+      const type = h ? 'humanoid character (use humanoidKeys / handTouches / faceKeys / boneKeys)' : m.bones.length ? `rigged model with ${m.bones.length} bones (use boneKeys / faceKeys)` : m.root.isLight ? 'light' : m.root.isCamera ? 'camera' : 'object (use objectKeys / object presets)';
       let s = `- "${m.name}": ${type}; size ${m.size.toFixed(2)} units`;
-      if (!h && m.bones.length) {
-        const list = (m.poseBones && m.poseBones.length ? m.poseBones : m.bones);
-        s += `; bones${list.some((b) => translateName(b.name)) ? ' (Japanese names translated)' : ''}: ${list.slice(0, 60).map((b) => nameWithTranslation(b.name)).join(', ')}${list.length > 60 ? ', …' : ''}`;
-      }
       if (m.clips.length) s += `; existing clips: ${m.clips.map((c) => c.clip.name).join(', ')}`;
       if (m.adopt) { const held = heldProps(m); if (held.length) s += `; holding: ${held.map((p) => `"${p.name}" (${p.userData.hold.side} hand, ${p.userData.prop.kind}${p.userData.prop.preset !== 'custom' ? ', preset ' + p.userData.prop.preset : ''})`).join(', ')}`; }
       if (m.kind === 'prop') s += ' (a prop model)';
       if (app.selection.model === m) s += ' [SELECTED]';
       lines.push(s);
       if (h) { try { const b = describeBody(m); if (b) lines.push(b); } catch (e) { console.warn('body map', e); } }
+      if (m.bones.length) { try { const r = describeRig(m); if (r) lines.push(r); } catch (e) { console.warn('rig scan', e); } }
+      if (m.bones.length || (m.morphMeshes && m.morphMeshes.length)) { try { const f = describeFace(m); if (f) lines.push(f); } catch (e) { console.warn('face controls', e); } }
     }
     return lines.join('\n') || '(empty scene)';
   }
@@ -518,10 +601,11 @@ JSON FORMAT:
     "preset": one of ${JSON.stringify(['none', ...Object.keys(HUMANOID), ...Object.keys(OBJECT).map((k) => 'object:' + k)])},
     "speed": 1, "intensity": 1,
     "humanoidKeys": [{"t": seconds, "values": [{"param": "rElbow", "value": 70}, ...]}],
-    "handTouches": [{"t": seconds, "hand": "left"|"right", "spot": "lap", "weight": 0-1}],
+    "handTouches": [{"t": seconds, "hand": "left"|"right", "spot": "lap", "weight": 0-1, "finger": "palm"|"index"|"middle"|"ring"|"little"|"thumb"|"two", "mode": "tip"|"pad", "depth": 0-0.8}],
     "plantFeet": true/false,
     "objectKeys": [{"t": seconds, "channel": "position"|"rotation"|"scale"|"opacity"|"color", "x": n, "y": n, "z": n}],
-    "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg}],
+    "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg, "mx": cm, "my": cm, "mz": cm}],
+    "faceKeys": [{"t": seconds, "control": "control name", "value": 0-1}],
     "useProp": "name of a prop the target holds (made in this reply or already held), or \"\"",
     "aimKeys": [{"t": seconds, "weight": 0-1, "yaw": deg, "pitch": deg}],
     "shots": [seconds, ...],
@@ -535,11 +619,15 @@ RULES
 - Humanoid characters: prefer humanoidKeys with these rig-independent parameters (degrees unless noted). Unlisted params keep their default. Character space: +x = character's left, +y up, +z forward.
 ${params}
 - A preset (e.g. "walk") can be combined with humanoidKeys: keys override the preset's params for that clip (good for "walk while waving").
+- Hands and fingers: the finger params (lThumb, lIndex, lMiddle, lRing, lPinky, lSpread and the r... ones) curl each finger of this rig, 0 = as at rest (straight), 1 = curled into a fist. Hand shapes: fist = all 1; point = index 0, thumb 0.6, the rest 0.9; peace / V = index and middle 0 with rSpread 15, thumb 0.8, ring and little 0.9; thumbs up = thumb 0, the rest 1; open relaxed hand = all 0.15; pinch = thumb 0.55, index 0.6, the rest 0.3. Key them like any param, so a hand can change shape over time (e.g. curl the other fingers once the hand has arrived).
 - To put a hand ON the body, use handTouches instead of arm angles: the app measures this character's actual body surface and uses IK so the palm rests exactly on that spot, with the hand turned to lie flat. Spots: ${Object.entries(SPOTS).map(([k, v]) => `"${k}" = ${v.label}`).join('; ')}. A touch key has weight 0-1: ease in from 0 to 1 over about 0.4-0.7 s and back to 0 to take the hand away. While a hand's touch weight is 1, that arm's humanoidKeys are ignored. "On her lap" while standing means the "lap" spot (front of the lower belly / top of the thighs, below the belly); use "thigh" when sitting.
+- A touch can use a fingertip instead of the palm: "finger" = "index" (or "middle", "ring", "little", "thumb", "two" = index + middle), "mode" = "tip" (the fingertip points into the spot) or "pad" (the finger lies across it, like "shh" on the lips), "depth" = how far past the surface as a fraction of the finger (0 = just touching, 0.3 = the first joint in, e.g. a finger in the mouth or biting a nail). The app moves the whole arm (shoulder, elbow, wrist) with IK so that exact fingertip lands there, measured on this character, and shapes the other fingers automatically unless you key the finger params. Use "palm" (depth 0) for ordinary hand-on-body touches. To bring a hand to the face and then do something with the fingers, first ease the touch weight 0 -> 1 (the hand travels), then key the finger params or a second touch key with a different finger / depth.
+- Never animate only the wrist for a hand that should go somewhere: a hand reaching any body spot needs handTouches (or arm params: lArmRaise/lArmSwing/lElbow...), so the shoulder and elbow move too.
 - plantFeet: true keeps both feet exactly where they stand; the legs only bend to follow the hips. Use it for anything done standing or in place. Do not key leg or hips params unless the user asks for leg/hip motion, and never when they say not to move the legs.
 - Held poses (hand on lap, hands on hips, hand on chest...) should look calm: after the hands arrive, keep the body nearly still with only subtle breathing (chestPitch about ±1.5, tiny headPitch), and loop only that breathing.
 - objectKeys: position = offset from the object's current place in multiples of its size; rotation = degrees (x,y,z euler) added to its current rotation; scale = multipliers; opacity uses x (0-1); color uses x,y,z as r,g,b 0-1.
-- boneKeys rotate a bone (degrees, local x/y/z) relative to its rest pose. Use them for tails, wings, tentacles, robots, creatures.
+- boneKeys work on ANY bone listed in the bone map (face handles, hair, ears, tail, wings, clothes, breasts, extra spine bones, robot parts...), on top of the body pose at that moment. x / y / z = degrees about the CHARACTER's axes through the bone's joint: x+ swings the part forward and down (like a nod), y+ turns it toward the character's left, z+ tilts it toward the character's right. mx / my / mz = slide it in cm along the character's left / up / forward (for [move] control handles like lips and jaw; small values, about the listed range). For a model without a humanoid these are the model's own x / y / z axes. Values are offsets from where the bone would be, so 0 = unchanged. Prefer humanoidKeys / handTouches / finger params for the body, arms, hands and fingers, and faceKeys for expressions; use boneKeys for everything else, and only on bones the bone map lists (not the "driven automatically" ones).
+- faceKeys blend the face / pose controls listed for the model (shape keys like blink or smile, mouth shapes, poses saved in the file, the jaw): value 0 = off, 1 = full, mixable (e.g. "mouth_u" 0.6 + a smile 0.3). Ease them in and out over 0.15-0.4 s, and blink now and then in longer clips if there's a blink control. Mouth shapes that wrap around something: combine a rounded / pursed shape (u, o, kiss, pout) with a little jaw opening, and lip handles via boneKeys if the bone map lists them.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
 ${this.propRules()}
@@ -690,7 +778,7 @@ ${PRESET_DOC}
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys', 'useProp', 'aimKeys', 'shots', 'swings', 'vfx'],
+            required: ['name', 'target', 'duration', 'loop', 'preset', 'speed', 'intensity', 'humanoidKeys', 'handTouches', 'plantFeet', 'objectKeys', 'boneKeys', 'faceKeys', 'useProp', 'aimKeys', 'shots', 'swings', 'vfx'],
             properties: {
               name: { type: 'string' },
               target: { type: 'string' },
@@ -711,7 +799,7 @@ ${PRESET_DOC}
               },
               handTouches: {
                 type: 'array',
-                items: { type: 'object', additionalProperties: false, required: ['t', 'hand', 'spot', 'weight'], properties: { t: { type: 'number' }, hand: { type: 'string', enum: ['left', 'right'] }, spot: { type: 'string', enum: Object.keys(SPOTS) }, weight: { type: 'number' } } },
+                items: { type: 'object', additionalProperties: false, required: ['t', 'hand', 'spot', 'weight', 'finger', 'mode', 'depth'], properties: { t: { type: 'number' }, hand: { type: 'string', enum: ['left', 'right'] }, spot: { type: 'string', enum: Object.keys(SPOTS) }, weight: { type: 'number' }, finger: { type: 'string', enum: ['palm', 'index', 'middle', 'ring', 'little', 'thumb', 'two'] }, mode: { type: 'string', enum: ['tip', 'pad'] }, depth: { type: 'number' } } },
               },
               plantFeet: { type: 'boolean' },
               objectKeys: {
@@ -720,7 +808,11 @@ ${PRESET_DOC}
               },
               boneKeys: {
                 type: 'array',
-                items: { type: 'object', additionalProperties: false, required: ['t', 'bone', 'x', 'y', 'z'], properties: { t: { type: 'number' }, bone: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' } } },
+                items: { type: 'object', additionalProperties: false, required: ['t', 'bone', 'x', 'y', 'z', 'mx', 'my', 'mz'], properties: { t: { type: 'number' }, bone: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, mx: { type: 'number' }, my: { type: 'number' }, mz: { type: 'number' } } },
+              },
+              faceKeys: {
+                type: 'array',
+                items: { type: 'object', additionalProperties: false, required: ['t', 'control', 'value'], properties: { t: { type: 'number' }, control: { type: 'string' }, value: { type: 'number' } } },
               },
               useProp: { type: 'string' },
               aimKeys: {
@@ -989,6 +1081,65 @@ ${parts.join('\n\n')}`;
     return changed ? String(answer.message || 'Checked and refined the effects.').slice(0, 300) : '';
   }
 
+  checkClip(model, clip, opts) { return checkMotion(model, clip, opts); }
+
+  // Measure the clips Claude made (do the hands / fingertips reach where they should,
+  // do the hands move at all, do the bone and face names exist) and have Claude fix
+  // what's wrong. Returns a short note, or '' when nothing needed fixing.
+  async reviewMotion(prompt, results, { signal, onStatus } = {}) {
+    if (this.app.settings.get('aiReview') === false) return '';
+    const items = results.filter((r) => r.clip && r.clip.userData && r.clip.userData.spec).slice(0, 3);
+    const checked = [];
+    for (const r of items) {
+      try { checked.push({ ...r, check: checkMotion(r.model, r.clip, { prompt }) }); } catch (e) { console.warn('motion check', e); }
+    }
+    const bad = checked.filter((x) => x.check.issues.length);
+    if (!bad.length) return '';
+    if (signal?.aborted) throw Object.assign(new Error('Stopped.'), { code: 'cancelled' });
+    onStatus?.('Claude is fixing the motion…');
+    const parts = bad.map(({ model, clip, check }) => `CLIP "${clip.name}" on "${model.name}" (${clip.duration.toFixed(2)} s)
+Measured in the app:
+${check.text || '(nothing measured)'}
+PROBLEMS:
+${check.issues.map((i) => '- ' + i).join('\n')}
+Your clip JSON:
+${JSON.stringify(clip.userData.spec)}`);
+    const text = `${this.instructions(prompt)}
+
+You already answered this request; the app built your clips and measured them on the character. Fix every PROBLEM below (keep what already works) and reply with the COMPLETE corrected JSON in the same format: the fixed clips (same names), and "props": [].
+
+${parts.join('\n\n')}`;
+    const answer = await this.callClaude(text, { signal, schema: this.schema(), onText: (t) => onStatus?.(`Claude is fixing the motion… (${Math.round(t.length / 100) / 10}k chars)`) });
+    let changed = 0;
+    for (const c of (answer && answer.clips) || []) {
+      const it = bad.find((x) => x.clip.name === c.name) || (bad.length === 1 ? bad[0] : null);
+      if (!it) continue;
+      const { model } = it;
+      const entry = model.clips.find((e) => e.clip === it.clip || e.clip.uuid === it.clip.uuid);
+      try {
+        removeVFX(model, it.clip, { keepTracks: false });
+        const fresh = this.buildClip(model, model.root, c);
+        if (!fresh || !fresh.tracks.length) continue;
+        fresh.name = it.clip.name;
+        if (entry) {
+          const old = entry.clip;
+          if (entry.action) { entry.action.stop(); model.mixer.uncacheAction(old, model.root); }
+          model.mixer.uncacheClip(old);
+          entry.action = null;
+          entry.clip = fresh;
+          model.rebuildAction(entry);
+        }
+        const r = results.find((x) => x.clip === it.clip);
+        if (r) r.clip = fresh;
+        changed++;
+      } catch (e) { console.warn('rebuilding the fixed clip', e); }
+    }
+    for (const m of new Set(bad.map((x) => x.model))) this.app.emit('clips', m);
+    this.app.needsEval = true;
+    this.app.viewport?.requestRender();
+    return changed ? String((answer && answer.message) || 'Measured the motion and fixed it.').slice(0, 300) : '';
+  }
+
   reviewSchema() {
     return { type: 'object', additionalProperties: false, required: ['message', 'props'], properties: { message: { type: 'string' }, props: { type: 'array', items: this.propItemSchema() } } };
   }
@@ -1139,21 +1290,23 @@ ${parts.join('\n\n')}`;
     const tracks = [];
     // humanoid
     const hKeys = (c.humanoidKeys || []).filter((k) => k && Array.isArray(k.values)).sort((a, b) => a.t - b.t);
-    const tKeys = (c.handTouches || []).filter((k) => k && SPOTS[k.spot] && (k.hand === 'left' || k.hand === 'right')).sort((a, b) => a.t - b.t);
+    const tKeys = (c.handTouches || []).filter((k) => k && (SPOTS[k.spot] || SPOT_ALIAS[k.spot]) && (k.hand === 'left' || k.hand === 'right')).map((k) => ({ ...k, spot: SPOT_ALIAS[k.spot] || k.spot })).sort((a, b) => a.t - b.t);
+    const how = (k) => ({ finger: ['index', 'middle', 'ring', 'little', 'thumb', 'two'].includes(k.finger) ? k.finger : 'palm', mode: k.mode === 'pad' ? 'pad' : 'tip', depth: THREE.MathUtils.clamp(Number(k.depth) || 0, 0, 0.8) });
     const touchAt = (hand, t) => {
       const ks = tKeys.filter((k) => k.hand === hand);
       if (!ks.length) return null;
       const w = (k) => THREE.MathUtils.clamp(Number(k.weight ?? 1), 0, 1);
-      if (t <= ks[0].t) return { spot: ks[0].spot, weight: ks.length > 1 || ks[0].t <= 0 ? w(ks[0]) : w(ks[0]) * (ks[0].t > 0 ? Math.min(1, t / ks[0].t) : 1) };
-      if (t >= ks[ks.length - 1].t) return { spot: ks[ks.length - 1].spot, weight: w(ks[ks.length - 1]) };
+      if (t <= ks[0].t) return { spot: ks[0].spot, ...how(ks[0]), weight: ks.length > 1 || ks[0].t <= 0 ? w(ks[0]) : w(ks[0]) * (ks[0].t > 0 ? Math.min(1, t / ks[0].t) : 1) };
+      if (t >= ks[ks.length - 1].t) return { spot: ks[ks.length - 1].spot, ...how(ks[ks.length - 1]), weight: w(ks[ks.length - 1]) };
       let i = 0;
       while (i < ks.length - 2 && ks[i + 1].t <= t) i++;
       const a = ks[i], b = ks[i + 1];
       const u = (t - a.t) / Math.max(1e-6, b.t - a.t);
       const e = u * u * (3 - 2 * u);
-      if (a.spot === b.spot) return { spot: a.spot, weight: w(a) + (w(b) - w(a)) * e };
-      // moving from one spot to another: lift off, then land
-      return e < 0.5 ? { spot: a.spot, weight: w(a) * (1 - 2 * e) } : { spot: b.spot, weight: w(b) * (2 * e - 1) };
+      const ha = how(a), hb = how(b);
+      if (a.spot === b.spot && ha.finger === hb.finger && ha.mode === hb.mode) return { spot: a.spot, ...ha, depth: ha.depth + (hb.depth - ha.depth) * e, weight: w(a) + (w(b) - w(a)) * e };
+      // moving from one spot (or grip) to another: lift off, then land
+      return e < 0.5 ? { spot: a.spot, ...ha, weight: w(a) * (1 - 2 * e) } : { spot: b.spot, ...hb, weight: w(b) * (2 * e - 1) };
     };
     // a held prop: aim, shots, swings
     let driver = null, heldProp = null;
@@ -1186,11 +1339,15 @@ ${parts.join('\n\n')}`;
         });
       }
     }
+    const bPlan = boneKeyPlan(model, c.boneKeys);
+    let bakedBones = false;
     if (rig && (hKeys.length || tKeys.length || (preset && HUMANOID[preset]) || driver)) {
+      bakedBones = bPlan.bones.length > 0;
       const defaults = defaultParams();
       const presetM = preset && HUMANOID[preset];
       const cycle = presetM ? presetM.cycle / speed : duration;
       const keyed = new Set(hKeys.flatMap((k) => k.values.map((v) => v.param)));
+      const fingersKeyed = { left: ['lThumb', 'lIndex', 'lMiddle', 'lRing', 'lPinky', 'lSpread'].some((k) => keyed.has(k)), right: ['rThumb', 'rIndex', 'rMiddle', 'rRing', 'rPinky', 'rSpread'].some((k) => keyed.has(k)) };
       const valueAt = (param, t) => {
         // smooth interpolation between keys for one param
         const ks = hKeys.filter((k) => k.values.some((v) => v.param === param));
@@ -1216,10 +1373,12 @@ ${parts.join('\n\n')}`;
         const lt = touchAt('left', t), rt = touchAt('right', t);
         if (lt) p.lTouch = lt;
         if (rt) p.rTouch = rt;
+        if (fingersKeyed.left) p.lFingersSet = true;
+        if (fingersKeyed.right) p.rFingersSet = true;
         if (c.plantFeet) p.plantFeet = true;
         if (driver) driver.apply(t, p);
         return paramsToSpec(p);
-      }, driver ? driver.fps : 30);
+      }, driver ? driver.fps : 30, { post: bPlan.bones.length ? boneKeyPost(model, rig, bPlan) : null });
       if (driver && driver.shots.length) addShotEffects(model, heldProp, clip, driver.shots);
       tracks.push(...clip.tracks);
     } else if (preset && preset.startsWith('object:') && OBJECT[preset.slice(7)]) {
@@ -1260,30 +1419,21 @@ ${parts.join('\n\n')}`;
       if (ck.length && mat && mat.color) tracks.push(new THREE.ColorKeyframeTrack(object.uuid + prefix + 'color', ck.map((k) => k.t), ck.flatMap((k) => [k.x, k.y, k.z].map((v) => THREE.MathUtils.clamp(v, 0, 1)))));
       // object keys on a target without material: apply to child meshes
     }
-    // bone keys
-    const bKeys = (c.boneKeys || []).filter((k) => k && k.bone).sort((a, b) => a.t - b.t);
-    if (bKeys.length) {
-      const byBone = new Map();
-      for (const k of bKeys) {
-        const bone = findBone(model, k.bone);
-        if (!bone) continue;
-        if (!byBone.has(bone)) byBone.set(bone, []);
-        byBone.get(bone).push(k);
-      }
-      for (const [bone, ks] of byBone) {
-        const rest = model.rest.get(bone)?.q || bone.quaternion.clone();
-        let prev = null;
-        const vals = ks.flatMap((k) => {
-          const q = rest.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(k.x), THREE.MathUtils.degToRad(k.y), THREE.MathUtils.degToRad(k.z))));
-          if (prev && prev.dot(q) < 0) q.set(-q.x, -q.y, -q.z, -q.w);
-          prev = q;
-          return q.toArray();
-        });
-        tracks.push(new THREE.QuaternionKeyframeTrack(bone.uuid + '.quaternion', ks.map((k) => k.t), vals));
-      }
+    // bone keys (a humanoid's are baked into its pose above)
+    if (bPlan.bones.length && !bakedBones) tracks.push(...boneKeyTracks(model, bPlan, duration, 30, object === model.root ? model.humanoid : null));
+    // face: shape keys, the file's poses, the jaw
+    let face = { tracks: [], unknown: [], used: [] };
+    if (Array.isArray(c.faceKeys) && c.faceKeys.length) {
+      face = faceTracks(model, c.faceKeys, duration);
+      const taken = new Set(face.tracks.map((t) => t.name));
+      for (let i = tracks.length - 1; i >= 0; i--) if (taken.has(tracks[i].name)) tracks.splice(i, 1);
+      tracks.push(...face.tracks);
     }
     const clip = new THREE.AnimationClip(name, duration, tracks);
     clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined, swings: driver ? driver.swings.map((w) => ({ ...w })) : [], shots: driver ? driver.shots.slice() : [] };
+    // what the self-check needs to know about the request
+    clip.userData.spec = JSON.parse(JSON.stringify(c));
+    clip.userData.plan = { touches: tKeys.map((k) => ({ t: Number(k.t), hand: k.hand, spot: k.spot, weight: Number(k.weight ?? 1), ...how(k) })), unknownBones: bPlan.unknown, keyedBones: bPlan.bones.map((b) => b.bone.name), unknownFace: face.unknown, face: face.used };
     // effects follow the finished motion
     if (Array.isArray(c.vfx) && c.vfx.length && model.adopt) {
       const { report } = bakeVFX(model, clip, c.vfx, { prop: heldProp || undefined, swings: clip.userData.swings, shots: clip.userData.shots });
@@ -1291,20 +1441,6 @@ ${parts.join('\n\n')}`;
     }
     return clip;
   }
-}
-
-function findBone(model, name) {
-  const raw = String(name || '').trim();
-  // the AI may copy "足.L (leg (thigh).L)" or just the translation
-  const bare = raw.replace(/\s*\(.*\)\s*$/, '');
-  for (const c of [raw, bare]) {
-    const n = c.toLowerCase();
-    const b = model.bones.find((x) => x.name === c) || model.bones.find((x) => x.name.toLowerCase() === n);
-    if (b) return b;
-  }
-  const n = bare.toLowerCase(), nr = raw.toLowerCase();
-  return model.bones.find((b) => { const t = translateName(b.name); return t && (t.toLowerCase() === nr || t.toLowerCase() === n); })
-    || model.bones.find((b) => b.name.toLowerCase().endsWith(n) || b.name.toLowerCase().replace(/^.*[:|]/, '') === n) || null;
 }
 
 export function parseJSONLoose(text) {

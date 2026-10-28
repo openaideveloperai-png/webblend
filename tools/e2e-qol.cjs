@@ -58,6 +58,30 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   await page.click('.menu-btn:has-text("File")');
   await page.click('.dd-item:has-text("Export for Roblox")');
   ok('export dialog opens on the platform used last', (await page.getAttribute('[data-platform="unreal"]', 'aria-pressed')) === 'true');
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => document.querySelectorAll('.modal-back').forEach((m) => m.remove()));
+  // poses saved in a file: single-frame actions become poses (not zero-length clips), with sliders
+  const poses = await page.evaluate(() => {
+    const a = window.webblend; const m = a.models[0];
+    for (const e of [...m.clips]) m.removeClip(e);
+    const Clip = a.ai.runOffline('wave').results[0].clip.constructor;
+    const head = m.root.getObjectByName('Head'), idx = m.root.getObjectByName('LeftHandIndex1');
+    const s = Math.sin(0.2), c = Math.cos(0.2);
+    m.addClip(Clip.parse({ name: 'mouth_o', duration: 0, tracks: [{ name: head.uuid + '.quaternion', type: 'quaternion', times: [0], values: [s, 0, 0, c] }, { name: idx.uuid + '.quaternion', type: 'quaternion', times: [0], values: idx.quaternion.toArray() }] }), { play: false });
+    m.addClip(Clip.parse({ name: 'still_pose', duration: 0, tracks: [{ name: head.uuid + '.quaternion', type: 'quaternion', times: [0], values: head.quaternion.toArray() }] }), { play: false });
+    const m2 = a.duplicateModel(m); // goes through the same path as opening a file
+    a.select(m2.root, m2);
+    return { poses: (m2.poses || []).map((p) => `${p.name}/${p.deltas.length}`), clips: m2.clips.map((e) => e.clip.name), notes: m2.importNotes || [] };
+  });
+  ok('single-frame actions become poses; a copy of the rest pose is left out', JSON.stringify(poses.poses) === '["mouth_o/1"]' && poses.clips.length === 0 && /under Animations → Poses/.test(poses.notes.join(' ')) && /"still_pose"/.test(poses.notes.join(' ')), JSON.stringify(poses));
+  await page.click('.tab:has-text("Animations")');
+  await page.waitForSelector('.sec-t:has-text("Poses saved in the file")', { timeout: 5000 });
+  await page.evaluate(() => { const r = document.querySelector('.pose-row input[type=range]'); r.value = '1'; r.dispatchEvent(new Event('input', { bubbles: true })); });
+  const turned = await page.evaluate(() => { const a = window.webblend; const m = a.selection.model; const h = m.root.getObjectByName('Head'); return +(2 * Math.acos(Math.min(1, Math.abs(h.quaternion.w))) * 57.3).toFixed(1); });
+  ok('the pose slider poses the bones', Math.abs(turned - 22.9) < 0.5, turned + '°');
+  await page.click('button:has-text("Key this mix")');
+  const keyed = await page.evaluate(() => { const a = window.webblend; const m = a.selection.model; const h = m.root.getObjectByName('Head'); const e = m.activeClip; return e ? e.clip.tracks.filter((t) => t.name.startsWith(h.uuid)).length : 0; });
+  ok('"Key this mix" keys it into the active clip', keyed >= 1, keyed);
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
   console.log(fails ? `${fails} FAILED` : 'ALL QOL TESTS OK');

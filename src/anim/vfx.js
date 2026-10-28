@@ -175,7 +175,10 @@ function sampler(model, clip) {
   const saved = [];
   root.traverse((o) => saved.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()]));
   // start every frame from the rest pose (other clips don't leak in)
-  const base = saved.map(([o, p, q, sc]) => { const r = o !== root && model.rest && model.rest.get(o); return r ? [o, r.p.clone(), r.q.clone(), r.s.clone()] : [o, p.clone(), q.clone(), sc.clone()]; });
+  // (not the nodes the clip animates: three.js only writes a value when it changed since
+  // the last evaluation, so resetting those would lose poses the clip holds still)
+  const animated = new Set(clip.tracks.map((t) => t.name.slice(0, t.name.indexOf('.'))));
+  const base = saved.filter(([o]) => !animated.has(o.uuid) && !animated.has(o.name)).map(([o, p, q, sc]) => { const r = o !== root && model.rest && model.rest.get(o); return r ? [o, r.p.clone(), r.q.clone(), r.s.clone()] : [o, p.clone(), q.clone(), sc.clone()]; });
   const mixer = new THREE.AnimationMixer(root);
   mixer.clipAction(clip).play();
   const inv = new THREE.Matrix4();

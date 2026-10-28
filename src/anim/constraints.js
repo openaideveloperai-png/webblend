@@ -757,7 +757,9 @@ export function bakeConstraints(model, clip, fps = 30) {
   const action = mixer.clipAction(clip, root);
   action.play();
   const animated = new Set(clip.tracks.map((t) => t.name.slice(0, t.name.indexOf('.'))));
-  const base = new Map(bones.map((b) => [b, [b.position.clone(), b.quaternion.clone(), b.scale.clone()]]));
+  // bones the clip animates are left to the mixer (three.js writes a value only when it
+  // changed, so resetting them would lose held poses); the solver restores its own writes
+  const base = new Map(bones.filter((b) => !animated.has(b.uuid) && !animated.has(b.name)).map((b) => [b, [b.position.clone(), b.quaternion.clone(), b.scale.clone()]]));
   const n = Math.max(2, Math.round(clip.duration * fps) + 1);
   const times = new Float32Array(n);
   const data = new Map(bones.map((b) => [b, { p: new Float32Array(n * 3), q: new Float32Array(n * 4), s: new Float32Array(n * 3) }]));

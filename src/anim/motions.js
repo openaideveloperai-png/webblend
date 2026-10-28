@@ -371,8 +371,25 @@ export function bakeHumanoid(rig, motionKey, opts = {}) {
     }
     if (touch) {
       const w = ease(Math.min(1, t / Math.max(1e-3, touchIn)));
-      if (touch.left) p.lTouch = { spot: touch.left, weight: w };
-      if (touch.right) p.rTouch = { spot: touch.right, weight: w };
+      // a fingertip goes to the spot first, then in (a finger slipping between the lips)
+      const tp = (v) => (typeof v === 'string' ? { spot: v, weight: w } : { ...v, weight: w, depth: (v.depth || 0) * ease(THREE.MathUtils.clamp((t - touchIn * 0.9) / 0.5, 0, 1)) });
+      if (touch.left) p.lTouch = tp(touch.left);
+      if (touch.right) p.rTouch = tp(touch.right);
+    }
+    if (opts.hands) {
+      // hand shapes ("thumbs up", "peace sign", "fist") ease in with the motion
+      const w = ease(Math.min(1, t / Math.max(1e-3, Math.min(0.5, duration * 0.3))));
+      for (const [side, sh] of Object.entries(opts.hands)) {
+        const s = side === 'left' ? 'l' : 'r';
+        if (!sh) continue;
+        p[s + 'Thumb'] = sh.thumb * w; p[s + 'Index'] = sh.index * w; p[s + 'Middle'] = sh.middle * w; p[s + 'Ring'] = sh.ring * w; p[s + 'Pinky'] = sh.little * w; p[s + 'Spread'] = (sh.spread || 0) * w;
+        p[s + 'FingersSet'] = true;
+        // shown to someone (thumbs up, peace sign): bring the hand up in front
+        if (opts.present && opts.present.includes(side)) {
+          p[s + 'ArmSwing'] = (p[s + 'ArmSwing'] || 0) + 28 * w; p[s + 'ArmRaise'] = Math.max(p[s + 'ArmRaise'] || 0, 14 * w + (p[s + 'ArmRaise'] || 0) * (1 - w));
+          p[s + 'Elbow'] = Math.max(p[s + 'Elbow'] || 0, 105 * w); p[s + 'ElbowUp'] = 0.35 * w;
+        }
+      }
     }
     return paramsToSpec(p);
   };
