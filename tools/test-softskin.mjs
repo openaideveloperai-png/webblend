@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeMannequin } from '../src/scene/primitives.js';
 import { detectHumanoid, defaultParams, paramsToSpec } from '../src/anim/humanoid.js';
-import { softSkin, updateSoftSkin, skinContacts, split, hertzOut } from '../src/anim/softskin.js';
+import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial } from '../src/anim/softskin.js';
 import { faceLandmarks } from '../src/anim/landmarks.js';
 import { mouthy } from './test-softlips.mjs';
 
@@ -259,6 +259,39 @@ function leftInside(s) {
   poseT(poke); for (let i = 0; i < 10; i++) s3.update({ dt: 1 / 60 });
   poseT(free); s3.update({ dt: 0 });
   ok('scrubbing (no time step) shows the pose exactly: nothing left from before', shownMax() < 1e-4, `${(shownMax() * 1000).toFixed(3)} mm`);
+}
+
+// ---- not everything on the body is skin: hair weighted to the head never dents, and a thin
+// piece lying on the skin (a detail layer, an accessory) follows the skin under it instead
+// of denting on its own (separately it jumped about)
+{
+  const F = fleshy();
+  const skel = F.body.skeleton, bi = new Map(skel.bones.map((b, i) => [b.name, i]));
+  const weighted = (g, bone) => { const n = g.attributes.position.count, k = bi.get(bone); g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(n * 4).map((_, i) => (i % 4 ? 0 : k)), 4)); g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 ? 0 : 1)), 4)); return g; };
+  // a patch of belly skin, 3 mm out from the body
+  const patch = new THREE.CapsuleGeometry(0.11, 0.36, 8, 40, 28); patch.scale(1.35, 1, 0.85); patch.translate(0, 1.15, 0);
+  const pp = patch.attributes.position, pn = patch.attributes.normal, keep = [];
+  for (let i = 0; i < pp.count; i++) { if (pp.getZ(i) > 0.05 && Math.abs(pp.getY(i) - 1.05) < 0.12) keep.push(i); pp.setXYZ(i, pp.getX(i) + pn.getX(i) * 0.003, pp.getY(i) + pn.getY(i) * 0.003, pp.getZ(i) + pn.getZ(i) * 0.003); }
+  const ix = patch.index.array, tri = [];
+  const kept = new Set(keep);
+  for (let t = 0; t < ix.length; t += 3) if (kept.has(ix[t]) && kept.has(ix[t + 1]) && kept.has(ix[t + 2])) tri.push(ix[t], ix[t + 1], ix[t + 2]);
+  patch.setIndex(tri);
+  const over = new THREE.SkinnedMesh(weighted(patch, 'Spine1'), new THREE.MeshStandardMaterial({ name: 'body_detail', color: 0xe9c3b0 })); over.name = 'Overlay';
+  const hairG = new THREE.SphereGeometry(0.115, 24, 16); hairG.translate(0, 1.68, 0);
+  const hair = new THREE.SkinnedMesh(weighted(hairG, 'Head'), new THREE.MeshStandardMaterial({ name: 'hair', color: 0x332211 })); hair.name = 'Hair';
+  for (const m of [over, hair]) { F.root.add(m); F.root.updateMatrixWorld(true); m.bind(skel, m.matrixWorld); F.model.skinned.push(m); }
+  F.model.nodeCount += 2;
+  const s4 = softSkin(F.model);
+  const names = { hair: true, HairBack: true, eye_L: true, Eyelash: true, '髪': true, horn: true, body_detail: false, face: false, body: false, chat_skin: false, Hatsune_body: false, body_socks: false };
+  const wrong = Object.entries(names).filter(([n, v]) => notSkinMaterial(n) !== v).map(([n]) => n);
+  ok('materials: hair, eyes, horns aren\'t skin; "detail", "chat" or "Hatsune" don\'t trip it', !wrong.length, wrong.join(', '));
+  ok('hair weighted to the head isn\'t skin; a thin piece on the skin follows it', !s4.meshes.includes(hair) && s4.followerMeshes.includes('Overlay'), `skin meshes: ${s4.meshes.map((m) => m.name).join(', ')}; following: ${s4.followerMeshes.join(', ')}`);
+  F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), lArmRaise: 90, rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.6 } })));
+  F.root.updateMatrixWorld(true);
+  s4.update({ force: true });
+  const maxOff = (m) => { const a = m.geometry.attributes.contactOffset; let x = 0; if (a) for (let k = 0; k < a.array.length; k += 3) x = Math.max(x, Math.hypot(a.array[k], a.array[k + 1], a.array[k + 2])); return x; };
+  const bodyD = maxOff(F.body), overD = maxOff(over);
+  ok('...pressed, the piece on the skin sinks with the skin under it', bodyD > 0.003 && overD > bodyD * 0.6 && overD <= bodyD * 1.01, `body ${(bodyD * 1000).toFixed(1)} mm, piece on it ${(overD * 1000).toFixed(1)} mm`);
 }
 
 // ---- face spots measured on the mesh: the cheek is on the cheek
