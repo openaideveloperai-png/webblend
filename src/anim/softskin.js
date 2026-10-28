@@ -549,6 +549,10 @@ class SoftSkin {
     for (const w of touched) hi[fillAt[hk[w]]++] = w;
     const soft = Math.min(2, Math.max(0.2, this.model.softSkinSoftness ?? 1));
     const hard = [];
+    // which vertices this solve has pushed so far (not the last solve's: that made every
+    // other frame skip the fingertips, and the dent jumped back while still pressed)
+    const hardTag = this.hardTag || (this.hardTag = new Uint32Array(N));
+    const htag = (this.htag = (this.htag || 0) + 1);
     let maxLeft = 0;
     const contact = this.contact || (this.contact = new Float32Array(32 * 32));
     const contactLeft = this.contactLeft || (this.contactLeft = new Float32Array(32 * 32));
@@ -601,6 +605,7 @@ class SoftSkin {
       H[w * 3] = mx * push; H[w * 3 + 1] = my * push; H[w * 3 + 2] = mz * push;
       this.left[w] = left;
       hard.push(w);
+      hardTag[w] = htag;
       const ck = gw < grp[bu] ? gw * 32 + grp[bu] : grp[bu] * 32 + gw;
       if (pen > contact[ck]) contact[ck] = pen;
       if (left > contactLeft[ck]) contactLeft[ck] = left;
@@ -653,10 +658,10 @@ class SoftSkin {
         if (bw < 0 || best <= Math.max(0.0005, this.edge * 0.03)) continue;
         const cap = this.maxDepth[bw] * soft;
         const push = split(best, this.soft[bw], cap, 0.25, r * 0.15);
-        const prev = this.pushed(bw) ? len3(H[bw * 3], H[bw * 3 + 1], H[bw * 3 + 2]) : 0;
+        const prev = hardTag[bw] === htag ? len3(H[bw * 3], H[bw * 3 + 1], H[bw * 3 + 2]) : 0;
         if (push > prev) {
           H[bw * 3] = -Nn[bw * 3] * push; H[bw * 3 + 1] = -Nn[bw * 3 + 1] * push; H[bw * 3 + 2] = -Nn[bw * 3 + 2] * push;
-          if (!hard.includes(bw)) hard.push(bw);
+          if (hardTag[bw] !== htag) { hardTag[bw] = htag; hard.push(bw); }
           this.press[bw] = cap > 0 ? Math.min(1, push / cap) : 1;
         }
         const left = Math.max(0, best - cap - r * 0.15);

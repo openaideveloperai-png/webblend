@@ -117,8 +117,11 @@ export function commit(mesh) {
     const A = at.array;
     for (let k = lo * 3, e = (hi + 1) * 3; k < e; k++) { let s = 0; for (let j = 0; j < n; j++) s += arrs[j][k]; A[k] = s; }
     for (const l of ls) { l.plo = Infinity; l.phi = -1; }
-    at.clearUpdateRanges?.();
-    at.addUpdateRange?.(lo * 3, (hi - lo + 1) * 3);
+    // add to what's waiting for the GPU (the lips and the skin can both commit in one
+    // frame: clearing here dropped the other's change); three.js clears them on upload
+    if (at.addUpdateRange) {
+      if ((at.updateRanges || []).length > 8) { at.clearUpdateRanges(); at.addUpdateRange(0, A.length); } else at.addUpdateRange(lo * 3, (hi - lo + 1) * 3);
+    }
     at.needsUpdate = true;
   }
 }

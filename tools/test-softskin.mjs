@@ -213,6 +213,24 @@ function leftInside(s) {
   ok('fast enough to run live', ms < 25, `${ms.toFixed(1)} ms per solve, ${s.N} vertices`);
 }
 
+// ---- a fingertip held in the skin while the body moves slightly: its dent stays (it used
+// to skip the fingertip every other frame, and the skin jumped back while still pressed)
+{
+  const F = fleshy();
+  const s2 = softSkin(F.model);
+  const dents = [];
+  for (let i = 0; i < 10; i++) {
+    F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), lArmRaise: 4 + i * 0.05, rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.2 } })));
+    F.root.updateMatrixWorld(true);
+    s2.update();
+    let mx = 0;
+    for (const w of s2.spreadSet || []) if (s2.groups[s2.group[w]] === 'torso' && s2.src[w] >= 0 && s2.clusters[s2.src[w]].center) mx = Math.max(mx, Math.hypot(s2.D[w * 3], s2.D[w * 3 + 1], s2.D[w * 3 + 2]));
+    dents.push(mx);
+  }
+  const lo = Math.min(...dents), hi = Math.max(...dents);
+  ok('a fingertip held in the belly while the body moves a little: its dent stays (no jumping back every other frame)', lo > 0.002 && hi - lo < 0.15 * hi, dents.map((d) => (d * 1000).toFixed(1)).join(' ') + ' mm');
+}
+
 // ---- face spots measured on the mesh: the cheek is on the cheek
 {
   const { model: m2 } = mouthy();
