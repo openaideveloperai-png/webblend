@@ -267,6 +267,19 @@ export function initProperties(app, ui) {
         h('div', { class: 'field' }, h('label', { title: 'How far the lips give way around what presses them' }, 'Softness'), range, val),
         h('div', { class: 'hint' }, 'The lips wrap, squish and curve around the tongue, a finger or anything held to the mouth, live (like Shrinkwrap + Smooth on a lip vertex group). They part only where it passes.')));
     }
+    // soft skin: body parts pressing each other dent and bulge instead of clipping
+    if (obj === model.root && model.humanoid && model.skinned && model.skinned.length) {
+      const on = h('input', { type: 'checkbox', checked: model.softSkin !== false || undefined, 'aria-label': 'Soft skin' });
+      const range = h('input', { type: 'range', min: 0.3, max: 2, step: 0.05, value: model.softSkinSoftness ?? 1, 'aria-label': 'Skin softness' });
+      const val = h('span', { class: 'val' }, fmt(model.softSkinSoftness ?? 1, 2));
+      const redraw = () => { app.needsEval = true; app.viewport.requestRender(); };
+      on.addEventListener('change', () => { model.softSkin = on.checked; if (!on.checked && model._skin) model._skin.clear(); else if (model._skin) model._skin.update({ force: true }); redraw(); });
+      range.addEventListener('input', () => { model.softSkinSoftness = parseFloat(range.value); val.textContent = fmt(model.softSkinSoftness, 2); if (model._skin) model._skin.update({ force: true }); redraw(); });
+      root.append(sec('Soft skin',
+        h('div', { class: 'field' }, h('label', {}, 'Dent'), h('label', { class: 'toggle' }, on)),
+        h('div', { class: 'field' }, h('label', { title: 'How far the flesh gives way where body parts press together' }, 'Softness'), range, val),
+        h('div', { class: 'hint' }, 'Where body parts press together (an arm against the side, a hand on the cheek, fingers pinching, thighs) the skin dents and bulges instead of clipping, up to how much flesh there is over the bone. Live, like a soft body.')));
+    }
     const holders = app.models.filter((m) => m !== model && m.humanoid);
     if (obj === model.root && !model.humanoid && !obj.isLight && !obj.isCamera && model.meshes.length && holders.length) {
       const who = h('select', { 'aria-label': 'Character' }, ...holders.map((m, i) => h('option', { value: String(i) }, m.name)));

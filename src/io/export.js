@@ -1,7 +1,7 @@
 // Exports: GLB (models + animations), animation JSON, screenshots, video.
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
-import { detachSoftLips } from '../anim/softlips.js';
+import { detachOffsets } from '../anim/offsets.js';
 import { zipSync } from 'three/examples/jsm/libs/fflate.module.js';
 import { clipWithNames, clipWithUuids } from '../anim/clips.js';
 import { bakeConstraints } from '../anim/constraints.js';
@@ -89,7 +89,7 @@ export async function exportGLB(app, models, filename) {
     }
     const exporter = new GLTFExporter();
     // the live soft-lips offsets aren't part of the model
-    restoreSoft = detachSoftLips(models);
+    restoreSoft = detachOffsets(models);
     const result = await exporter.parseAsync(group, { binary: true, animations: clips, onlyVisible: true, includeCustomExtensions: false, maxTextureSize: app.settings.maxTexture() });
     const blob = new Blob([result], { type: 'model/gltf-binary' });
     await saveFile(blob, (filename || safeName(group.name)) + '.glb', app);

@@ -9,8 +9,8 @@ export const QUALITY_PRESETS = {
   ultra: { label: 'Ultra', renderScale: 1, maxPixelRatio: 2, antialias: true, shadows: true, shadowSize: 2048, env: true, maxTexture: 4096, fpsCap: 0, softShadows: true },
   high: { label: 'High', renderScale: 1, maxPixelRatio: 1.5, antialias: true, shadows: true, shadowSize: 1024, env: true, maxTexture: 2048, fpsCap: 0, softShadows: true },
   medium: { label: 'Medium', renderScale: 1, maxPixelRatio: 1, antialias: true, shadows: true, shadowSize: 1024, env: true, maxTexture: 2048, fpsCap: 60, softShadows: false },
-  low: { label: 'Low', renderScale: 0.8, maxPixelRatio: 1, antialias: false, shadows: false, shadowSize: 512, env: false, maxTexture: 1024, fpsCap: 60, softShadows: false },
-  potato: { label: 'Potato', renderScale: 0.55, maxPixelRatio: 1, antialias: false, shadows: false, shadowSize: 256, env: false, maxTexture: 512, fpsCap: 30, softShadows: false },
+  low: { label: 'Low', renderScale: 0.8, maxPixelRatio: 1, antialias: false, shadows: false, shadowSize: 512, env: false, maxTexture: 1024, fpsCap: 60, softShadows: false, softSkin: true },
+  potato: { label: 'Potato', renderScale: 0.55, maxPixelRatio: 1, antialias: false, shadows: false, shadowSize: 256, env: false, maxTexture: 512, fpsCap: 30, softShadows: false, softSkin: false },
 };
 
 export const DEFAULTS = {

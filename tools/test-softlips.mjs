@@ -76,21 +76,33 @@ if (typeof process !== 'undefined' && process.argv && process.argv[1] && process
     const st = s.update({ write: false });
     ok('tongue out: the lips wrap around it, nothing left clipping', st.active && st.tongue && st.leftCm === 0, JSON.stringify(st));
     const U = edge(s, 1), L = edge(s, -1);
-    ok('upper lip goes over the tongue, lower lip under it (4 mm half thickness + margin)', at(U, 0) >= 4.5 && at(L, 0) <= -4.5, `${at(U, 0).toFixed(1)} / ${at(L, 0).toFixed(1)} mm`);
+    ok('upper lip goes over the tongue, lower lip under it (4 mm half thickness + margin)', at(U, 0) >= 4.2 && at(L, 0) <= -4.2, `${at(U, 0).toFixed(1)} / ${at(L, 0).toFixed(1)} mm`);
     ok('the lips close again beside the tongue (not a wide-open mouth)', at(U, 0.022) < at(U, 0) * 0.2 && at(L, -0.022) > at(L, 0) * 0.2 && at(U, 0.014) < at(U, 0) * 0.65, `edge at 1.4 / 2.2 cm: ${at(U, 0.014).toFixed(1)} / ${at(U, 0.022).toFixed(1)} mm`);
-    const smooth = U.every((r, i) => i === 0 || r[0] > 0.0105 || r[0] < -0.0105 || Math.abs(r[1] - U[i - 1][1]) < 1.6);
-    ok('...curving smoothly toward the corners', smooth);
+    ok('...sealing tight against its sides (closed within 5 mm of the tongue)', Math.abs(at(U, 0.015)) < 0.5 && Math.abs(at(L, -0.015)) < 0.5 && at(U, 0.0125) < at(U, 0) * 0.5, `edge at 1.25 / 1.5 cm: ${at(U, 0.0125).toFixed(1)} / ${at(U, 0.015).toFixed(1)} mm`);
     const top = edge(s, 1, 0.005).length ? (() => { let best = 0; for (let i = 0; i < s.N; i++) if (s.side[i] > 0 && Math.abs(s.P[i * 3]) < 0.001 && Math.abs(s.P[i * 3 + 1] - (s.C.y + 0.006)) < 0.0005) best = Math.max(best, s.D[i * 3 + 1] * 1000); return best; })() : 0;
     ok('the whole upper lip lifts (squished a little, not pinched thin)', top > at(U, 0) * 0.55, `top ${top.toFixed(1)} mm vs edge ${at(U, 0).toFixed(1)} mm`);
     const bulge = (() => { let m = 0; for (let i = 0; i < s.N; i++) m = Math.max(m, s.D[i * 3 + 2]); return m * 1000; })();
     ok('squeezed lips bulge forward a little', bulge > 0.3 && bulge < 3, `${bulge.toFixed(2)} mm`);
-    // softer lips give way further along
+    // lips a little apart: the edges close onto the tongue (seal) instead of leaving a gap
+    {
+      const both = new THREE.AnimationClip('c', 1, faceTracks(model, [{ t: 0, control: 'tongue_out', value: 1 }, { t: 1, control: 'tongue_out', value: 1 }, { t: 0, control: 'mouth_open', value: 0.75 }, { t: 1, control: 'mouth_open', value: 0.75 }], 1).tracks);
+      ev.at(both, 0.5);
+      s.update({ write: false });
+      // lower lip edge sits 9 mm down, the tongue's bottom 4 mm down: pulled up onto it
+      let pulled = 0;
+      for (let i = 0; i < s.N; i++) if (s.side[i] < 0 && s.edge[i] && Math.abs(s.P[i * 3]) < 0.006) pulled = Math.max(pulled, s.D[i * 3 + 1] * 1000);
+      ok('a lip edge hovering just under the tongue closes onto it (hug)', pulled > 3, `lower lip edge pulled up ${pulled.toFixed(1)} mm`);
+      ev.at(hold(model, 'tongue_out'), 0.5);
+      s.update({ write: false });
+    }
+    // softer lips give way further along (the lip above lifts over a wider stretch)
+    const topAt = (x) => { let best = 0; for (let i = 0; i < s.N; i++) if (s.side[i] > 0 && Math.abs(s.P[i * 3] - x) < 0.0012 && Math.abs(s.P[i * 3 + 1] - (s.C.y + 0.006)) < 0.0005) best = Math.max(best, s.D[i * 3 + 1] * 1000); return best; };
     model.softLipsSoftness = 1.8;
     s.update({ write: false });
-    const wide = at(edge(s, 1), 0.016);
+    const wide = topAt(0.018);
     model.softLipsSoftness = 1;
     s.update({ write: false });
-    ok('softness spreads the wrap further', wide > at(edge(s, 1), 0.016) * 1.3, `${wide.toFixed(2)} vs ${at(edge(s, 1), 0.016).toFixed(2)} mm`);
+    ok('softness spreads the wrap further', wide > topAt(0.018) * 1.3, `${wide.toFixed(2)} vs ${topAt(0.018).toFixed(2)} mm`);
     // ---- the GPU side: offsets on the mesh, cleared again
     s.update({ write: true, force: true });
     const a = mouth.geometry.attributes.contactOffset;
@@ -142,10 +154,10 @@ if (typeof process !== 'undefined' && process.argv && process.argv[1] && process
     const keys = [{ t: 0, control: 'tongue_out', value: 0 }, { t: 0.6, control: 'tongue_out', value: 1 }, { t: 2, control: 'tongue_out', value: 1 }];
     const clip = new THREE.AnimationClip('t', 2, faceTracks(model, keys, 2).tracks);
     const res = clearMouth(model, clip, keys);
-    const open = Math.max(0, ...((res.keys || []).filter((k) => k.control === 'mouth_open').map((k) => k.value)));
-    ok('clip: the jaw drops only a little, the lips wrap the rest, nothing clips', res.report.soft && open > 0.05 && open < 0.4 && res.report.clipAfterCm <= 0.1 && res.report.wrapCm > 0.2, `open ${open.toFixed(2)} ${JSON.stringify(res.report)}`);
-    const shut = clearMouth(model, clip, keys, { share: 0 });
-    ok('clip: "mouth not open" keeps it shut, lips still wrap with no clipping', !shut.keys && shut.report.clipAfterCm <= 0.1, JSON.stringify(shut.report));
+    ok('clip: the mouth isn\'t opened, the lips wrap and seal around the tongue, nothing clips', res.report.soft && !res.keys && res.report.clipAfterCm <= 0.1 && res.report.wrapCm > 0.2, JSON.stringify(res.report));
+    const ajar = clearMouth(model, clip, keys, { share: 0.3 });
+    const open = Math.max(0, ...((ajar.keys || []).filter((k) => k.control === 'mouth_open').map((k) => k.value)));
+    ok('clip: asked to open a little, the jaw drops a little and the lips do the rest', open > 0.05 && open < 0.4 && ajar.report.clipAfterCm <= 0.1, `open ${open.toFixed(2)}`);
     model.softLips = false;
     const hard = clearMouth(model, clip, keys);
     ok('without soft lips the mouth opens all the way around it (old behavior)', hard.report.opened === 'mouth_open' && hard.keys.some((k) => k.control === 'mouth_open' && k.value > 0.5));

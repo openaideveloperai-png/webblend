@@ -4,7 +4,8 @@
 // that doesn't exist on this rig. The report goes back to Claude to fix.
 import * as THREE from 'three';
 import { SPOTS, SPOT_ALIAS } from './humanoid.js';
-import { faceHits } from './mouth.js';
+import { faceHits, evaluator } from './mouth.js';
+import { skinContacts, partName } from './softskin.js';
 
 // evaluate a clip on a scratch mixer from the rest pose; points in root space
 function sampler(model, clip) {
@@ -177,6 +178,20 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
   };
   try {
     for (const h of faceHits(model, clip, { exempt }).slice(0, 6)) issues.push(`at ${h.t} s the ${h.what} goes ${h.cm} cm into the face (clipping): move the hand out, or touch the surface with handTouches`);
+    // soft skin: body parts pressing into each other dent like flesh, up to the bone
+    try {
+      const ev = evaluator(model);
+      let res = null;
+      try {
+        const n = Math.max(2, Math.round(clip.duration * 6) + 1);
+        res = skinContacts(model, (t) => ev.at(clip, t), Array.from({ length: n }, (_, k) => (k / (n - 1)) * clip.duration));
+      } finally { ev.done(); }
+      const big = (res || []).filter((c) => c.cm >= 0.5);
+      if (big.length) lines.push(`- soft skin: ${big.slice(0, 5).map((c) => `${partName(c.a)} and ${partName(c.b)} press together up to ${c.cm} cm at ${c.t} s${c.leftCm > 0.3 ? ` (${c.leftCm} cm of it past what the flesh can give)` : ''}`).join('; ')}; the skin dents and bulges there instead of clipping`);
+      // a hand placed on purpose (a touch, a finger in the mouth) presses on purpose
+      const touching = (c) => ['left', 'right'].some((sd) => (c.a === sd[0] + 'Hand' || c.b === sd[0] + 'Hand') && (plan.touches || []).some((k) => k.hand === sd && k.weight > 0.3 && Math.abs(k.t - c.t) < 1.5));
+      for (const c of big.filter((x) => x.leftCm > 1 && !touching(x)).slice(0, 4)) issues.push(`at ${c.t} s the ${partName(c.a)} goes ${c.leftCm} cm into the ${partName(c.b)} past what the flesh can give (the bones would meet): move it out a little, or rest it on the surface with handTouches`);
+    } catch (e) { console.warn('soft skin check', e); }
   } catch (e) { console.warn('face hits', e); }
   return { text: lines.join('\n'), issues };
 }

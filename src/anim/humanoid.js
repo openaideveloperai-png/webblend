@@ -1198,8 +1198,11 @@ export class HumanoidRig {
     // two directions across the ray, to try nearby rays when one slips past
     const u = g.from === 'side' ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
     const w = new THREE.Vector3().crossVectors(dc, u).normalize();
+    // face parts measured on the mesh (eyes, nose, cheeks, chin, forehead, lips) win over a guessed ray
+    const marks = this.landmarks && /^(mouth|nose|cheek|chin|forehead|eyes)$/.test(key) ? this.landmarks() : null;
+    const mark = marks ? marks.spot(key, side) : null;
     let hit = null, bestD = Infinity;
-    for (const [a, b] of [[0, 0], [0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03], [0.06, 0], [-0.06, 0]]) {
+    if (!mark) for (const [a, b] of [[0, 0], [0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03], [0.06, 0], [-0.06, 0]]) {
       const st = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -3).addScaledVector(u, a).addScaledVector(w, b);
       const h = this.surfaceHit(charPt(st.x, st.y, st.z), this.charToModel(dc).normalize(), region);
       // ignore hits far from where that body part should be (ray slipped past it)
@@ -1208,7 +1211,11 @@ export class HumanoidRig {
       if (hit && a === 0 && b === 0) break;
     }
     let point, normalC = null;
-    if (hit) {
+    if (mark) {
+      point = mark.point.clone();
+      normalC = mark.normal.clone().applyQuaternion(this.Finv);
+      if (normalC.dot(dc) > 0) normalC.negate();
+    } else if (hit) {
       point = hit.point;
       normalC = hit.normal.clone().applyQuaternion(this.Finv);
       if (normalC.dot(dc) > 0) normalC.negate();
@@ -1228,7 +1235,8 @@ export class HumanoidRig {
       palm,
       fingers: def.fingers(m),
       hint: def.hint(m),
-      hit: !!hit,
+      hit: !!hit || !!mark,
+      measured: mark ? 'mesh' : hit ? 'ray' : 'guess',
     };
   }
 

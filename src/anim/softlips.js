@@ -13,11 +13,11 @@
 import * as THREE from 'three';
 import { mouthProbe, mouthEffects, evaluator, headFrame, EMPTY, NOT_FACE, TONGUE, nameOf } from './mouth.js';
 import { faceTracks } from './face.js';
+import { ATTR, prepareMesh, layer, beginLayer, setOffset, commit, detachOffsets } from './offsets.js';
 
-const ATTR = 'contactOffset';
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
-const _m = new THREE.Matrix4(), _inv = new THREE.Matrix4(), _pre = new THREE.Matrix4(), _q = new THREE.Quaternion(), _v = new THREE.Vector3(), _w = new THREE.Vector3();
+const _m = new THREE.Matrix4(), _inv = new THREE.Matrix4(), _pre = new THREE.Matrix4(), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _v = new THREE.Vector3(), _w = new THREE.Vector3();
 const IDENT = new THREE.Matrix4();
 
 function visibleChain(o) { for (let p = o; p; p = p.parent) if (!p.visible) return false; return true; }
@@ -52,11 +52,7 @@ export function updateSoftLips(model) {
 }
 
 // the GLB writer leaves the live offsets out of the file
-export function detachSoftLips(models) {
-  const back = [];
-  for (const m of models) m.root.traverse((o) => { const g = o.geometry; if (g && g.attributes && g.attributes[ATTR]) { back.push([g, g.attributes[ATTR]]); g.deleteAttribute(ATTR); } });
-  return () => { for (const [g, a] of back) g.setAttribute(ATTR, a); };
-}
+export const detachSoftLips = detachOffsets;
 
 function build(model) {
   const probe = mouthProbe(model);
@@ -158,11 +154,16 @@ class SoftLips {
     this.weight = new Float32Array(N);
     this.side = new Int8Array(N);
     this.rest = new Float32Array(N * 3);
+    // the lip edge: where the lips meet (these seal around what passes between them)
+    this.edge = new Uint8Array(N);
+    this.noHug = new Uint8Array(N);
     reps.forEach((e, w) => {
       this.weight[w] = 1 - smooth(0.5, 1, e.r);
       this.side[w] = e.lower ? -1 : 1;
       this.rest[w * 3] = e.x; this.rest[w * 3 + 1] = e.y; this.rest[w * 3 + 2] = e.z;
+      if (Math.abs(e.y - g.C.y) < 0.16 * g.hw && e.z > g.C.z - 0.35 * g.hw && e.z < g.C.z + 0.25 * g.hw && Math.abs(e.x - g.C.x) < 1.05 * g.hw) this.edge[w] = 1;
     });
+    this.hugRange = 0.3 * g.hw;
     // ---- edges between welded vertices (for the smoothing)
     const adj = Array.from({ length: N }, () => new Set());
     for (const m of this.meshes) {
@@ -240,7 +241,11 @@ class SoftLips {
       this.buildField();
       for (let i = 0; i < N; i++) {
         const r = this.field.query(this.P[i * 3], this.P[i * 3 + 2]);
-        if (r && this.P[i * 3 + 1] > r.bot && this.P[i * 3 + 1] < r.top) this.inside[i] = 1;
+        if (!r) continue;
+        const y = this.P[i * 3 + 1];
+        if (y > r.bot && y < r.top) this.inside[i] = 1;
+        // lip edges resting near the tongue inside the mouth don't get pulled onto it
+        else if (this.edge[i] && (this.side[i] > 0 ? y - r.top : r.bot - y) < this.hugRange * 1.5) this.noHug[i] = 1;
       }
     }
     this.sig = null;
@@ -269,8 +274,10 @@ class SoftLips {
     f.reset();
     const P = T.P, b = this.box;
     let any = false;
+    this.tongueFront = -Infinity;
     for (let i = 0; i < T.n; i++) {
       const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
+      if (z > this.tongueFront && Math.abs(x - this.C.x) < this.hw) this.tongueFront = z;
       if (x < b.x0 || x > b.x1 || z < b.z0 || z > b.z1 || y < b.y0 - this.hw || y > b.y1 + this.hw) continue;
       f.point(x, y, z);
       any = true;
@@ -299,7 +306,9 @@ class SoftLips {
         const A = _v.setFromMatrixPosition(f.a.matrixWorld).clone();
         let B;
         if (f.b) { f.b.updateWorldMatrix(true, false); B = _w.setFromMatrixPosition(f.b.matrixWorld).clone(); } else B = f.tip.clone().applyMatrix4(f.a.matrixWorld);
-        add(A, B, f.ratio * A.distanceTo(B));
+        const len = A.distanceTo(B);
+        if (f.off) { f.a.getWorldQuaternion(_q2); const o = f.off.clone().applyQuaternion(_q2).multiplyScalar(len); A.add(o); B.add(o); }
+        add(A, B, f.ratio * len);
       }
     };
     fingerCaps(this.fingers);
@@ -360,11 +369,28 @@ class SoftLips {
 
   // the shrinkwrap: how far (head frame) vertex i must move to be outside everything
   // -> remaining penetration the push couldn't fix (clamped)
-  push(i, caps, out) {
+  push(i, caps, out, hug = false) {
     let px = this.P[i * 3] + out[0], py = this.P[i * 3 + 1] + out[1], pz = this.P[i * 3 + 2] + out[2];
     const s = this.side[i];
-    const margin = this.hw * 0.04;
+    const margin = this.hw * 0.02;
     let left = 0, moved = false;
+    // hug: a lip edge hovering just over (or under) the tongue / a finger closes onto it,
+    // so the lips seal around it instead of leaving a gap
+    if (hug && this.edge[i] && !this.noHug[i]) {
+      let gap = Infinity;
+      if (this.fieldOn && this.tongueFront > this.C.z && !this.inside[i]) {
+        const r = this.field.query(px, pz);
+        if (r) { const g = s > 0 ? py - (r.top + margin) : r.bot - margin - py; if (g > 0) gap = g; }
+      }
+      for (const c of caps) {
+        const t = capHit(px, py, pz, 0, -s, 0, c.ax, c.ay, c.az, c.bx, c.by, c.bz, c.r + margin);
+        if (t > 0 && t < gap) gap = t;
+      }
+      if (gap < this.hugRange) {
+        const pull = gap * (1 - smooth(0.6, 1, gap / this.hugRange));
+        if (pull > 1e-6) { py -= s * pull; out[1] -= s * pull; return 0; }
+      }
+    }
     for (let pass = 0; pass < 2; pass++) {
       if (this.fieldOn && !this.inside[i]) {
         const r = this.field.query(px, pz);
@@ -415,7 +441,7 @@ class SoftLips {
     for (let i = 0; i < N; i++) {
       if (!(this.weight[i] > 0)) continue;
       o[0] = o[1] = o[2] = 0;
-      const l = this.push(i, caps, o);
+      const l = this.push(i, caps, o, true);
       if (l < 0) continue;
       H[i * 3] = o[0]; H[i * 3 + 1] = o[1]; H[i * 3 + 2] = o[2];
       hard[i] = 1; anyHard = true;
@@ -501,6 +527,25 @@ class SoftLips {
         D[b] = 0.5 * D2[b] + (0.5 * sx) / n; D[b + 1] = 0.5 * D2[b + 1] + (0.5 * sy) / n; D[b + 2] = 0.5 * D2[b + 2] + (0.5 * sz) / n;
       }
     }
+    // seal: beside the tongue / finger the lip edges come back together (the lip above
+    // still lifts), so the lips close tight around it instead of gaping at its sides
+    const sealLen = 0.05 * this.hw;
+    const hardE = [[], []];
+    for (let i = 0; i < N; i++) if (hard[i] && this.edge[i]) hardE[side[i] > 0 ? 0 : 1].push(this.P[i * 3], Math.hypot(H[i * 3], H[i * 3 + 1], H[i * 3 + 2]));
+    for (let i = 0; i < N; i++) {
+      if (!this.edge[i] || src[i] < 0) continue;
+      if (hard[i]) {
+        // the lip edge touching it sits right on it (its neighbours don't lift it off)
+        D[i * 3] = H[i * 3]; D[i * 3 + 1] = H[i * 3 + 1]; D[i * 3 + 2] = H[i * 3 + 2];
+        continue;
+      }
+      // beside it, the edge opens no more than the contact next to it, closing within ~1 mm
+      const list = hardE[side[i] > 0 ? 0 : 1];
+      let env = 0;
+      for (let k = 0; k < list.length; k += 2) { const dx = (this.P[i * 3] - list[k]) / sealLen; env = Math.max(env, list[k + 1] * Math.exp(-dx * dx)); }
+      const d = Math.hypot(D[i * 3], D[i * 3 + 1], D[i * 3 + 2]);
+      if (d > env) { const f = env / d; D[i * 3] *= f; D[i * 3 + 1] *= f; D[i * 3 + 2] *= f; }
+    }
     // squish: lips pushed up or down bulge out a little at the front
     const C = this.C, hw = this.hw, R = this.rest, Dd = this.D;
     for (let i = 0; i < N; i++) {
@@ -513,31 +558,21 @@ class SoftLips {
   write() {
     const F = this.F, D = this.D;
     const inv = this.meshes.map((m) => new THREE.Matrix3().setFromMatrix4(m.matrixWorld).invert());
-    const ranges = this.meshes.map(() => [Infinity, -Infinity]);
-    const arrs = this.meshes.map((m) => m.geometry.attributes[ATTR] ? m.geometry.attributes[ATTR].array : null);
+    const ls = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'lips') : null));
+    for (const l of ls) if (l) beginLayer(l);
     for (let i = 0; i < this.N; i++) {
       const dx = D[i * 3], dy = D[i * 3 + 1], dz = D[i * 3 + 2];
+      if (!dx && !dy && !dz) continue;
       // head frame -> world
       _v.set(F.lat.x * dx + F.up.x * dy + F.fwd.x * dz, F.lat.y * dx + F.up.y * dy + F.fwd.y * dz, F.lat.z * dx + F.up.z * dy + F.fwd.z * dz);
       for (let k = this.memStart[i]; k < this.memStart[i + 1]; k++) {
-        const m = this.memMesh[k], vi = this.memIdx[k], a = arrs[m];
-        if (!a) continue;
+        const m = this.memMesh[k], l = ls[m];
+        if (!l) continue;
         _w.copy(_v).applyMatrix3(inv[m]);
-        a[vi * 3] = _w.x; a[vi * 3 + 1] = _w.y; a[vi * 3 + 2] = _w.z;
-        const r = ranges[m];
-        if (vi < r[0]) r[0] = vi;
-        if (vi > r[1]) r[1] = vi;
+        setOffset(l, this.memIdx[k], _w.x, _w.y, _w.z);
       }
     }
-    this.meshes.forEach((m, k) => {
-      const at = m.geometry.attributes[ATTR];
-      if (!at) return;
-      const [a, b] = ranges[k];
-      if (b < a) return;
-      at.clearUpdateRanges?.();
-      at.addUpdateRange?.(a * 3, (b - a + 1) * 3);
-      at.needsUpdate = true;
-    });
+    for (const m of this.meshes) commit(m);
     this.active = true;
   }
 
@@ -546,11 +581,9 @@ class SoftLips {
     if (!this.active) return;
     this.active = false;
     for (const m of this.meshes) {
-      const at = m.geometry.attributes[ATTR];
-      if (!at) continue;
-      at.array.fill(0);
-      at.clearUpdateRanges?.();
-      at.needsUpdate = true;
+      if (!m.geometry.attributes[ATTR]) continue;
+      beginLayer(layer(m, 'lips'));
+      commit(m);
     }
   }
 
@@ -748,17 +781,31 @@ function fingerCapsules(model, verts) {
       const list = ch.bones.filter((b) => b.role !== 'meta').map((b) => b.bone);
       list.forEach((bone, k) => {
         const next = list[k + 1] || null;
-        const seg = { a: bone, b: next, tip: next ? null : ch.tipLocal.clone(), ratio: 0.3 };
+        const seg = { a: bone, b: next, tip: next ? null : ch.tipLocal.clone(), ratio: 0.3, off: null };
         const vs = verts.get(bone);
         if (vs && vs.length >= 4) {
+          // fitted to the finger's own skin: where its middle really is (often not on the
+          // bone) and how thick it is, so the lips touch what you see
           bone.updateWorldMatrix(true, false);
           const A = new THREE.Vector3().setFromMatrixPosition(bone.matrixWorld);
           const B = next ? new THREE.Vector3().setFromMatrixPosition(next.matrixWorld) : seg.tip.clone().applyMatrix4(bone.matrixWorld);
           const len = A.distanceTo(B);
           if (len > 1e-6) {
-            const line = new THREE.Line3(A, B), cp = new THREE.Vector3();
-            const ds = vs.map((p) => line.closestPointToPoint(p, true, cp).distanceTo(p)).sort((x, y) => x - y);
-            seg.ratio = THREE.MathUtils.clamp(ds[Math.floor(ds.length * 0.6)] / len, 0.12, 0.6);
+            const u = B.clone().sub(A).divideScalar(len);
+            const perp = [];
+            for (const p of vs) {
+              const d = p.clone().sub(A), t = d.dot(u);
+              if (t < -0.15 * len || t > 1.15 * len) continue;
+              perp.push(d.addScaledVector(u, -t));
+            }
+            if (perp.length >= 4) {
+              const off = perp.reduce((a, d) => a.add(d), new THREE.Vector3()).divideScalar(perp.length);
+              const ds = perp.map((d) => d.distanceTo(off)).sort((x, y) => x - y);
+              seg.ratio = THREE.MathUtils.clamp(ds[Math.floor(ds.length * 0.5)] / len, 0.1, 0.6);
+              const q = new THREE.Quaternion();
+              bone.getWorldQuaternion(q);
+              if (off.length() > 0.05 * len) seg.off = off.applyQuaternion(q.invert()).divideScalar(len);
+            }
           }
         }
         out.push(seg);
@@ -786,43 +833,6 @@ function meshCapsule(o) {
   c = { a, b, r };
   _capCache.set(g, c);
   return c;
-}
-
-// ---------------------------------------------------------------- the GPU side
-// The lip mesh gets its own geometry (copies of the model share theirs) with a zeroed
-// offset attribute, and its materials add the offset right after skinning.
-function prepareMesh(mesh) {
-  let g = mesh.geometry;
-  if (g.userData.softLipsOwner && g.userData.softLipsOwner !== mesh.uuid) {
-    g = mesh.geometry = g.clone();
-    if (g.attributes[ATTR]) g.deleteAttribute(ATTR);
-  }
-  g.userData.softLipsOwner = mesh.uuid;
-  if (!g.attributes[ATTR]) {
-    const a = new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 3), 3);
-    a.setUsage(THREE.DynamicDrawUsage);
-    g.setAttribute(ATTR, a);
-  }
-  for (const m of [].concat(mesh.material)) patchMaterial(m);
-}
-
-const PATCHED = new WeakSet();
-function patchMaterial(mat) {
-  if (!mat || PATCHED.has(mat)) return;
-  PATCHED.add(mat);
-  const prev = mat.onBeforeCompile;
-  const ownKey = Object.prototype.hasOwnProperty.call(mat, 'customProgramCacheKey') ? mat.customProgramCacheKey : null;
-  const prevSrc = prev && prev !== THREE.Material.prototype.onBeforeCompile ? prev.toString() : '';
-  mat.onBeforeCompile = function (shader, renderer) {
-    if (prev) prev.call(this, shader, renderer);
-    if (shader.vertexShader.includes('#include <skinning_vertex>') && !shader.vertexShader.includes(ATTR)) {
-      shader.vertexShader = `attribute vec3 ${ATTR};\n` + shader.vertexShader.replace('#include <skinning_vertex>', `#include <skinning_vertex>\n\ttransformed += ${ATTR};`);
-    }
-  };
-  mat.customProgramCacheKey = function () { return (ownKey ? ownKey.call(this) : prevSrc) + '|softlips'; };
-  // meshes sharing this material without the attribute read zeros
-  mat.defaultAttributeValues = Object.assign({}, mat.defaultAttributeValues, { [ATTR]: [0, 0, 0] });
-  mat.needsUpdate = true;
 }
 
 // a binary min-heap of vertex ids by distance

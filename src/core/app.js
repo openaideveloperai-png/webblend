@@ -19,6 +19,8 @@ import { optimizeTextures } from '../io/textures.js';
 import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITIVES } from '../scene/primitives.js';
 import { onDecorationReady } from '../scene/patterns.js';
 import { updateSoftLips } from '../anim/softlips.js';
+import { faceLandmarks } from '../anim/landmarks.js';
+import { updateSoftSkin } from '../anim/softskin.js';
 
 const _v = new THREE.Vector3();
 
@@ -63,7 +65,12 @@ export class App extends Emitter {
     this.viewport.helpers.add(this.selBox);
     this.cameraHelpers = new Map();
     this.bindGizmo();
-    this.detectHumanoid = (model) => detectHumanoid(model.root, model.bones, { rank: (b) => model.boneRank(b) });
+    this.detectHumanoid = (model) => {
+      const rig = detectHumanoid(model.root, model.bones, { rank: (b) => model.boneRank(b) });
+      // face spots (cheek, nose, chin...) come from the mesh itself
+      if (rig) rig.landmarks = () => faceLandmarks(model);
+      return rig;
+    };
   }
 
   fatal(msg) { this.emit('fatal', msg); }
@@ -223,6 +230,8 @@ export class App extends Emitter {
     model.clips.forEach((e, i) => { const e2 = m2.clips[i]; if (e2) { m2.setPlaying(e2, e.playing); m2.setWeight(e2, e.weight); m2.setSpeed(e2, e.speed); m2.setLoop(e2, e.loop); } });
     if (model.softLips !== undefined) m2.softLips = model.softLips;
     if (model.softLipsSoftness !== undefined) m2.softLipsSoftness = model.softLipsSoftness;
+    if (model.softSkin !== undefined) m2.softSkin = model.softSkin;
+    if (model.softSkinSoftness !== undefined) m2.softSkinSoftness = model.softSkinSoftness;
     this.toast(`Duplicated "${model.name}"`, 'ok');
     return m2;
   }
@@ -825,6 +834,10 @@ export class App extends Emitter {
     for (const m of this.models) if (m.constraints && m.root.visible && m.solveConstraints()) m.root.updateMatrixWorld(true);
     // soft lips wrap around the tongue / a finger (only works when something's near the mouth)
     for (const m of this.models) if (m.humanoid) { try { updateSoftLips(m); } catch (e) { console.warn('soft lips', e); m.softLips = false; } }
+    // soft skin: body parts pressing each other dent instead of clipping
+    // (off on the lowest quality: it costs a few ms per frame while body parts press together)
+    if (this.settings.preset().softSkin !== false) for (const m of this.models) if (m.humanoid) { try { updateSoftSkin(m); } catch (e) { console.warn('soft skin', e); m.softSkin = false; } }
+    else for (const m of this.models) if (m._skin) m._skin.clear();
     for (const m of this.models) m.updateHelpers();
     for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); this.updateCameraHelper(m, h); }
     if (this.selBox.visible && (tr.playing || this._drag)) this.updateSelBox();

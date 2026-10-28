@@ -253,8 +253,8 @@ export function mouthEffects(model) {
 
 // ---------------------------------------------------------------- keeping the lips apart
 // Plays the clip with the rig on. Where the tongue or a finger passes the lips: with soft
-// lips (the default) the lips wrap around it and the jaw only drops a little (share = how
-// much of the tongue's thickness the mouth opens; 0 = the lips do it all); without them the
+// lips (the default) the lips wrap and seal around it and the mouth isn't opened (share =
+// how much of its thickness the mouth opens, 0 = the lips do it all); without them the
 // mouth opens just enough (with the control that opens it the most cleanly).
 // -> { keys (the new faceKeys) | null, report }
 export function clearMouth(model, clip, faceKeys = [], { share = null } = {}) {
@@ -264,7 +264,7 @@ export function clearMouth(model, clip, faceKeys = [], { share = null } = {}) {
   // the control that opens the lips with the least else going on
   const opener = [...fx].filter(([, e]) => e.open > 0.003 && e.tongue < 0.004).sort((a, b) => b[1].open - a[1].open)[0];
   const soft = softLipsOn(model) ? softLips(model) : null;
-  if (share === null) share = soft ? 0.3 : 1;
+  if (share === null) share = soft ? 0 : 1;
   const fps = 15;
   const n = Math.max(2, Math.round(clip.duration * fps) + 1);
   const times = Array.from({ length: n }, (_, i) => (i / (n - 1)) * clip.duration);
