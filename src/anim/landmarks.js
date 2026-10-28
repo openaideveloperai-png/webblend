@@ -165,3 +165,25 @@ export function describeLandmarks(model) {
   const parts = Object.entries(names).filter(([k]) => lm.points[k]).map(([k, label]) => `${label} ${cm(lm.points[k].p)}`);
   return parts.length ? `Face, measured on the mesh (cm from the head bone; x = the character's left, y = up, z = forward): ${parts.join(', ')}. Touch spots "cheek", "nose", "chin", "forehead", "eyes", "mouth" land exactly there.` : '';
 }
+
+// the body spots a hand can touch, where they are on this character (measured on its mesh in
+// the rest pose): cm from the hips, x = the character's left, y = up, z = forward
+export function describeBodySpots(model) {
+  const rig = model && model.humanoid;
+  if (!rig || !rig.spot || !rig.map.hips) return '';
+  const sc = new THREE.Vector3(); model.root.getWorldScale(sc);
+  const k = 100 * ((Math.abs(sc.x) + Math.abs(sc.y) + Math.abs(sc.z)) / 3 || 1);
+  const hips = rig.rest.get(rig.map.hips).pos;
+  const list = [['betweenLegs', 'between the legs', 'right'], ['lap', 'lap', 'right'], ['belly', 'belly', 'right'], ['chest', 'chest', 'right'], ['hip', 'right hip', 'right'], ['thigh', 'right thigh', 'right'], ['knee', 'right knee', 'right'], ['back', 'lower back', 'right']];
+  const parts = [];
+  for (const [key, label, side] of list) {
+    let sp = null;
+    try { sp = rig.spot(key, side); } catch { sp = null; }
+    if (!sp || !rig.map[sp.ref]) continue;
+    const r = rig.rest.get(rig.map[sp.ref]);
+    const p = sp.local.clone().applyQuaternion(r.Wq).add(r.pos).sub(hips);
+    const x = p.dot(rig.lat) * k, y = p.dot(rig.up) * k, z = p.dot(rig.fwd) * k;
+    parts.push(`${label} (${[x, y, z].map((v) => v.toFixed(1)).join(', ')})${sp.measured === 'guess' ? ' estimated' : ''}`);
+  }
+  return parts.length ? `Body spots, measured on this character's mesh (cm from the hips; x = the character's left, y = up, z = forward): ${parts.join(', ')}. A handTouches key with one of these spots puts the palm exactly there.` : '';
+}

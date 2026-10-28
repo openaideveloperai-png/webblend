@@ -26,7 +26,7 @@ import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS, SPOT_ALIAS } from './h
 import { boneKeyPlan, boneKeyPost, boneKeyTracks } from './bonekeys.js';
 import { faceTracks, describeFace, faceKeysFor } from './face.js';
 import { clearMouth, mouthEffects, mouthProbe, faceHits } from './mouth.js';
-import { describeLandmarks } from './landmarks.js';
+import { describeLandmarks, describeBodySpots } from './landmarks.js';
 import { describeRig } from './rigscan.js';
 import { checkMotion } from './motioncheck.js';
 import { inArtifact } from '../core/util.js';
@@ -96,6 +96,7 @@ export function parseModifiers(text) {
 
 // "put her left hand on her lap", "hands on hips", "hand under the belly"...
 const SPOT_WORDS = [
+  ['middle of the legs', 'betweenLegs'], ['middle of her legs', 'betweenLegs'], ['middle of his legs', 'betweenLegs'], ['middle of the thighs', 'betweenLegs'], ['crotch', 'betweenLegs'], ['groin', 'betweenLegs'],
   ['lower belly', 'lap'], ['lower stomach', 'lap'], ['lower tummy', 'lap'], ['under belly', 'lap'], ['underbelly', 'lap'], ['lap', 'lap'],
   ['belly', 'belly'], ['stomach', 'belly'], ['tummy', 'belly'], ['abdomen', 'belly'], ['waist', 'hip'], ['hips', 'hip'], ['hip', 'hip'],
   ['heart', 'heart'], ['chest', 'chest'], ['breasts', 'chest'], ['breast', 'chest'],
@@ -108,7 +109,7 @@ const SPOT_WORDS = [
   ['lower back', 'back'], ['back', 'back'],
 ];
 const SPOT_RE = SPOT_WORDS.map(([w]) => w.replace(/ /g, '\\s+')).join('|');
-const TOUCH_RE = new RegExp(`\\b(?:(left|right|both|one|two|her|his|their|the|a)\\s+)?(hands?|palms?|arms?)\\b(.{0,40}?)\\b(on|onto|over|against|at|to|under|below|beneath|behind|across|touching|touch)\\s+(?:(?:her|his|their|the|its|my|your|own|each|other)\\s+)*(${SPOT_RE})\\b`, 'gi');
+const TOUCH_RE = new RegExp(`\\b(?:(left|right|both|one|two|her|his|their|the|a)\\s+)?(hands?|palms?|arms?)\\b(.{0,40}?)\\b(on|onto|over|against|at|to|under|below|beneath|behind|across|touching|touch|between|in\\s+between)\\s+(?:(?:her|his|their|the|its|my|your|own|each|other)\\s+)*(${SPOT_RE})\\b`, 'gi');
 const NEGATION = /\b(don'?t|do\s+not|not|never|without|no|avoid)\b[^.,;]{0,25}$/i;
 
 export function parseTouches(text) {
@@ -122,6 +123,9 @@ export function parseTouches(text) {
     let spot = (SPOT_WORDS.find(([w]) => w === word) || [])[1];
     if (!spot) continue;
     if ((m[4] === 'under' || m[4] === 'below' || m[4] === 'beneath') && spot === 'belly') spot = 'lap';
+    // "between the legs / thighs", "under the legs" (standing): under the middle of the body
+    if (/between/.test(m[4]) && (spot === 'thigh' || spot === 'knee' || spot === 'lap')) spot = spot === 'knee' ? 'knee' : 'betweenLegs';
+    if ((m[4] === 'under' || m[4] === 'beneath') && /legs|thighs/.test(word)) spot = 'betweenLegs';
     if (m[4] === 'behind') spot = spot === 'head' || spot === 'neck' || spot === 'backOfHead' ? 'backOfHead' : 'back';
     const sideWord = m[1] || (/\b(left|right)\b/.exec(m[3]) || [])[1];
     const plural = /s$/.test(m[2]) || sideWord === 'both' || sideWord === 'two';
@@ -607,6 +611,7 @@ export class AIAssistant {
       if (m.bones.length) { try { const r = describeRig(m); if (r) lines.push(r); } catch (e) { console.warn('rig scan', e); } }
       if (m.bones.length || (m.morphMeshes && m.morphMeshes.length)) { try { let fx = null; try { fx = m.humanoid ? mouthEffects(m) : null; } catch (e) { console.warn('mouth effects', e); } const f = describeFace(m, fx); if (f) lines.push(f); } catch (e) { console.warn('face controls', e); } }
       if (m.humanoid) { try { const l = describeLandmarks(m); if (l) lines.push(l); } catch (e) { console.warn('face landmarks', e); } }
+      if (m.humanoid) { try { const l = describeBodySpots(m); if (l) lines.push(l); } catch (e) { console.warn('body spots', e); } }
     }
     return lines.join('\n') || '(empty scene)';
   }
@@ -649,7 +654,7 @@ RULES
 ${params}
 - A preset (e.g. "walk") can be combined with humanoidKeys: keys override the preset's params for that clip (good for "walk while waving").
 - Hands and fingers: the finger params (lThumb, lIndex, lMiddle, lRing, lPinky, lSpread and the r... ones) curl each finger of this rig, 0 = as at rest (straight), 1 = curled into a fist. Hand shapes: fist = all 1; point = index 0, thumb 0.6, the rest 0.9; peace / V = index and middle 0 with rSpread 15, thumb 0.8, ring and little 0.9; thumbs up = thumb 0, the rest 1; open relaxed hand = all 0.15; pinch = thumb 0.55, index 0.6, the rest 0.3. Key them like any param, so a hand can change shape over time (e.g. curl the other fingers once the hand has arrived).
-- To put a hand ON the body, use handTouches instead of arm angles: the app measures this character's actual body surface and uses IK so the palm rests exactly on that spot, with the hand turned to lie flat. Spots: ${Object.entries(SPOTS).map(([k, v]) => `"${k}" = ${v.label}`).join('; ')}. A touch key has weight 0-1: ease in from 0 to 1 over about 0.4-0.7 s and back to 0 to take the hand away. While a hand's touch weight is 1, that arm's humanoidKeys are ignored. "On her lap" while standing means the "lap" spot (front of the lower belly / top of the thighs, below the belly); use "thigh" when sitting.
+- To put a hand ON the body, use handTouches instead of arm angles: the app measures this character's actual body surface and uses IK so the palm rests exactly on that spot, with the hand turned to lie flat. Spots: ${Object.entries(SPOTS).map(([k, v]) => `"${k}" = ${v.label}`).join('; ')}. A touch key has weight 0-1: ease in from 0 to 1 over about 0.4-0.7 s and back to 0 to take the hand away. While a hand's touch weight is 1, that arm's humanoidKeys are ignored. "On her lap" while standing means the "lap" spot (front of the lower belly / top of the thighs, below the belly); use "thigh" when sitting. "Between the legs", "under the middle of the legs / of the body", "in between the thighs" means "betweenLegs" (measured on the mesh: the middle under the body, where the tops of the thighs meet; the hand comes in from the front, palm up): never "lap" or "thigh", and the hand pressing against the inner thighs there is expected, not something to fix.
 - A touch can use a fingertip instead of the palm: "finger" = "index" (or "middle", "ring", "little", "thumb", "two" = index + middle), "mode" = "tip" (the fingertip points into the spot) or "pad" (the finger lies across it, like "shh" on the lips), "depth" = how far past the surface as a fraction of the finger (0 = just touching, 0.3 = the first joint in, e.g. a finger in the mouth or biting a nail). The app moves the whole arm (shoulder, elbow, wrist) with IK so that exact fingertip lands there, measured on this character, and shapes the other fingers automatically unless you key the finger params. Use "palm" (depth 0) for ordinary hand-on-body touches. To bring a hand to the face and then do something with the fingers, first ease the touch weight 0 -> 1 (the hand travels), then key the finger params or a second touch key with a different finger / depth.
 - Never animate only the wrist for a hand that should go somewhere: a hand reaching any body spot needs handTouches (or arm params: lArmRaise/lArmSwing/lElbow...), so the shoulder and elbow move too.
 - plantFeet: true keeps both feet exactly where they stand; the legs only bend to follow the hips. Use it for anything done standing or in place. Do not key leg or hips params unless the user asks for leg/hip motion, and never when they say not to move the legs.

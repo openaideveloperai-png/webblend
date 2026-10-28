@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { makeMannequin, makePrimitive } from '../src/scene/primitives.js';
 import { detectHumanoid } from '../src/anim/humanoid.js';
-import { AIAssistant, parsePrompt } from '../src/anim/ai.js';
+import { AIAssistant, parsePrompt, parseTouches } from '../src/anim/ai.js';
 const man = makeMannequin(); const bones = []; man.traverse(o => o.isBone && bones.push(o));
 const mk = (root, bones=[]) => ({ name: root.name, root, bones, size: 1.8, rest: new Map(), clips: [], humanoid: bones.length ? detectHumanoid(root, bones) : null, kind: 'import' });
 const mModel = mk(man, bones); const cube = makePrimitive('cube'); const cModel = mk(cube); cModel.size = 1;
@@ -53,6 +53,21 @@ console.log('spec ->', built.results.map(r => `${r.model.name}:${r.clip.name}:${
   const front = h2 ? h2.clone().sub(rig.posModel(rig.map.hips)).dot(rig.fwd) : 0;
   console.log('claude handTouches ->', clip ? `${clip.tracks.length} tracks, hand moved ${h0.distanceTo(h2).toFixed(2)}, in front of hips ${front.toFixed(2)}, legs animated ${legTracks(clip).length}` : 'no clip');
   if (!clip || h0.distanceTo(h2) < 0.1 || front < 0.02 || legTracks(clip).length) bad++;
+  // "between the legs" / "under the middle of the legs" is its own spot, not the lap or a thigh
+  const words = [
+    ['putting a hand under the middle of the legs while standing up', { right: 'betweenLegs' }],
+    ['her right hand between her legs', { right: 'betweenLegs' }],
+    ['hands in between the thighs', { left: 'betweenLegs', right: 'betweenLegs' }],
+    ['hand on her lap', { right: 'lap' }],
+    ['hand under the belly', { right: 'lap' }],
+    ['left hand on the thigh', { left: 'thigh' }],
+  ];
+  for (const [text, want] of words) {
+    const got = parseTouches(text).touch;
+    const same = JSON.stringify(got) === JSON.stringify(want);
+    console.log(`touch words: "${text}" ->`, JSON.stringify(got), same ? 'ok' : 'WRONG');
+    if (!same) bad++;
+  }
   console.log(bad ? 'TOUCH FAIL' : 'TOUCH OK');
   if (bad) process.exitCode = 1;
 }

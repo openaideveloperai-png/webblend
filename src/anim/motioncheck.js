@@ -189,7 +189,9 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
       const big = (res || []).filter((c) => c.cm >= 0.5);
       if (big.length) lines.push(`- soft skin: ${big.slice(0, 5).map((c) => `${partName(c.a)} and ${partName(c.b)} press together up to ${c.cm} cm at ${c.t} s${c.leftCm > 0.3 ? ` (${c.leftCm} cm of it past what the flesh can give)` : ''}`).join('; ')}; the skin dents and bulges there instead of clipping`);
       // a hand placed on purpose (a touch, a finger in the mouth) presses on purpose
-      const touching = (c) => ['left', 'right'].some((sd) => (c.a === sd[0] + 'Hand' || c.b === sd[0] + 'Hand') && (plan.touches || []).some((k) => k.hand === sd && k.weight > 0.3 && Math.abs(k.t - c.t) < 1.5));
+      // (a hand touching the body on purpose presses there, and its forearm brushes what it
+      // reaches past: between the legs the forearm rests on the thighs)
+      const touching = (c) => ['left', 'right'].some((sd) => [sd[0] + 'Hand', sd[0] + 'Fore'].some((g) => c.a === g || c.b === g) && (plan.touches || []).some((k) => k.hand === sd && k.weight > 0.3 && Math.abs(k.t - c.t) < 1.5));
       for (const c of big.filter((x) => x.leftCm > 1 && !touching(x)).slice(0, 4)) issues.push(`at ${c.t} s the ${partName(c.a)} goes ${c.leftCm} cm into the ${partName(c.b)} past what the flesh can give (the bones would meet): move it out a little, or rest it on the surface with handTouches`);
     } catch (e) { console.warn('soft skin check', e); }
   } catch (e) { console.warn('face hits', e); }

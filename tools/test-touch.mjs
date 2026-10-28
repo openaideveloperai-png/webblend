@@ -50,6 +50,25 @@ for (const file of process.argv.slice(2)) {
       ok(`${side} hand on ${spot}${sp.hit ? '' : ' (no mesh hit)'}`, miss < 0.03 && facing > 0.85 && feetMove < 0.002, `miss ${(miss * 100).toFixed(1)}% hip height, palm facing ${facing.toFixed(2)}, feet moved ${(feetMove * 100).toFixed(2)}%`);
     }
   }
+  // between the legs: on the body's midline, under it (below the hip joints, above the
+  // knees), measured on the mesh, and not the lap (that's in front and higher)
+  {
+    reset();
+    const pp = defaultParams();
+    pp.rTouch = { spot: 'betweenLegs', weight: 1 }; pp.plantFeet = true;
+    rig.apply(rig.solve(paramsToSpec(pp)));
+    const c = rig.lastTouch.right.contact.clone();
+    const hips = wp(rig.map.hips);
+    const rel = (v) => ({ lat: v.clone().sub(hips).dot(rig.lat) / hh, up: v.clone().sub(hips).dot(rig.up) / hh, fwd: v.clone().sub(hips).dot(rig.fwd) / hh });
+    const b = rel(c), hipL = rel(wp(rig.map.leftUpperLeg)), hipR = rel(wp(rig.map.rightUpperLeg)), knee = rel(wp(rig.map.leftLowerLeg));
+    reset();
+    const pl2 = defaultParams(); pl2.rTouch = { spot: 'lap', weight: 1 }; pl2.plantFeet = true;
+    rig.apply(rig.solve(paramsToSpec(pl2)));
+    const l = rel(rig.lastTouch.right.contact);
+    const sp = rig.spot('betweenLegs', 'right');
+    ok('between the legs: measured on the mesh, on the midline, under the body between the hips, above the knees', sp.measured === 'ray' && Math.abs(b.lat) < 0.03 && b.up < Math.min(hipL.up, hipR.up) + 0.08 && b.up > knee.up + 0.15 && Math.abs(b.lat) < Math.abs(hipL.lat - hipR.lat) * 0.25, JSON.stringify({ measured: sp.measured, at: b, hipL, knee }, (k, v) => (typeof v === 'number' ? +v.toFixed(3) : v)));
+    ok('...not the lap: lower than it and further back', b.up < l.up && b.fwd < l.fwd - 0.05, `lap ${l.up.toFixed(3)} up / ${l.fwd.toFixed(3)} fwd, between the legs ${b.up.toFixed(3)} / ${b.fwd.toFixed(3)}`);
+  }
   // the hand turns, not only the arm (lap: palm toward the body)
   reset();
   const p = defaultParams();

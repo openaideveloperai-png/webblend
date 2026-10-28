@@ -402,11 +402,37 @@ export class HumanoidRig {
       }
       if (t !== spec[k].touch) spec = { ...spec, [k]: { ...spec[k], touch: t } };
     }
+    // spots on the body itself just out of reach (between the legs, standing): the upper body
+    // dips toward that hand (a side bend with the chest curling in a little), the hips and legs
+    // stay as they are (the spot rides on the hips, so bending there would carry it away)
+    if (touches.length) {
+      const dipping = touches.filter((side) => (defOf(spec[side + 'Hand'].touch) || {}).lean === 'dip');
+      if (dipping.length === 1) {
+        const side = dipping[0];
+        let sgn = side === 'right' ? 1 : -1;
+        let short = this.touchShortfall(side, spec[side + 'Hand'].touch, f);
+        for (let step = 1; step <= 8 && short > 0; step++) {
+          const rot = (k) => (spec[k] && spec[k].rot) || [0, 0, 0];
+          const next = {
+            ...spec,
+            spine: { ...(spec.spine || {}), rot: [rot('spine')[0] + 1.5, rot('spine')[1], rot('spine')[2] + sgn * 3] },
+            chest: { ...(spec.chest || {}), rot: [rot('chest')[0] + 2, rot('chest')[1], rot('chest')[2] + sgn * 2] },
+            plantFeet: true,
+          };
+          const r = body(next);
+          const s2 = this.touchShortfall(side, next[side + 'Hand'].touch, r.f);
+          // the first step tells which way of bending helps on this rig
+          if (step === 1 && s2 > short) { sgn = -sgn; continue; }
+          spec = next; ({ sp, f } = r); short = s2;
+          this.lastLean = step;
+        }
+      }
+    }
     // spots out of reach that you bend down for (knees): bend at the hips and
     // waist, push the hips back and bend the knees
     if (touches.length) {
       for (let lean = 1; lean <= 10; lean++) {
-        const short = Math.max(...touches.map((side) => (defOf(spec[side + 'Hand'].touch) || {}).lean ? this.touchShortfall(side, spec[side + 'Hand'].touch, f) : 0));
+        const short = Math.max(...touches.map((side) => (defOf(spec[side + 'Hand'].touch) || {}).lean === true ? this.touchShortfall(side, spec[side + 'Hand'].touch, f) : 0));
         if (short <= 0) break;
         const rot = (k) => (spec[k] && spec[k].rot) || [0, 0, 0];
         const hp = spec.hips && spec.hips.pos ? spec.hips.pos.clone() : new THREE.Vector3();
@@ -1183,7 +1209,7 @@ export class HumanoidRig {
     let mouthY = this._mouth ?? headY + (eyeY - headY) * 0.38;
     if (!(mouthY > headY - headH * 0.15 && mouthY < eyeY - headH * 0.04)) mouthY = headY + (eyeY - headY) * 0.38;
     const ctx = { m, legY, legX, hipX, kneeX, chestY, neckY, headY, headTop, eyeY, eyeX, shX, shY, kneeY, side, mouthY };
-    const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top', depth (fallback), z?}
+    const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top'|'below', depth (fallback), z?, reach?}
     const region = def.region || g.region || 'torso';
     // depth is measured from the body part the spot sits on (heads and knees
     // are often forward of the hips)
@@ -1191,7 +1217,7 @@ export class HumanoidRig {
     const z0 = fwdOf(this.rest.get(this.map[refKey]).pos);
     const gz = (g.z ?? 0) + z0;
     // cast rays at the body to find its surface there
-    const dirs = { front: [0, 0, -1], back: [0, 0, 1], side: [-m, 0, 0], top: [0, -1, 0] };
+    const dirs = { front: [0, 0, -1], back: [0, 0, 1], side: [-m, 0, 0], top: [0, -1, 0], below: [0, 1, 0] };
     const dc = new THREE.Vector3(...dirs[g.from]);
     const expected = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -(g.depth ?? 0.12));
     const expectedM = charPt(expected.x, expected.y, expected.z);
@@ -1203,7 +1229,8 @@ export class HumanoidRig {
     const mark = marks ? marks.spot(key, side) : null;
     let hit = null, bestD = Infinity;
     if (!mark) for (const [a, b] of [[0, 0], [0.03, 0], [-0.03, 0], [0, 0.03], [0, -0.03], [0.06, 0], [-0.06, 0]]) {
-      const st = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -3).addScaledVector(u, a).addScaledVector(w, b);
+      // (from below: start between the thighs, above the knees, so legs held together don't stop it)
+      const st = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -(g.reach ?? 3)).addScaledVector(u, a).addScaledVector(w, b);
       const h = this.surfaceHit(charPt(st.x, st.y, st.z), this.charToModel(dc).normalize(), region);
       // ignore hits far from where that body part should be (ray slipped past it)
       const d = h ? h.point.distanceTo(expectedM) : Infinity;
@@ -1428,6 +1455,9 @@ const NOT_EYE_RE = /brow|lash|lid|light|眉|まぶた|ハイライト|^(con|mch|
 const HAIR_RE = /hair|kami|ahoge|bang|fringe|ponytail|twintail|tail_?hair|髪|アホ毛|あほ毛|もみあげ|ポニ|ツイン|おさげ/i;
 
 export const SPOTS = {
+  // between the legs: under the middle of the body, where the tops of the thighs meet,
+  // measured with a ray straight up the middle (the hand comes from the front, palm up)
+  betweenLegs: { label: 'between the legs (under the middle of the body, between the tops of the thighs; NOT the lap, which is the front of the lower belly, and not a thigh)', lean: 'dip', ref: () => 'hips', at: (c) => ({ x: 0, y: c.legY, z: 0.01, from: 'below', depth: 0.11, reach: 0.32 }), palm: () => V(0, 0.95, -0.3), fingers: () => V(0, -0.3, -0.95), hint: (m) => V(m * 0.85, 0, -0.5) },
   lap: { label: 'lap (below the belly)', ref: () => 'hips', at: (c) => ({ x: c.m * c.legX * 0.35, y: c.legY + 0.02, from: 'front', depth: 0.12 }), palm: () => V(0, -0.35, -1), fingers: (m) => V(-m * 0.5, -0.85, 0.15), hint: (m) => V(m * 0.85, -0.35, -0.45) },
   belly: { label: 'belly', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.42, from: 'front', depth: 0.15 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.9, -0.3, 0), hint: (m) => V(m * 0.9, -0.4, -0.3) },
   chest: { label: 'chest', ref: () => 'chest', at: (c) => ({ x: c.m * c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.6, 0.75, 0), hint: (m) => V(m * 0.7, -0.7, 0) },
@@ -1452,6 +1482,7 @@ export const SPOTS = {
 };
 export const SPOT_ALIAS = {
   brow: 'forehead', eye: 'eyes', ears: 'ear', backofhead: 'backOfHead', nape: 'backOfHead', throat: 'neck', crossedarms: 'crossed', arms: 'crossed',
+  between: 'betweenLegs', betweenthelegs: 'betweenLegs', betweenlegs: 'betweenLegs', crotch: 'betweenLegs', groin: 'betweenLegs', underlegs: 'betweenLegs',
   lowerbelly: 'lap', underbelly: 'lap', abdomen: 'belly', stomach: 'belly', tummy: 'belly', waist: 'hip', hips: 'hip', side: 'hip',
   breast: 'chest', heart: 'heart', lips: 'mouth', lip: 'mouth', jaw: 'chin', leg: 'thigh', thighs: 'thigh', knees: 'knee', lowerback: 'back', behind: 'back',
 };
