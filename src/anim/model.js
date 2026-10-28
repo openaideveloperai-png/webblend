@@ -366,8 +366,52 @@ export class Model {
       e.action.enabled = true;
     }
     if (any) this.mixer.setTime(t);
+    this.releaseUnanimated();
     // effects only show while their clip plays (and only on frames they're on)
     syncVFX(this, new Set(this.clips.filter((e) => e.playing).map((e) => e.clip.uuid)));
+  }
+
+  // A bone (or shape key) whose keys were all deleted, or whose clip was removed or
+  // muted, goes back to its rest pose instead of staying where the last key left it.
+  // Things you posed by hand without keys aren't touched.
+  releaseUnanimated() {
+    const sig = this.clips.map((e) => `${e.id}:${e.playing && e.weight > 0 ? 1 : 0}:${(e.clip.userData && e.clip.userData.version) || 0}:${e.clip.tracks.length}`).join('|');
+    if (sig === this._animSig) return;
+    this._animSig = sig;
+    const now = new Set();
+    for (const e of this.clips) {
+      if (!e.playing || !(e.weight > 0)) continue;
+      for (const tr of e.clip.tracks) now.add(tr.name);
+    }
+    const prev = this._animPrev;
+    this._animPrev = now;
+    if (!prev) return;
+    let byUuid = this._byUuid;
+    if (!byUuid || this._byUuidN !== this.nodeCount) {
+      byUuid = this._byUuid = new Map();
+      this.root.traverse((o) => byUuid.set(o.uuid, o));
+      this._byUuidN = this.nodeCount;
+    }
+    let changed = false;
+    for (const name of prev) {
+      if (now.has(name)) continue;
+      const dot = name.indexOf('.');
+      const o = byUuid.get(name.slice(0, dot));
+      const r = o && this.rest.get(o);
+      if (!r) continue;
+      const prop = name.slice(dot + 1);
+      if (prop === 'position') o.position.copy(r.p);
+      else if (prop === 'quaternion') o.quaternion.copy(r.q);
+      else if (prop === 'scale') o.scale.copy(r.s);
+      else if (prop === 'visible') o.visible = r.v;
+      else {
+        const m = /^morphTargetInfluences\[(\d+)\]$/.exec(prop);
+        if (m && o.morphTargetInfluences && r.m) o.morphTargetInfluences[+m[1]] = r.m[+m[1]] ?? 0;
+        else continue;
+      }
+      changed = true;
+    }
+    if (changed) this.root.updateMatrixWorld(true);
   }
 
   updateHelpers() {

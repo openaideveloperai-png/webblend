@@ -150,6 +150,38 @@ ok('scan description', /finger bones/.test(describeRig(model)));
   ok('constraints: an offset copy-location stays put while its clip only turns the bone', Math.abs(ys[60] - ys[5]) < 1e-6 && Math.abs(ys[5] - 0.085) < 1e-6, `y ${ys[5].toFixed(4)} -> ${ys[60].toFixed(4)}`);
 }
 
+// ---- the mouth: lips part around a tongue that comes out (a small mouth on a separate mannequin)
+{
+  const r2 = makeMannequin('Mouthy');
+  const hb2 = r2.getObjectByName('Head');
+  const mk = (name, p) => { const b = new THREE.Bone(); b.name = name; b.position.set(p[0] - 0, p[1] - 1.57, p[2] - 0.01); hb2.add(b); return b; };
+  const lipU = mk('lip.upper', [0, 1.604, 0.115]), lipL = mk('lip.lower', [0, 1.596, 0.115]), tng = mk('tongue', [0, 1.598, 0.095]);
+  r2.updateMatrixWorld(true);
+  const parts = [[[0.04, 0.004, 0.006], [0, 1.604, 0.118], 0], [[0.04, 0.004, 0.006], [0, 1.596, 0.118], 1], [[0.018, 0.008, 0.03], [0, 1.598, 0.1], 2]];
+  const geos = parts.map(([sz, c, bi]) => { const g = new THREE.BoxGeometry(...sz, 4, 1, 1); g.translate(...c); const n = g.attributes.position.count; g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(n * 4).map((_, i) => (i % 4 ? 0 : bi)), 4)); g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 ? 0 : 1)), 4)); return g; });
+  const { mergeGeometries } = await import('three/examples/jsm/utils/BufferGeometryUtils.js');
+  const mouthMesh = new THREE.SkinnedMesh(mergeGeometries(geos), new THREE.MeshBasicMaterial());
+  mouthMesh.name = 'Mouth';
+  r2.add(mouthMesh); r2.updateMatrixWorld(true);
+  mouthMesh.bind(new THREE.Skeleton([lipU, lipL, tng]), mouthMesh.matrixWorld);
+  const b2 = []; r2.traverse((o) => { if (o.isBone) b2.push(o); });
+  const rig2 = detectHumanoid(r2, b2);
+  const rest2 = new Map(); r2.traverse((o) => rest2.set(o, { p: o.position.clone(), q: o.quaternion.clone(), s: o.scale.clone() }));
+  let nc = 0; r2.traverse(() => nc++);
+  const m2 = { root: r2, humanoid: rig2, rest: rest2, bones: b2, skinned: [r2.getObjectByName('Body'), mouthMesh], morphMeshes: [], nodeCount: nc, poses: [], size: 1.8, constraints: null, drivenBones: new Set() };
+  const pose = (name, bone, d) => poseFromClip(m2, new THREE.AnimationClip(name, 0, [new THREE.VectorKeyframeTrack(bone.uuid + '.position', [0], bone.position.clone().add(new THREE.Vector3(...d)).toArray())]));
+  m2.poses = [pose('mouth_open', lipL, [0, -0.012, 0]), pose('tongue_out', tng, [0, 0, 0.03])];
+  const { mouthProbe, mouthEffects, clearMouth } = await import('../src/anim/mouth.js');
+  const probe = mouthProbe(m2);
+  ok('mouth: lips and tongue found on the mesh', probe && probe.upper.length && probe.lower.length && probe.tongue.length);
+  const fx = mouthEffects(m2);
+  ok('mouth: what each control does is measured', fx && Math.abs(fx.get('mouth_open').open - 0.012) < 0.002 && fx.get('tongue_out').tongue > 0.02, JSON.stringify(fx && [...fx].map(([k, v]) => [k, +(v.open * 100).toFixed(1), +(v.tongue * 100).toFixed(1)])));
+  const keys = [{ t: 0, control: 'tongue_out', value: 0 }, { t: 0.6, control: 'tongue_out', value: 1 }, { t: 2, control: 'tongue_out', value: 1 }];
+  const clip = new THREE.AnimationClip('t', 2, faceTracks(m2, keys, 2).tracks);
+  const res = clearMouth(m2, clip, keys);
+  ok('mouth: a tongue out through closed lips gets the lips parted, no clipping left', res.report && res.report.clipCm > 0.3 && res.report.opened === 'mouth_open' && res.report.clipAfterCm <= 0.15 && res.keys.some((k) => k.control === 'mouth_open' && k.value > 0.5), JSON.stringify(res.report));
+}
+
 // ---- the self-check
 {
   const T = (t) => ({ t, hand: 'right', spot: 'mouth', weight: 1, finger: 'index', mode: 'tip', depth: 0.3 });

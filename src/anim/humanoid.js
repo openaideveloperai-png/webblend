@@ -558,6 +558,9 @@ export class HumanoidRig {
     const contact = spot.local.clone().applyQuaternion(refW).add(refP);
     if (touch.offset) contact.add(toModel(touch.offset).multiplyScalar(this.hipHeight));
     const palm = toModel(spot.palm).normalize();
+    // on the way there the hand comes in from outside the body, not through it
+    const w = THREE.MathUtils.clamp(touch.weight ?? 1, 0, 1);
+    if (w < 1) contact.addScaledVector(palm, -(1 - w) * (1 - w) * 0.35 * this.hipHeight);
     const fing = toModel(spot.fingers);
     fing.addScaledVector(palm, -fing.dot(palm)).normalize();
     const ax = this.handAxes[side];
@@ -575,7 +578,7 @@ export class HumanoidRig {
     if (!g) return {};
     const { palm, fing, wrist } = g;
     (this.lastTouch || (this.lastTouch = {}))[side] = { contact: g.contact.clone(), palm: palm.clone() };
-    return this.reachSpec(side, wrist, this.handFrame(side, fing, palm), g.hint, touch.weight, first);
+    return this.reachSpec(side, wrist, this.handFrame(side, fing, palm), g.hint, touch.weight, first, palm.clone().negate());
   }
 
   // hand world rotation (model space) that puts the fingers along `fing` and the palm facing `palm`
@@ -590,21 +593,31 @@ export class HumanoidRig {
 
   // spec overrides that bring one hand's wrist to `wrist` with world rotation
   // `handW` (both model space), elbow toward `hint`; weight blends with the FK pose
-  reachSpec(side, wrist, handW, hint, weight, first) {
+  reachSpec(side, wrist, handW, hint, weight, first, away = null) {
     const w = THREE.MathUtils.clamp(weight ?? 1, 0, 1);
     const hb = this.map[side + 'Hand'], ua = this.map[side + 'UpperArm'], la = this.map[side + 'LowerArm'];
     if (!hb || !ua || !la) return {};
     const shoulder = first.curP.get(ua);
     // segment lengths between the canonical joints (twist bones may sit in between)
     const l1 = this.rest.get(la).pos.distanceTo(this.rest.get(ua).pos), l2 = this.rest.get(hb).pos.distanceTo(this.rest.get(la).pos);
-    const { joint: elbow, end } = this.twoBoneJoint(shoulder, wrist, l1, l2, hint);
+    let goal = wrist, mixW = w;
+    if (away && w < 1) {
+      // touching the body: the wrist travels along a path that bulges away from the
+      // body (so the hand doesn't sweep through the face or chest), solved with IK
+      const fkWrist = first.curP.get(hb);
+      const e = w * w * (3 - 2 * w);
+      const dist = fkWrist.distanceTo(wrist);
+      goal = fkWrist.clone().lerp(wrist, e).addScaledVector(away, Math.sin(Math.PI * e) * 0.3 * dist + (1 - e) * 0.1 * dist);
+      mixW = THREE.MathUtils.smoothstep(w, 0, 0.2);
+    }
+    const { joint: elbow, end } = this.twoBoneJoint(shoulder, goal, l1, l2, hint);
     // blend with the pose from the regular params while easing in / out
     const fkDir = (b) => this.rest.get(b).dirLocal.clone().applyQuaternion(first.cur.get(b)).normalize();
-    const mix = (fk, ik) => fk.clone().lerp(ik, w).normalize();
+    const mix = (fk, ik) => fk.clone().lerp(ik, mixW).normalize();
     const upDir = mix(fkDir(ua), elbow.clone().sub(shoulder).normalize());
     const loDir = mix(fkDir(la), end.clone().sub(elbow).normalize());
     let hw = handW.clone();
-    if (w < 1) hw = first.cur.get(hb).clone().slerp(hw, w);
+    if (w < 1) hw = first.cur.get(hb).clone().slerp(hw, away ? Math.min(1, w * 1.5) : w);
     const toChar = (v) => v.clone().applyQuaternion(this.Finv);
     return {
       [side + 'UpperArm']: { dir: toChar(upDir), twist: 0 },
@@ -1058,7 +1071,7 @@ export class HumanoidRig {
     const wrist = contact.clone().sub(refLocal.clone().applyQuaternion(handW));
     (this.lastTouch || (this.lastTouch = {}))[side] = { contact: contact.clone(), palm: P.clone(), finger: use.join('+'), tipLocal: refLocal.clone() };
     void H;
-    return this.reachSpec(side, wrist, handW, g.hint, touch.weight, first);
+    return this.reachSpec(side, wrist, handW, g.hint, touch.weight, first, g.palm.clone().negate());
   }
 
   // keep a foot where it stands at rest (legs bend to follow the hips)

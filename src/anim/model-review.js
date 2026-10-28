@@ -184,7 +184,7 @@ export async function renderReview(prop, { cell = [512, 384] } = {}) {
 
 // Frames of a clip as the app plays it (effects included), for Claude to check its
 // effects: up to 6 labelled moments from a three-quarter view. -> JPEG Blob or null
-export async function renderFilmstrip(app, model, entry, times, { labels = [], top = 0 } = {}) {
+export async function renderFilmstrip(app, model, entry, times, { labels = [], top = 0, focus = null, views = [] } = {}) {
   const vp = app.viewport;
   if (!vp || !vp.renderer || !times.length) return null;
   const r = vp.renderer, canvas = r.domElement;
@@ -220,6 +220,16 @@ export async function renderFilmstrip(app, model, entry, times, { labels = [], t
     times.slice(0, 6).forEach((t, i) => {
       app.setTime(t, { emit: false });
       app.tick(0);
+      if (focus) {
+        // a close-up that follows a part of the body (the face): 3/4 front or from the side
+        const f = focus(t);
+        const d = f.radius / Math.tan(THREE.MathUtils.degToRad(17.5));
+        cam.near = d / 50; cam.far = d * 50; cam.updateProjectionMatrix();
+        if (views[i] === 'side') cam.position.copy(f.center).addScaledVector(f.lat, -d).addScaledVector(f.fwd, d * 0.15);
+        else cam.position.copy(f.center).addScaledVector(f.fwd, d * 0.85).addScaledVector(f.lat, -d * 0.42).addScaledVector(f.up, d * 0.08);
+        cam.up.copy(f.up);
+        cam.lookAt(f.center);
+      }
       r.render(vp.scene, cam);
       const x = (i % cols) * W, y = Math.floor(i / cols) * H;
       g.drawImage(canvas, x, y, W, H);

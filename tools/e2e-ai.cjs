@@ -277,6 +277,8 @@ const PNG1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQV
     ok('Claude gets the finger params, fingertip touches, the bone map and faceKeys', /lIndex/.test(mt) && /fingertip/.test(mt) && /finger bones: pose them with the finger params/.test(mt) && /Never animate only the wrist/.test(mt) && sch && sch.properties.handTouches.items.properties.finger.enum.includes('index') && !!sch.properties.faceKeys && sch.properties.boneKeys.items.required.includes('my'));
     const review = calls.find((b) => /You already answered this request/.test(JSON.stringify(b.messages)));
     const rt = review ? textOf(review) : '';
+    const rc = review && review.messages[0].content;
+    ok('Claude watches close-ups of the face during the motion', Array.isArray(rc) && rc.some((c) => c.type === 'image') && /close-ups of the face/.test(rt), review ? `${(rc || []).filter((c) => c.type === 'image').length} image(s)` : 'no review');
     ok('the app measured the first try and sent the problems back', /neither hand goes anywhere/.test(rt) && /"NoSuchBone"/.test(rt) && /"mouth_u"/.test(rt), rt.slice(rt.indexOf('PROBLEMS'), rt.indexOf('PROBLEMS') + 300));
     const st = await page.evaluate(() => {
       const a = window.webblend; const m = a.models[0];

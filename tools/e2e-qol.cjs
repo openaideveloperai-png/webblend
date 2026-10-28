@@ -82,6 +82,26 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   await page.click('button:has-text("Key this mix")');
   const keyed = await page.evaluate(() => { const a = window.webblend; const m = a.selection.model; const h = m.root.getObjectByName('Head'); const e = m.activeClip; return e ? e.clip.tracks.filter((t) => t.name.startsWith(h.uuid)).length : 0; });
   ok('"Key this mix" keys it into the active clip', keyed >= 1, keyed);
+  // bones go back to rest when their keys are deleted or their clip goes away; a bone
+  // posed by hand (no keys) stays where it was put
+  const rel = await page.evaluate(() => {
+    const a = window.webblend; const m = a.models[0]; a.select(m.root, m);
+    for (const e of [...m.clips]) m.removeClip(e);
+    const ang = (b) => +(2 * Math.acos(Math.min(1, Math.abs(b.quaternion.dot(m.rest.get(b).q)))) * 57.3).toFixed(1);
+    const fore = m.root.getObjectByName('RightForeArm'), upper = m.root.getObjectByName('RightArm'), head = m.root.getObjectByName('LeftHandIndex2');
+    const r = a.ai.runOffline('wave with the right hand');
+    const e = a.addClipToModel(m, r.results[0].clip, { solo: true });
+    a.pause(); a.setTime(0.6); a.needsEval = true; a.tick(0);
+    const keyed = ang(fore);
+    head.quaternion.multiply(new head.quaternion.constructor(0.3, 0, 0, 0.954).normalize()); // posed by hand, no keys
+    a.editClip(m, e, (clip) => { clip.tracks = clip.tracks.filter((t) => !t.name.startsWith(fore.uuid)); }, 'Delete keys');
+    a.needsEval = true; a.tick(0);
+    const afterDelete = ang(fore), upperStill = ang(upper);
+    m.removeClip(e); a.needsEval = true; a.tick(0);
+    return { keyed, afterDelete, upperStill, upperAfterRemove: ang(upper), headKept: ang(head) };
+  });
+  ok('deleting a bone\'s keys puts it back to rest; removing the clip releases the rest', rel.keyed > 10 && rel.afterDelete < 0.5 && rel.upperStill > 5 && rel.upperAfterRemove < 0.5, JSON.stringify(rel));
+  ok('a bone posed by hand without keys stays posed', rel.headKept > 20, rel.headKept);
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
   console.log(fails ? `${fails} FAILED` : 'ALL QOL TESTS OK');

@@ -4,6 +4,7 @@
 // that doesn't exist on this rig. The report goes back to Claude to fix.
 import * as THREE from 'three';
 import { SPOTS, SPOT_ALIAS } from './humanoid.js';
+import { faceHits } from './mouth.js';
 
 // evaluate a clip on a scratch mixer from the rest pose; points in root space
 function sampler(model, clip) {
@@ -137,7 +138,7 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
       if (wants && cm(far) < 6) issues.push(`the ${side} hand hardly moves (${cm(far).toFixed(0)} cm) although it should go to ${[...new Set((plan.touches || []).filter((k) => k.hand === side).map((k) => k.spot))].join(' / ')}`);
     }
     // the request is about the hands (or the face, touched by a hand) but neither hand goes anywhere
-    const handWords = /\b(hands?|fingers?|fingertips?|thumbs?|palms?|touch\w*|mouth|lips?|face|cheeks?|chin|nose|wave|waving|point\w*|reach\w*|grab\w*|cover\w*|hold\w*|clap\w*)\b/i;
+    const handWords = /\b(hands?|fingers?|fingertips?|thumbs?|palms?|touch\w*|wave|waving|point\w*|reach\w*|grab\w*|cover\w*|clap\w*|poke\w*)\b/i;
     const tl = travel.left ?? 0, tr = travel.right ?? 0;
     if (handWords.test(prompt) && Math.max(tl, tr) < 6 && !(plan.touches || []).length) issues.push(`the request needs a hand to move, but neither hand goes anywhere (left ${tl.toFixed(0)} cm, right ${tr.toFixed(0)} cm): move the whole arm with handTouches (palm or fingertip on a spot) or arm params (rArmRaise / rArmSwing / rElbow...), not just the wrist`);
     // 3. bones keyed that a constraint overrides
@@ -149,5 +150,23 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
     }
   } finally { S.done(); }
   if (plan.face && plan.face.length) lines.push(`- face controls used: ${plan.face.join(', ')}`);
+  const mo = clip.userData && clip.userData.mouth;
+  if (mo) lines.push(`- mouth: ${mo.tongueOutCm > 0.1 ? `tongue out up to ${mo.tongueOutCm} cm; ` : ''}${mo.fingerIn ? 'a finger goes between the lips; ' : ''}${mo.opened ? `the lips were parted with "${mo.opened}" (open up to ${mo.openCm} cm) so nothing clips through them${mo.clipAfterCm > 0.1 ? `, still ${mo.clipAfterCm} cm short` : ''}` : mo.clipCm > 0.1 ? `${mo.clipCm} cm of clipping through the lips${mo.unfixed ? ' (' + mo.unfixed + ')' : ''}` : 'nothing clips through the lips'}`);
+  if (mo && !mo.opened && mo.clipCm > 0.3) issues.push(`something passes through the closed lips (${mo.clipCm} cm): open the mouth there (a control that measures "opens the lips", the jaw, or the lip handles)`);
+  // a fingertip touch presses on (or into) its spot on purpose
+  const exempt = (t, side, finger) => {
+    const ks = (plan.touches || []).filter((k) => k.hand === side && k.finger && k.finger !== 'palm').sort((a, b) => a.t - b.t);
+    if (!ks.length) return false;
+    let w = ks[0].weight, k0 = ks[0];
+    for (let i = 0; i < ks.length; i++) {
+      if (ks[i].t <= t) { w = ks[i].weight; k0 = ks[i]; }
+      if (ks[i].t > t) { const a = ks[Math.max(0, i - 1)]; const u = a === ks[i] ? 1 : (t - a.t) / Math.max(1e-6, ks[i].t - a.t); w = a.weight + (ks[i].weight - a.weight) * u; k0 = u < 0.5 ? a : ks[i]; break; }
+    }
+    const fingers = k0.finger === 'two' ? ['index', 'middle'] : [k0.finger];
+    return w > 0.3 && fingers.includes(finger);
+  };
+  try {
+    for (const h of faceHits(model, clip, { exempt }).slice(0, 6)) issues.push(`at ${h.t} s the ${h.what} goes ${h.cm} cm into the face (clipping): move the hand out, or touch the surface with handTouches`);
+  } catch (e) { console.warn('face hits', e); }
   return { text: lines.join('\n'), issues };
 }

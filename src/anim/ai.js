@@ -25,6 +25,7 @@ import { HUMANOID, OBJECT, CHAIN, bakeHumanoid, bakeObject, bakeChain, boneChain
 import { POSE_PARAMS, defaultParams, paramsToSpec, SPOTS, SPOT_ALIAS } from './humanoid.js';
 import { boneKeyPlan, boneKeyPost, boneKeyTracks } from './bonekeys.js';
 import { faceTracks, describeFace, faceKeysFor } from './face.js';
+import { clearMouth, mouthEffects, mouthProbe, faceHits } from './mouth.js';
 import { describeRig } from './rigscan.js';
 import { checkMotion } from './motioncheck.js';
 import { inArtifact } from '../core/util.js';
@@ -245,6 +246,7 @@ export function parseFaceWords(text) {
   add(/\bwink(s|ed|ing)?\b/, 'wink');
   add(/\bopen(s|ed|ing)?\s+(?:(?:her|his|their|the|its)\s+)*mouth\b|\bsay(s|ing)?\s+a+h+\b|\b(surprised|shocked|gasp(s|ed|ing)?)\b/, 'open');
   add(/\b(pout(s|ed|ing)?|kiss(y|es|ing)?\s*face|pucker(s|ed|ing)?|duck\s*face|blow(s|ing)?\s+a\s+kiss)\b/, 'round');
+  add(/\btongue\s+out\b|\bstick(s|ing)?\s+(?:(?:her|his|their|its|the|a)\s+)*tongue\b|\bblep\b|\bbleh+\b|\bsilly\s+face\b|\braspberry\b/, 'tongue');
   return out;
 }
 
@@ -304,7 +306,7 @@ export function isSimplePrompt(text) {
   const motionWords = new Set(['hand', 'hands', 'palm', 'palms', 'arm', 'arms', 'put', 'place', 'rest', 'resting', 'touch', 'touching', 'over', 'onto', 'under', 'below', 'behind', 'against', 'other', 'own', 'top', 'lower', 'pose', 'posing', 'still',
     'cross', 'crosses', 'crossed', 'crossing', 'fold', 'folds', 'folded', 'folding', 'cover', 'covers', 'covered', 'covering', 'hide', 'hides', 'hiding', 'plug', 'plugs', 'facepalm', 'facepalms', 'gasp', 'gasps', 'yawn', 'yawns', 'thinking', 'thinker', 'peekaboo',
     'finger', 'fingers', 'fingertip', 'into', 'inside', 'shh', 'shhh', 'shush', 'hush', 'quiet', 'gesture', 'bite', 'bites', 'biting', 'nail', 'nails', 'fingernail', 'poke', 'pokes', 'poking', 'boop', 'nose',
-    'thumb', 'thumbs', 'peace', 'sign', 'fist', 'fists', 'clench', 'open', 'spread', 'jazz', 'smile', 'smiles', 'smiling', 'grin', 'blink', 'blinks', 'blinking', 'wink', 'winks', 'winking', 'pout', 'pouts', 'pouting', 'kiss', 'kissy', 'pucker', 'surprised', 'say', 'aah', 'ah', 'cute', 'cutely']);
+    'thumb', 'thumbs', 'peace', 'sign', 'fist', 'fists', 'clench', 'open', 'spread', 'jazz', 'smile', 'smiles', 'smiling', 'grin', 'blink', 'blinks', 'blinking', 'wink', 'winks', 'winking', 'pout', 'pouts', 'pouting', 'kiss', 'kissy', 'pucker', 'surprised', 'say', 'aah', 'ah', 'cute', 'cutely', 'tongue', 'stick', 'sticks', 'sticking', 'blep', 'silly', 'eye', 'one', 'at', 'you']);
   for (const [w] of SPOT_WORDS) for (const part of w.split(/\s+/)) motionWords.add(part);
   for (const t of [HUMANOID, OBJECT, CHAIN]) for (const m of Object.values(t)) for (const w of m.words) for (const part of w.split(/\s+/)) motionWords.add(part);
   const unknown = words.filter((w) => !FILLER.has(w) && !motionWords.has(w) && !/^\d+(\.\d+)?s?$/.test(w));
@@ -486,6 +488,20 @@ export class AIAssistant {
         }
         if (missing.length) notes.push(`${model.name} has no ${missing.join(' / ')} control${missing.length > 1 ? 's' : ''} (no matching shape keys or face bones).`);
       }
+      // the lips part around a finger or the tongue
+      if (rig) {
+        try {
+          if (mouthProbe(model)) {
+            const keys0 = faceWants.length ? faceKeysFor(model, faceWants, clip.duration).keys : [];
+            const res = clearMouth(model, clip, keys0);
+            if (res.keys) {
+              const face = faceTracks(model, res.keys, clip.duration);
+              const taken = new Set(face.tracks.map((t) => t.name));
+              clip.tracks = clip.tracks.filter((t) => !taken.has(t.name)).concat(face.tracks);
+            }
+          }
+        } catch (e) { console.warn('mouth clearance', e); }
+      }
       // "punch with fire fists", "spin with a glowing aura"
       const fx = model.adopt ? vfxFromText(prompt, { melee: false, gun: false }) : [];
       if (fx.length) { bakeVFX(model, clip, fx, {}); notes.push(`Added ${fx.map((e) => e.name.toLowerCase()).join(', ')}.`); }
@@ -577,7 +593,7 @@ export class AIAssistant {
       lines.push(s);
       if (h) { try { const b = describeBody(m); if (b) lines.push(b); } catch (e) { console.warn('body map', e); } }
       if (m.bones.length) { try { const r = describeRig(m); if (r) lines.push(r); } catch (e) { console.warn('rig scan', e); } }
-      if (m.bones.length || (m.morphMeshes && m.morphMeshes.length)) { try { const f = describeFace(m); if (f) lines.push(f); } catch (e) { console.warn('face controls', e); } }
+      if (m.bones.length || (m.morphMeshes && m.morphMeshes.length)) { try { let fx = null; try { fx = m.humanoid ? mouthEffects(m) : null; } catch (e) { console.warn('mouth effects', e); } const f = describeFace(m, fx); if (f) lines.push(f); } catch (e) { console.warn('face controls', e); } }
     }
     return lines.join('\n') || '(empty scene)';
   }
@@ -627,7 +643,7 @@ ${params}
 - Held poses (hand on lap, hands on hips, hand on chest...) should look calm: after the hands arrive, keep the body nearly still with only subtle breathing (chestPitch about ±1.5, tiny headPitch), and loop only that breathing.
 - objectKeys: position = offset from the object's current place in multiples of its size; rotation = degrees (x,y,z euler) added to its current rotation; scale = multipliers; opacity uses x (0-1); color uses x,y,z as r,g,b 0-1.
 - boneKeys work on ANY bone listed in the bone map (face handles, hair, ears, tail, wings, clothes, breasts, extra spine bones, robot parts...), on top of the body pose at that moment. x / y / z = degrees about the CHARACTER's axes through the bone's joint: x+ swings the part forward and down (like a nod), y+ turns it toward the character's left, z+ tilts it toward the character's right. mx / my / mz = slide it in cm along the character's left / up / forward (for [move] control handles like lips and jaw; small values, about the listed range). For a model without a humanoid these are the model's own x / y / z axes. Values are offsets from where the bone would be, so 0 = unchanged. Prefer humanoidKeys / handTouches / finger params for the body, arms, hands and fingers, and faceKeys for expressions; use boneKeys for everything else, and only on bones the bone map lists (not the "driven automatically" ones).
-- faceKeys blend the face / pose controls listed for the model (shape keys like blink or smile, mouth shapes, poses saved in the file, the jaw): value 0 = off, 1 = full, mixable (e.g. "mouth_u" 0.6 + a smile 0.3). Ease them in and out over 0.15-0.4 s, and blink now and then in longer clips if there's a blink control. Mouth shapes that wrap around something: combine a rounded / pursed shape (u, o, kiss, pout) with a little jaw opening, and lip handles via boneKeys if the bone map lists them.
+- faceKeys blend the face / pose controls listed for the model (shape keys like blink or smile, mouth shapes, poses saved in the file, the jaw): value 0 = off, 1 = full, mixable (e.g. "mouth_u" 0.6 + a smile 0.3). Ease them in and out over 0.15-0.4 s, and blink now and then in longer clips if there's a blink control. Mouth shapes that wrap around something: combine a rounded / pursed shape (u, o, kiss, pout) with a little jaw opening, and lip handles via boneKeys if the bone map lists them. "{measured: ...}" says what a mouth control really does on this character (how far it opens the lips, how far the tongue comes out): use it to pick controls (e.g. a tongue out needs a control that measures "tongue out"; "tongueOut" / "tongueCurl" push the tongue out along a curve and curl its tip). One eye only (a wink): use a control for that eye (names ending in .L = the character's left eye, .R = right, or a wink shape key), never a both-eyes blink. The app keeps the lips apart around anything passing through them (the tongue, a finger), opening the mouth just as much as needed, so nothing clips through the lips; still, open the mouth a little yourself when the tongue comes out, and keep the tongue out (and the finger in) for a moment before taking it back.
 - Use 4-30 keys per clip, spaced through the duration, with natural ease (anticipation, overshoot, follow-through). For loops make the last key equal the first.
 
 ${this.propRules()}
@@ -1091,25 +1107,47 @@ ${parts.join('\n\n')}`;
     const items = results.filter((r) => r.clip && r.clip.userData && r.clip.userData.spec).slice(0, 3);
     const checked = [];
     for (const r of items) {
+      onStatus?.('Checking the motion…');
       try { checked.push({ ...r, check: checkMotion(r.model, r.clip, { prompt }) }); } catch (e) { console.warn('motion check', e); }
     }
-    const bad = checked.filter((x) => x.check.issues.length);
+    // clips that do something with the face get watched up close, even when the numbers look fine
+    const FACE_SPOTS = new Set(['mouth', 'nose', 'cheek', 'chin', 'face', 'eyes', 'forehead', 'ear']);
+    const faceWords = /\b(mouth|lips?|tongue|teeth|jaw|kiss|lick|bite|wink|blink|eyes?|face|cheeks?|nose|smile|pout|blep|silly)\b/i;
+    const involvesFace = (x) => { const p = x.clip.userData.plan || {}; return (p.touches || []).some((k) => FACE_SPOTS.has(k.spot)) || (p.face || []).length > 0 || !!x.clip.userData.mouth || faceWords.test(prompt); };
+    const canSee = checked.some((x) => x.model.humanoid && involvesFace(x)) ? await this.canSendImages() : false;
+    const bad = checked.filter((x) => x.check.issues.length || (canSee && x.model.humanoid && involvesFace(x)));
     if (!bad.length) return '';
     if (signal?.aborted) throw Object.assign(new Error('Stopped.'), { code: 'cancelled' });
+    const sheets = [];
+    for (const x of bad) {
+      if (!canSee || !x.model.humanoid || !involvesFace(x) || sheets.length >= 2) continue;
+      onStatus?.('Claude is watching the face up close…');
+      const entry = x.model.clips.find((e) => e.clip === x.clip || e.clip.uuid === x.clip.uuid);
+      if (!entry) continue;
+      if (x.model.switchClip) x.model.switchClip(entry);
+      const p = x.clip.userData.plan || {};
+      const d = x.clip.duration;
+      const ts = new Set([d * 0.2, d * 0.45, d * 0.7, d * 0.95]);
+      for (const k of (p.touches || []).filter((k) => k.weight >= 0.9).slice(0, 3)) ts.add(Math.min(d, k.t + 0.05));
+      const times = [...ts].map((t) => +Math.min(d, Math.max(0, t)).toFixed(2)).sort((a, b) => a - b);
+      const pick = times.length <= 6 ? times : Array.from({ length: 6 }, (_, i) => times[Math.round((i * (times.length - 1)) / 5)]);
+      const sheet = await renderFilmstrip(this.app, x.model, entry, pick, { focus: faceFocus(x.model), views: pick.map((_, i) => (i % 3 === 2 ? 'side' : 'front')) });
+      if (sheet) { sheets.push(sheet); x.frames = pick; }
+    }
     onStatus?.('Claude is fixing the motion…');
-    const parts = bad.map(({ model, clip, check }) => `CLIP "${clip.name}" on "${model.name}" (${clip.duration.toFixed(2)} s)
+    const parts = bad.map(({ model, clip, check, frames }) => `CLIP "${clip.name}" on "${model.name}" (${clip.duration.toFixed(2)} s)${frames ? `, close-up frames ${frames.map((t, i) => `${String.fromCharCode(65 + i)}=${t.toFixed(2)}s${i % 3 === 2 ? ' (side)' : ''}`).join(' ')}` : ''}
 Measured in the app:
 ${check.text || '(nothing measured)'}
 PROBLEMS:
-${check.issues.map((i) => '- ' + i).join('\n')}
+${check.issues.length ? check.issues.map((i) => '- ' + i).join('\n') : '- (none measured; check the close-ups)'}
 Your clip JSON:
 ${JSON.stringify(clip.userData.spec)}`);
     const text = `${this.instructions(prompt)}
 
-You already answered this request; the app built your clips and measured them on the character. Fix every PROBLEM below (keep what already works) and reply with the COMPLETE corrected JSON in the same format: the fixed clips (same names), and "props": [].
+You already answered this request; the app built your clips and measured them on the character${sheets.length ? ', and rendered close-ups of the face during the motion (the images; letters and times on each frame)' : ''}. Look very closely: nothing may clip (the tongue or a finger through the lips or teeth, a hand or finger into the face or body, lips pushing through each other), the lips should part naturally around whatever passes between them, the tongue should come out curved (not as a stiff stick), one-eye winks must close only that eye, and the motion should read clearly and look natural. Fix every PROBLEM and everything wrong you see (keep what already works) and reply with the COMPLETE corrected JSON in the same format: the fixed clips (same names), and "props": []. If a clip already looks right, leave it out of "clips".
 
 ${parts.join('\n\n')}`;
-    const answer = await this.callClaude(text, { signal, schema: this.schema(), onText: (t) => onStatus?.(`Claude is fixing the motion… (${Math.round(t.length / 100) / 10}k chars)`) });
+    const answer = await this.callClaude(text, { signal, images: sheets, schema: this.schema(), onText: (t) => onStatus?.(`Claude is fixing the motion… (${Math.round(t.length / 100) / 10}k chars)`) });
     let changed = 0;
     for (const c of (answer && answer.clips) || []) {
       const it = bad.find((x) => x.clip.name === c.name) || (bad.length === 1 ? bad[0] : null);
@@ -1426,16 +1464,32 @@ ${parts.join('\n\n')}`;
     if (bPlan.bones.length && !bakedBones) tracks.push(...boneKeyTracks(model, bPlan, duration, 30, object === model.root ? model.humanoid : null));
     // face: shape keys, the file's poses, the jaw
     let face = { tracks: [], unknown: [], used: [] };
-    if (Array.isArray(c.faceKeys) && c.faceKeys.length) {
-      face = faceTracks(model, c.faceKeys, duration);
+    const putFace = (keys) => {
+      const before = new Set(face.tracks.map((t) => t.name));
+      for (let i = tracks.length - 1; i >= 0; i--) if (before.has(tracks[i].name)) tracks.splice(i, 1);
+      face = faceTracks(model, keys, duration);
       const taken = new Set(face.tracks.map((t) => t.name));
       for (let i = tracks.length - 1; i >= 0; i--) if (taken.has(tracks[i].name)) tracks.splice(i, 1);
       tracks.push(...face.tracks);
+    };
+    if (Array.isArray(c.faceKeys) && c.faceKeys.length) putFace(c.faceKeys);
+    // the lips part around the tongue or a finger instead of clipping through them
+    let mouthReport = null;
+    if (rig && tracks.length) {
+      try {
+        if (mouthProbe(model)) {
+          const unknownFace = face.unknown;
+          const res = clearMouth(model, new THREE.AnimationClip(name, duration, tracks.slice()), Array.isArray(c.faceKeys) ? c.faceKeys : []);
+          mouthReport = res.report;
+          if (res.keys) { putFace(res.keys); face.unknown = unknownFace; }
+        }
+      } catch (e) { console.warn('mouth clearance', e); }
     }
     const clip = new THREE.AnimationClip(name, duration, tracks);
     clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined, swings: driver ? driver.swings.map((w) => ({ ...w })) : [], shots: driver ? driver.shots.slice() : [] };
     // what the self-check needs to know about the request
     clip.userData.spec = JSON.parse(JSON.stringify(c));
+    if (mouthReport) clip.userData.mouth = mouthReport;
     clip.userData.plan = { touches: tKeys.map((k) => ({ t: Number(k.t), hand: k.hand, spot: k.spot, weight: Number(k.weight ?? 1), ...how(k) })), unknownBones: bPlan.unknown, drivenBones: bPlan.driven || [], limitedBones: bPlan.limited || [], keyedBones: bPlan.bones.map((b) => b.bone.name), unknownFace: face.unknown, face: face.used };
     // effects follow the finished motion
     if (Array.isArray(c.vfx) && c.vfx.length && model.adopt) {
@@ -1444,6 +1498,23 @@ ${parts.join('\n\n')}`;
     }
     return clip;
   }
+}
+
+// where the camera looks for face close-ups: the mouth, following the head
+function faceFocus(model) {
+  const rig = model.humanoid;
+  const head = rig.map.head;
+  const sp = rig.spot('mouth', 'right');
+  const hr = rig.rest.get(head), inv = hr.Wq.clone().invert();
+  const ax = { up: rig.up.clone().applyQuaternion(inv), fwd: rig.fwd.clone().applyQuaternion(inv), lat: rig.lat.clone().applyQuaternion(inv) };
+  const s = new THREE.Vector3(); model.root.getWorldScale(s);
+  return () => {
+    head.updateWorldMatrix(true, false);
+    const q = new THREE.Quaternion(); head.getWorldQuaternion(q);
+    const hp = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+    const center = sp ? sp.local.clone().multiplyScalar(s.x || 1).applyQuaternion(q).add(hp) : hp;
+    return { center, up: ax.up.clone().applyQuaternion(q), fwd: ax.fwd.clone().applyQuaternion(q), lat: ax.lat.clone().applyQuaternion(q), radius: rig.height * (s.x || 1) * 0.1 };
+  };
 }
 
 export function parseJSONLoose(text) {

@@ -19,7 +19,12 @@ const MORPH_JP = {
   '照れ': 'blush', '青ざめ': 'pale', '涙': 'tears',
 };
 
+// meters per root unit
+function unitsScale(model) { const s = new THREE.Vector3(1, 1, 1); model.root.getWorldScale(s); return s.x || 1; }
+
 export function controlLabel(name) {
+  const side = /^(.*)\.(L|R)$/.exec(String(name || ''));
+  if (side && side[1]) return `${controlLabel(side[1])} (${side[2] === 'L' ? 'left' : 'right'} ${/brow|眉/i.test(name) ? 'brow' : 'eye'} only)`;
   const n = String(name || '');
   const k = n.normalize ? n.normalize('NFKC') : n;
   if (MORPH_JP[n]) return MORPH_JP[n];
@@ -99,6 +104,7 @@ export function blendPoses(model, list) {
 // -> [{ id, kind: 'shape'|'pose'|'jaw', name, label, group, targets?, pose?, bone?, axisL?, maxDeg? }]
 export function faceControls(model) {
   if (model._faceControls && model._faceControlsN === model.nodeCount && model._faceControlsP === (model.poses || []).length) return model._faceControls;
+  try { splitSides(model); } catch (e) { console.warn('one-eye shape keys', e); }
   const list = [];
   const head = model.humanoid && model.humanoid.map.head;
   const isHeadMesh = (mesh) => {
@@ -168,6 +174,27 @@ export function faceControls(model) {
       if (moved.dot(rig.up) > 0) axisW.negate();
       list.push({ id: 'jaw', kind: 'jaw', name: 'jawOpen', label: 'open the jaw (bone ' + jaw.name + ')', group: 'mouth', bone: jaw, axisL: axisW.applyQuaternion(r.Wq.clone().invert()).normalize(), maxDeg: 22 });
     }
+    // the tongue: rigs with tongue handles (bones you slide that the tongue stretches to)
+    // get "tongueOut" (out along a drooping curve) and "tongueCurl" (the tip curls up)
+    const handles = [];
+    head.traverse((o) => { const i = info.get(o); if (o.isBone && /tongue|舌|べろ/i.test(o.name + ' ' + (translateName(o.name) || '')) && i && i.role === 'control' && i.kind === 'move') handles.push(o); });
+    if (handles.length && rig) {
+      const fw = (b) => rig.rest.get(b).pos.dot(rig.fwd);
+      handles.sort((a, b) => fw(a) - fw(b)); // back to the tip
+      const tip = handles[handles.length - 1];
+      let root = null;
+      head.traverse((o) => { const i = info.get(o); if (!root && o.isBone && /tongue|舌|べろ/i.test(o.name) && i && (i.role === 'auto' || i.role === 'deform')) root = o; });
+      const span = root ? rig.rest.get(tip).pos.distanceTo(rig.rest.get(root).pos) : 0;
+      const range = (info.get(tip) && info.get(tip).rangeCm) ? info.get(tip).rangeCm / 100 / unitsScale(model) : 0;
+      const L = THREE.MathUtils.clamp(Math.max(span * 1.4, range * 1.2), rig.height * 0.008, rig.height * 0.04);
+      const parts = handles.map((b, k) => {
+        const f = handles.length === 1 ? 1 : 0.3 + 0.7 * (k / (handles.length - 1));
+        const Pw = b.parent && rig.rest.get(b.parent) ? rig.rest.get(b.parent).Wq.clone() : rig.rest.get(b).Pq.clone();
+        return { bone: b, f, toLocal: Pw.invert() };
+      });
+      list.push({ id: 'tongueOut', kind: 'tongue', mode: 'out', name: 'tongueOut', label: 'stick the tongue out (curves down a little; 0.3 = the tip shows, 1 = all the way)', group: 'mouth', parts, L, fwd: rig.fwd.clone(), up: rig.up.clone() });
+      list.push({ id: 'tongueCurl', kind: 'tongue', mode: 'curl', name: 'tongueCurl', label: 'curl the tongue tip up (use with tongueOut; negative curls it down)', group: 'mouth', parts, L, fwd: rig.fwd.clone(), up: rig.up.clone() });
+    }
   }
   model._faceControls = list;
   model._faceControlsN = model.nodeCount;
@@ -224,18 +251,32 @@ export function faceTracks(model, keys, duration, fps = 30) {
     const per = new Map(); // node -> {q:[], p:[], s:[]}
     let prevQ = new Map();
     const nodes = new Set();
-    for (const [c] of boneControls) { if (c.kind === 'pose') for (const d of c.pose.deltas) nodes.add(d.node); else nodes.add(c.bone); }
+    for (const [c] of boneControls) { if (c.kind === 'pose') for (const d of c.pose.deltas) nodes.add(d.node); else if (c.kind === 'tongue') for (const pt of c.parts) nodes.add(pt.bone); else nodes.add(c.bone); }
     for (let i = 0; i < n; i++) {
       const t = (i / (n - 1)) * duration;
       times.push(t);
       const poses = [];
       const jaw = new Map();
+      const tongue = [];
       for (const [c, ks] of boneControls) {
         const v = valueAt(ks, t);
         if (c.kind === 'pose') poses.push({ pose: c.pose, w: THREE.MathUtils.clamp(v, 0, 1.2) });
+        else if (c.kind === 'tongue') tongue.push([c, THREE.MathUtils.clamp(v, -1, 1.2)]);
         else jaw.set(c, THREE.MathUtils.clamp(v, -0.2, 1.2));
       }
       const blended = blendPoses(model, poses);
+      for (const [c, v] of tongue) {
+        for (const pt of c.parts) {
+          const r = model.rest.get(pt.bone);
+          const o = blended.get(pt.bone) || { q: r.q.clone(), p: r.p.clone(), s: r.s.clone() };
+          // out: forward, drooping more toward the tip; curl: the tip comes up and back
+          const d = c.mode === 'out'
+            ? c.fwd.clone().multiplyScalar(c.L * 0.9 * v * pt.f).addScaledVector(c.up, -c.L * 0.3 * v * pt.f * pt.f)
+            : c.up.clone().multiplyScalar(c.L * 0.32 * v * (pt.f > 0.95 ? 1 : -0.35 * pt.f)).addScaledVector(c.fwd, -c.L * 0.1 * v * (pt.f > 0.95 ? 1 : 0));
+          o.p.add(d.applyQuaternion(pt.toLocal));
+          blended.set(pt.bone, o);
+        }
+      }
       for (const [c, v] of jaw) {
         const r = model.rest.get(c.bone);
         const o = blended.get(c.bone) || { q: r.q.clone(), p: r.p.clone(), s: r.s.clone() };
@@ -268,12 +309,21 @@ export function faceTracks(model, keys, duration, fps = 30) {
 }
 
 // one line per group for the AI
-export function describeFace(model) {
+export function describeFace(model, effects = null) {
   const list = faceControls(model);
   if (!list.length) return '';
   const groups = {};
   for (const c of list) (groups[c.group] = groups[c.group] || []).push(c);
-  const fmt = (c) => (c.label && c.label !== c.name ? `"${c.name}" (${c.label})` : `"${c.name}"`) + (c.kind === 'pose' ? ' [pose from the file]' : c.kind === 'jaw' ? ' [jaw bone]' : '');
+  const fx = (c) => {
+    const e = effects && effects.get(c.name);
+    if (!e) return '';
+    const bits = [];
+    if (e.open > 0.002) bits.push(`opens the lips ${(e.open * 100).toFixed(1)} cm`);
+    else if (e.open < -0.001) bits.push('presses the lips together');
+    if (e.tongue > 0.003) bits.push(`tongue out ${(e.tongue * 100).toFixed(1)} cm`);
+    return bits.length ? ` {measured: ${bits.join(', ')}}` : '';
+  };
+  const fmt = (c) => (c.label && c.label !== c.name ? `"${c.name}" (${c.label})` : `"${c.name}"`) + (c.kind === 'pose' ? ' [pose from the file]' : c.kind === 'jaw' ? ' [jaw bone]' : c.kind === 'tongue' ? ' [tongue handles]' : '') + fx(c);
   const order = ['mouth', 'eyes', 'brows', 'face', 'body'];
   const parts = order.filter((g) => groups[g]).map((g) => `${g}: ${groups[g].slice(0, g === 'body' ? 12 : 40).map(fmt).join(', ')}${groups[g].length > (g === 'body' ? 12 : 40) ? ', …' : ''}`);
   return `  Face / pose controls for faceKeys (value 0 = off, 1 = full; they can be mixed): ${parts.join('; ')}.`;
@@ -286,6 +336,7 @@ const WANT = {
   wink: { re: /wink|ウィンク/, groups: ['eyes'], value: 1 },
   open: { re: /^(mouth[_ ]?)?(a|aa|ah)$|mouth[_ ]?a\b|mouth a \(open\)|jaw ?open|open the jaw|mouth ?open|^あ$/, groups: ['mouth'], value: 0.6 },
   round: { re: /^(mouth[_ ]?)?(o|u|ou|oh)$|mouth[_ ]?[ou]\b|mouth [ou] \(|pucker|kiss|pout|^お$|^う$|ω/, groups: ['mouth'], value: 0.7 },
+  tongue: { re: /^tongueout$|tongue ?out|stick the tongue out|mouth_?tongue|ぺろ|べー|舌出し/, groups: ['mouth'], value: 0.55 },
 };
 // wants: [{kind, at?, value?}] -> { keys: [{t, control, value}], missing: [kinds] }
 export function faceKeysFor(model, wants, duration) {
@@ -305,7 +356,9 @@ export function faceKeysFor(model, wants, duration) {
   for (const want of wants) {
     const w = WANT[want.kind];
     if (!w) continue;
-    const cs = pick(w);
+    let cs = pick(w);
+    // no wink shape key: close one eye with the left-only copy of the blink
+    if (!cs.length && want.kind === 'wink') { const b = list.find((x) => x.group === 'eyes' && /blink|まばたき/i.test(x.name + ' ' + x.label) && /\.L$/.test(x.name)); if (b) cs = [b]; }
     if (!cs.length) { if (!missing.includes(want.kind)) missing.push(want.kind); continue; }
     for (const c of cs) {
       if (seen.has(c.name + want.kind)) continue;
@@ -323,4 +376,85 @@ export function faceKeysFor(model, wants, duration) {
     }
   }
   return { keys, missing };
+}
+
+// ---------------------------------------------------------------- one eye at a time
+// Shape keys that close or move both eyes / brows at once get a left-only and a
+// right-only copy ("el_blink.L", "el_blink.R"), so the face can wink. Done once per model.
+export function splitSides(model) {
+  if (model._sidesSplit) return;
+  model._sidesSplit = true;
+  const rig = model.humanoid;
+  const head = rig && rig.map.head;
+  if (!head) return;
+  head.updateWorldMatrix(true, false);
+  const hp = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld);
+  // the head's own left-right axis (right even if the head is turned right now)
+  const hq = new THREE.Quaternion(); head.getWorldQuaternion(hq);
+  const latW = rig.lat.clone().applyQuaternion(rig.rest.get(head).Wq.clone().invert()).applyQuaternion(hq).normalize();
+  const v = new THREE.Vector3();
+  for (const mesh of model.morphMeshes || []) {
+    const g = mesh.geometry;
+    const dict = mesh.morphTargetDictionary || {};
+    const pos = g.morphAttributes && g.morphAttributes.position;
+    if (!pos || !pos.length) continue;
+    const names = Object.keys(dict);
+    const has = new Set(names.map((n) => n.toLowerCase()));
+    // where each vertex sits: + = character's left, measured from the head's middle
+    let side = null;
+    const sideOf = () => {
+      if (side) return side;
+      side = new Float32Array(g.attributes.position.count);
+      for (let i = 0; i < side.length; i++) { mesh.getVertexPosition(i, v); v.applyMatrix4(mesh.matrixWorld); side[i] = v.sub(hp).dot(latW); }
+      return side;
+    };
+    const add = [];
+    for (const name of names) {
+      const grp = controlGroup(name, true);
+      if (grp !== 'eyes' && grp !== 'brows') continue;
+      if (/(^|[._\s-])(l|r|left|right)$|左|右|wink|ウィンク/i.test(name)) continue;
+      if (has.has((name + '.l').toLowerCase())) continue;
+      const attr = pos[dict[name]];
+      if (!attr) continue;
+      const sd = sideOf();
+      // both sides move?
+      let lw = 0, rw = 0, maxX = 0;
+      for (let i = 0; i < attr.count; i++) { const m = Math.abs(attr.getX(i)) + Math.abs(attr.getY(i)) + Math.abs(attr.getZ(i)); if (!m) continue; if (sd[i] > 0) lw += m; else rw += m; maxX = Math.max(maxX, Math.abs(sd[i])); }
+      if (!(lw > (lw + rw) * 0.2 && rw > (lw + rw) * 0.2)) continue;
+      const blend = Math.max(maxX * 0.08, 1e-4);
+      const rel = g.morphTargetsRelative;
+      const base = g.attributes.position;
+      for (const [suffix, sgn] of [['.L', 1], ['.R', -1]]) {
+        const out = new Float32Array(attr.count * 3);
+        for (let i = 0; i < attr.count; i++) {
+          const x = sd[i] * sgn;
+          const w = THREE.MathUtils.smoothstep(x, -blend, blend);
+          for (let k = 0; k < 3; k++) {
+            const d = attr.getComponent(i, k) - (rel ? 0 : base.getComponent(i, k));
+            out[i * 3 + k] = (rel ? 0 : base.getComponent(i, k)) + d * w;
+          }
+        }
+        const na = new THREE.Float32BufferAttribute(out, 3);
+        na.name = name + suffix;
+        add.push([na, dict[name]]);
+      }
+    }
+    if (!add.length) continue;
+    for (const [na, from] of add) {
+      pos.push(na);
+      // other morph attributes (normals) need a matching entry
+      for (const key of Object.keys(g.morphAttributes)) {
+        if (key === 'position') continue;
+        const src = g.morphAttributes[key][from];
+        if (src) g.morphAttributes[key].push(src.clone());
+      }
+    }
+    const before = mesh.morphTargetInfluences ? mesh.morphTargetInfluences.slice() : [];
+    const oldDict = { ...dict };
+    for (let i = 0; i < pos.length; i++) if (!pos[i].name) pos[i].name = Object.keys(oldDict).find((k) => oldDict[k] === i) || ('shape ' + i);
+    mesh.updateMorphTargets();
+    for (let i = 0; i < before.length; i++) mesh.morphTargetInfluences[i] = before[i];
+    const r = model.rest && model.rest.get(mesh);
+    if (r && r.m) { const m = mesh.morphTargetInfluences.slice(); for (let i = 0; i < r.m.length; i++) m[i] = r.m[i]; r.m = m; }
+  }
 }
