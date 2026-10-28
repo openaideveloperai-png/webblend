@@ -8,7 +8,7 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const errors = [];
-  page.on('pageerror', (e) => errors.push(e.message));
+  page.on('pageerror', (e) => { errors.push(e.message); if (process.env.STACK) console.log('STACK', e.stack); });
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
   await page.goto('file://' + path.resolve(__dirname, '../index.html'));
   await page.waitForTimeout(1200);
@@ -118,6 +118,47 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   await page.waitForTimeout(200);
   const warned = await page.evaluate(() => [...document.querySelectorAll('.toast')].some((t) => /Select a bone/.test(t.textContent)) && !document.querySelector('.modal'));
   ok('...and asks for a bone when none is selected', warned);
+  // shape keys: type the value; negative runs the shape the other way, past 1 exaggerates
+  const mesh = await page.evaluate(() => {
+    const a = window.webblend; const m = a.models[0];
+    let mesh = null; m.root.traverse((o) => { if (!mesh && o.isMesh && !o.isSkinnedMesh && o.geometry.attributes.position.count > 20) mesh = o; });
+    if (!mesh) m.root.traverse((o) => { if (!mesh && o.isMesh) mesh = o; });
+    // (a fresh geometry: three.js doesn't expect shape keys to appear on one it has drawn)
+    const g = mesh.geometry = mesh.geometry.clone(), pos = g.attributes.position, n = g.attributes.normal;
+    // one shape key: every vertex 2 cm out along its normal ("grow")
+    const d = new pos.constructor(new Float32Array(pos.count * 3), 3);
+    for (let i = 0; i < pos.count; i++) d.setXYZ(i, n.getX(i) * 0.02, n.getY(i) * 0.02, n.getZ(i) * 0.02);
+    g.morphAttributes.position = [d]; g.morphTargetsRelative = true;
+    mesh.updateMorphTargets(); mesh.morphTargetDictionary = { grow: 0 };
+    a.select(mesh, m);
+    return { name: mesh.name, uuid: mesh.uuid };
+  });
+  await page.evaluate(() => document.querySelectorAll('.modal-back').forEach((m) => m.remove()));
+  await page.waitForTimeout(300);
+  const typeShape = async (v) => {
+    // (as typing does: focus, the value changes, Enter)
+    await page.evaluate((val) => {
+      const box = document.querySelector('input.num[aria-label="grow value"]');
+      box.dispatchEvent(new FocusEvent('focus')); box.focus();
+      box.value = String(val); box.dispatchEvent(new Event('input', { bubbles: true }));
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    }, v);
+    await page.waitForTimeout(150);
+    return page.evaluate((uuid) => {
+      const a = window.webblend; let mesh = null; a.world.traverse((o) => { if (o.uuid === uuid) mesh = o; });
+      const v = new mesh.position.constructor(), r = new mesh.position.constructor();
+      mesh.getVertexPosition(0, v); r.fromBufferAttribute(mesh.geometry.attributes.position, 0);
+      const nn = new mesh.position.constructor().fromBufferAttribute(mesh.geometry.attributes.normal, 0);
+      return { value: mesh.morphTargetInfluences[0], out: +(v.sub(r).dot(nn) * 100).toFixed(3), slider: +document.querySelector('input[type=range][aria-label="grow"]').value };
+    }, mesh.uuid);
+  };
+  const plus = await typeShape(0.5), minus = await typeShape(-0.5), big = await typeShape(2);
+  ok('shape keys: type the value in; negative runs the shape the other way (a "grow" key shrinks)', Math.abs(plus.value - 0.5) < 1e-6 && Math.abs(minus.value + 0.5) < 1e-6 && plus.out > 0.9 && minus.out < -0.9, JSON.stringify({ plus, minus }));
+  ok('...past 1 exaggerates it, the slider stays at its end', Math.abs(big.value - 2) < 1e-6 && big.out > 3.9 && big.slider === 1, JSON.stringify(big));
+  await page.keyboard.press('Control+z'); await page.waitForTimeout(150);
+  const unTyped = await page.evaluate((uuid) => { let mesh = null; window.webblend.world.traverse((o) => { if (o.uuid === uuid) mesh = o; }); return mesh.morphTargetInfluences[0]; }, mesh.uuid);
+  ok("...and undo takes a typed value back", Math.abs(unTyped + 0.5) < 1e-6, String(unTyped));
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
   console.log(fails ? `${fails} FAILED` : 'ALL QOL TESTS OK');

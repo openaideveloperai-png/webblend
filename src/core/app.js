@@ -20,7 +20,7 @@ import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITI
 import { onDecorationReady } from '../scene/patterns.js';
 import { updateSoftLips } from '../anim/softlips.js';
 import { faceLandmarks } from '../anim/landmarks.js';
-import { updateSoftSkin, solidBody } from '../anim/softskin.js';
+import { updateSoftSkin, solidBody, unsolidBody } from '../anim/softskin.js';
 
 const _v = new THREE.Vector3();
 
@@ -815,6 +815,8 @@ export class App extends Emitter {
 
   tick(dt) {
     const tr = this.transport;
+    // the solid body's turn comes off before the clip, constraints and IK pose this frame
+    for (const m of this.models) if (m._solid && m._solid.size) unsolidBody(m);
     if (tr.playing) {
       tr.time += dt;
       const d = this.duration();

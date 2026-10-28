@@ -106,8 +106,22 @@ const SETTLE_IN = 0.03, SETTLE_OUT = 0.16;
 // can take (the bones would meet), the limb doing it stops at that limit. Each arm / leg
 // turns at its shoulder / hip just enough to back the contact out (a few passes, since
 // moving one contact can change another). Changes the pose that's shown; the keys stay.
-const LIMBS = [['left', 'UpperArm', ['lArm', 'lFore', 'lHand']], ['right', 'UpperArm', ['rArm', 'rFore', 'rHand']], ['left', 'UpperLeg', ['lThigh', 'lShin', 'lFoot']], ['right', 'UpperLeg', ['rThigh', 'rShin', 'rFoot']]];
+// (only the arms: the legs carry the stance and their feet are often planted by IK, so a
+// leg pressing into something just dents it)
+const LIMBS = [['left', 'UpperArm', ['lArm', 'lFore', 'lHand']], ['right', 'UpperArm', ['rArm', 'rFore', 'rHand']]];
+const MAX_TURN = 0.45; // never more than ~26 degrees away from the pose as animated
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vj = new THREE.Vector3();
+// Take the solid body's turn back off before anything else poses the model this frame
+// (the clip, bone constraints, IK). Constraints take a bone that isn't where they left it
+// as posed by hand: they adopted the turn as the new pose, the next turn went on top of
+// that, and limbs on IK rigs folded up over a few seconds.
+export function unsolidBody(model) {
+  const st = model._solid;
+  if (!st || !st.size) return;
+  for (const [b, e] of st) if (b.quaternion.equals(e.applied)) b.quaternion.copy(e.base);
+  st.clear();
+}
+
 export function solidBody(model) {
   if (model.solidBody === false || model.softSkin === false || !model.humanoid) {
     // switched off: the limbs go back to the pose as animated
@@ -134,7 +148,11 @@ export function solidBody(model) {
     if (last.map.size) model.root.updateMatrixWorld(true);
     return last.out;
   }
-  const limbs = LIMBS.map(([side, k, gs]) => ({ bone: rig.map[side + k], leg: k === 'UpperLeg', gs: new Set(gs.map((g) => s.groups.indexOf(g)).filter((i) => i >= 0)) })).filter((l) => l.bone && l.gs.size);
+  // (only a limb the skin really follows: turning a control bone that the mesh doesn't
+  // follow directly would do nothing, and the turn would only grow)
+  const follows = s.followsCache || (s.followsCache = new Map());
+  const skinFollows = (bone) => { if (!follows.has(bone)) follows.set(bone, s.dBones.some((d) => { for (let p = d; p; p = p.parent) if (p === bone) return true; return false; })); return follows.get(bone); };
+  const limbs = LIMBS.map(([side, k, gs]) => ({ bone: rig.map[side + k], leg: k === 'UpperLeg', gs: new Set(gs.map((g) => s.groups.indexOf(g)).filter((i) => i >= 0)) })).filter((l) => l.bone && l.gs.size && skinFollows(l.bone));
   // while playing or dragging: start from last frame's correction, eased a little back toward
   // the animation (warm start: usually one solve a frame, and a limb let go drifts back
   // smoothly); paused / scrubbed: worked out from scratch, exactly
@@ -232,6 +250,9 @@ export function solidBody(model) {
       const parentQ = new THREE.Quaternion();
       if (L.bone.parent) L.bone.parent.getWorldQuaternion(parentQ);
       L.bone.quaternion.copy(parentQ.invert().multiply(_q.multiply(_q2)));
+      // never far from the pose as animated, however hard it's pressed
+      const turned = L.bone.quaternion.angleTo(e.base);
+      if (turned > MAX_TURN) L.bone.quaternion.copy(e.base).slerp(_q2.copy(L.bone.quaternion), MAX_TURN / turned);
       e.applied.copy(L.bone.quaternion);
       st.set(L.bone, e);
       any = true; moved++;

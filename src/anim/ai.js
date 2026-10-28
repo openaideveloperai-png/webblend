@@ -634,7 +634,7 @@ JSON FORMAT:
     "plantFeet": true/false,
     "objectKeys": [{"t": seconds, "channel": "position"|"rotation"|"scale"|"opacity"|"color", "x": n, "y": n, "z": n}],
     "boneKeys": [{"t": seconds, "bone": "bone name", "x": deg, "y": deg, "z": deg, "mx": cm, "my": cm, "mz": cm}],
-    "faceKeys": [{"t": seconds, "control": "control name", "value": 0-1}],
+    "faceKeys": [{"t": seconds, "control": "control name", "value": 0-1 (negative runs a shape key the other way: one that makes something bigger makes it smaller; above 1 exaggerates it)}],
     "useProp": "name of a prop the target holds (made in this reply or already held), or \"\"",
     "aimKeys": [{"t": seconds, "weight": 0-1, "yaw": deg, "pitch": deg}],
     "shots": [seconds, ...],

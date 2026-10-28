@@ -163,6 +163,30 @@ export function initProperties(app, ui) {
     return h('div', { class: 'field' }, h('label', { title: label }, label), range, val, keyButton(obj, prop));
   };
 
+  // a shape key: a slider from -1 to 1, and the value itself to type in (anything from -10
+  // to 10: negative runs the shape the other way, a key that grows something shrinks it;
+  // past 1 exaggerates it)
+  const morphRow = (label, obj, prop) => {
+    const desc = propDesc(prop);
+    const range = h('input', { type: 'range', min: -1, max: 1, step: 0.01, 'aria-label': label });
+    const num = h('input', { type: 'number', class: 'num', step: 0.05, min: -10, max: 10, 'aria-label': label + ' value', title: 'Type a value: negative runs the shape the other way, past 1 exaggerates it' });
+    let before = null;
+    const show = (v) => { if (document.activeElement !== range) range.value = Math.max(-1, Math.min(1, v)); if (document.activeElement !== num) num.value = +v.toFixed(3); };
+    const update = () => show(desc.get(obj)[0]);
+    const commit = (v) => { if (!Number.isFinite(v)) { update(); return; } v = Math.max(-10, Math.min(10, v)); app.setProperty(obj, prop, [v], { before: before || desc.get(obj), label }); before = null; show(v); };
+    range.addEventListener('pointerdown', () => { before = desc.get(obj); });
+    range.addEventListener('input', () => { const v = parseFloat(range.value); desc.set(obj, [v]); if (document.activeElement !== num) num.value = +v.toFixed(3); app.afterEdit(); });
+    range.addEventListener('change', () => commit(parseFloat(range.value)));
+    num.addEventListener('focus', () => { before = desc.get(obj); num.select(); });
+    // live while typing / using the arrows, committed (with undo) on Enter or leaving the box
+    num.addEventListener('input', () => { const v = parseFloat(num.value); if (Number.isFinite(v)) { desc.set(obj, [Math.max(-10, Math.min(10, v))]); range.value = Math.max(-1, Math.min(1, v)); app.afterEdit(); } });
+    num.addEventListener('change', () => commit(parseFloat(num.value)));
+    num.addEventListener('keydown', (e) => { if (e.key === 'Enter') { num.blur(); } else if (e.key === 'Escape') { if (before) desc.set(obj, before); before = null; update(); app.afterEdit(); num.blur(); } });
+    updaters.push(update);
+    update();
+    return h('div', { class: 'field' }, h('label', { title: label }, label), range, num, keyButton(obj, prop));
+  };
+
   const colorRow = (label, obj, prop) => {
     const desc = propDesc(prop);
     const inp = h('input', { type: 'color', 'aria-label': label });
@@ -333,7 +357,7 @@ export function initProperties(app, ui) {
     const morphTargets = obj.morphTargetInfluences ? [obj] : (obj === model.root ? model.morphMeshes : []);
     for (const mm of morphTargets.slice(0, 6)) {
       const s = sec('Shape keys' + (mm !== obj ? ` · ${mm.name}` : ''));
-      mm.morphTargetInfluences.slice(0, 40).forEach((_, i) => s.append(sliderRow(morphLabel(mm, `morphTargetInfluences[${i}]`) || `Shape ${i}`, mm, `morphTargetInfluences[${i}]`, 0, 1)));
+      mm.morphTargetInfluences.slice(0, 40).forEach((_, i) => s.append(morphRow(morphLabel(mm, `morphTargetInfluences[${i}]`) || `Shape ${i}`, mm, `morphTargetInfluences[${i}]`)));
       if (mm.morphTargetInfluences.length > 40) s.append(h('div', { class: 'hint' }, `Showing 40 of ${mm.morphTargetInfluences.length}.`));
       root.append(s);
     }

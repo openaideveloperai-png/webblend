@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeMannequin } from '../src/scene/primitives.js';
 import { detectHumanoid, defaultParams, paramsToSpec } from '../src/anim/humanoid.js';
-import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial, solidBody } from '../src/anim/softskin.js';
+import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial, solidBody, unsolidBody } from '../src/anim/softskin.js';
 import { faceLandmarks } from '../src/anim/landmarks.js';
 import { mouthy } from './test-softlips.mjs';
 
@@ -373,6 +373,20 @@ function leftInside(s) {
   for (let i = 0; i < 40; i++) { poseS({}); const animatedQ = arm.quaternion.clone(); solidBody(F.model); off.push(arm.quaternion.angleTo(animatedQ) * 180 / Math.PI); }
   ok('...while playing it holds the limit frame after frame', Math.max(...lefts.slice(4)) < 0.5, lefts.map((x) => x.toFixed(1)).join(' ') + ' cm');
   ok('...and let go, the limb eases back to the animation (no snap)', off[0] > 0.2 && off[3] > 0.1 && off[39] < 0.05 && off.every((v, i) => i === 0 || v <= off[i - 1] + 1e-6), off.filter((_, i) => i % 5 === 0).map((x) => x.toFixed(2) + '°').join(' '));
+  F.model.app = null;
+  // a rig whose constraints / IK write the arm (MMD arm IK): like the real solver, a bone
+  // that isn't where it left it counts as posed by hand and becomes the new pose. The
+  // solid body's turn comes off before the constraints run, so it can't pile up
+  F.model.app = { transport: { playing: true, time: 0 } };
+  F.model._solidPrev = null; F.model._solid = null;
+  const ik = { post: null, base: null };
+  const fakeIK = () => { if (ik.post && arm.quaternion.equals(ik.post)) arm.quaternion.copy(ik.base); else ik.base = arm.quaternion.clone(); ik.post = arm.quaternion.clone(); };
+  poseS(deep);
+  const animatedQ = arm.quaternion.clone();
+  const turns = [];
+  for (let i = 0; i < 80; i++) { unsolidBody(F.model); fakeIK(); F.root.updateMatrixWorld(true); solidBody(F.model); turns.push(arm.quaternion.angleTo(animatedQ) * 180 / Math.PI); }
+  const late = turns.slice(-15);
+  ok('...on a rig whose IK writes the arm, the turn settles instead of piling up (arms folding)', ik.base.angleTo(animatedQ) < 1e-6 && Math.max(...late) - Math.min(...late) < 0.3 && Math.max(...turns) < 26, `turn ${turns.filter((_, i) => i % 16 === 0).map((x) => x.toFixed(1)).join(' -> ')}°, IK sees ${(ik.base.angleTo(animatedQ) * 57.3).toFixed(2)}° from the pose`);
   F.model.app = null;
 }
 
