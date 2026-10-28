@@ -134,7 +134,12 @@ const state = (page) => page.evaluate(() => {
   });
   ok('IK drag moves the hand to the target', ik.ikActive && ik.moved > 0.01 && ik.toTarget < 0.05, JSON.stringify(ik));
 
-  // 8. export scene GLB and re-import
+  // 8. export scene GLB and re-import (with a per-bone indent and skin softness, which must come back)
+  const indentBone = await page.evaluate(() => {
+    const m = window.webblend.models.find((x) => x.humanoid); const b = m.humanoid.map.spine || m.humanoid.map.hips;
+    m.indent = { [b.uuid]: { width: 2, rigid: false, give: 0.5 } }; m.indentVersion = (m.indentVersion || 0) + 1; m.softSkinSoftness = 1.4;
+    return { model: m.name, bone: b.name };
+  });
   await page.click('.menu-btn:has-text("File")');
   let dl;
   try {
@@ -152,6 +157,12 @@ const state = (page) => page.evaluate(() => {
   await openViaMenu(page, [glbPath]);
   const re = await page.evaluate(() => window.webblend.models.map((m) => m.name + ':' + m.clips.length));
   ok('reopened scene restores each model with its clips', re.length === 6 && re.every((x) => +x.split(':')[1] >= 1), JSON.stringify(re));
+  const reIndent = await page.evaluate((want) => {
+    const m = window.webblend.models.find((x) => x.name === want.model); if (!m) return null;
+    let bone = null; m.root.traverse((o) => { if (!bone && o.isBone && o.name === want.bone) bone = o; });
+    return { softness: m.softSkinSoftness, indent: bone && m.indent ? m.indent[bone.uuid] : null };
+  }, indentBone);
+  ok('...and its per-bone indent (Ctrl+Shift+4) and skin softness', reIndent && reIndent.softness === 1.4 && reIndent.indent && reIndent.indent.width === 2 && reIndent.indent.give === 0.5, JSON.stringify(reIndent));
 
   // 9. quality switching (renderer rebuild for antialias)
   await page.evaluate(() => { const a = window.webblend; a.setQuality('ultra'); a.setQuality('high'); a.setQuality('potato'); a.setQuality('medium'); });

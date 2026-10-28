@@ -6,6 +6,7 @@ import { rafThrottle, evalExpr } from '../core/util.js';
 import { propOf, heldProps, bakeHoldClip, attachProp } from '../anim/props-anim.js';
 import { bakeVFX, removeVFX } from '../anim/vfx.js';
 import { softLips } from '../anim/softlips.js';
+import { openIndentEditor } from './indent.js';
 
 const R2D = THREE.MathUtils.RAD2DEG, D2R = THREE.MathUtils.DEG2RAD;
 
@@ -302,7 +303,8 @@ export function initProperties(app, ui) {
           h('button', { class: 'btn sm amber', onclick: () => app.keyPose(model) }, icon('key'), 'Key whole pose'),
           h('button', { class: 'btn sm', onclick: () => ui.copyPose() }, icon('copy'), 'Copy pose'),
           h('button', { class: 'btn sm', disabled: !ui.poseClipboard || undefined, onclick: () => ui.pastePose() }, 'Paste'),
-          h('button', { class: 'btn sm', onclick: () => app.selectParent() }, 'Select parent (P)'))));
+          h('button', { class: 'btn sm', onclick: () => app.selectParent() }, 'Select parent (P)'),
+          model.humanoid ? h('button', { class: 'btn sm', title: 'How the skin this bone moves dents when pressed', onclick: () => openIndentEditor(app) }, 'Indent… (Ctrl+Shift+4)') : null)));
     }
 
     // appearance

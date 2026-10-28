@@ -4,6 +4,8 @@ import * as THREE from 'three';
 
 export const ATTR = 'contactOffset';
 export const NATTR = 'contactNormal';
+export const TATTR = 'contactTint';
+const ALL = [ATTR, NATTR, TATTR];
 const layersOf = new WeakMap(); // geometry -> Map(name -> layer)
 
 // The mesh gets its own geometry (copies of the model share theirs) with a zeroed offset
@@ -12,10 +14,10 @@ export function prepareMesh(mesh) {
   let g = mesh.geometry;
   if (g.userData.softOwner && g.userData.softOwner !== mesh.uuid) {
     g = mesh.geometry = g.clone();
-    for (const n of [ATTR, NATTR]) if (g.attributes[n]) g.deleteAttribute(n);
+    for (const n of ALL) if (g.attributes[n]) g.deleteAttribute(n);
   }
   g.userData.softOwner = mesh.uuid;
-  for (const name of [ATTR, NATTR]) {
+  for (const name of ALL) {
     if (g.attributes[name]) continue;
     const a = new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 3), 3);
     a.setUsage(THREE.DynamicDrawUsage);
@@ -25,6 +27,18 @@ export function prepareMesh(mesh) {
   return g;
 }
 
+// skin (not clothes, hair or eyes): by the material's name, or a skin-tone colour
+const SKIN_NAME = /skin|body|face|hada|肌|顔|体|身|head|neck|arm|leg|hand|foot|breast|chest|mune|胸|腕|脚|足|手|首|頭|cheek|lip|唇|mouth/i;
+const NOT_SKIN_NAME = /hair|髪|eye|目|瞳|cloth|shirt|skirt|dress|sock|shoe|boot|glove|ribbon|hat|服|スカート|靴|cloth|metal|cape|coat|belt|strap|tail|wing|horn|角|teeth|歯|tongue|舌/i;
+function looksLikeSkin(mat) {
+  const n = String(mat.name || '');
+  if (NOT_SKIN_NAME.test(n)) return false;
+  if (SKIN_NAME.test(n)) return true;
+  const c = mat.color;
+  if (!c) return false;
+  return c.r > 0.55 && c.r >= c.g && c.g >= c.b && c.r - c.b > 0.08 && c.r - c.b < 0.5 && !(c.r > 0.98 && c.g > 0.98 && c.b > 0.98);
+}
+
 const PATCHED = new WeakSet();
 export function patchMaterial(mat) {
   if (!mat || PATCHED.has(mat)) return;
@@ -32,18 +46,30 @@ export function patchMaterial(mat) {
   const prev = mat.onBeforeCompile;
   const ownKey = Object.prototype.hasOwnProperty.call(mat, 'customProgramCacheKey') ? mat.customProgramCacheKey : null;
   const prevSrc = prev && prev !== THREE.Material.prototype.onBeforeCompile ? prev.toString() : '';
+  const skin = looksLikeSkin(mat);
   mat.onBeforeCompile = function (shader, renderer) {
     if (prev) prev.call(this, shader, renderer);
     if (shader.vertexShader.includes('#include <skinning_vertex>') && !shader.vertexShader.includes(ATTR)) {
-      let vs = `attribute vec3 ${ATTR};\nattribute vec3 ${NATTR};\n` + shader.vertexShader.replace('#include <skinning_vertex>', `#include <skinning_vertex>\n\ttransformed += ${ATTR};`);
+      let vs = `attribute vec3 ${ATTR};\nattribute vec3 ${NATTR};\nattribute vec3 ${TATTR};\nvarying vec3 vContactTint;\n` + shader.vertexShader.replace('#include <skinning_vertex>', `#include <skinning_vertex>\n\ttransformed += ${ATTR};\n\tvContactTint = ${TATTR};`);
       // the dent shows in the shading too: its normals bend with it
       if (vs.includes('#include <skinnormal_vertex>')) vs = vs.replace('#include <skinnormal_vertex>', `#include <skinnormal_vertex>\n\tobjectNormal = normalize( normalize( objectNormal ) + ${NATTR} );`);
       shader.vertexShader = vs;
+      // skin goes pale where it's pressed (blood pushed out of it), with a faint flush around
+      if (skin && shader.fragmentShader.includes('#include <color_fragment>')) {
+        shader.fragmentShader = 'varying vec3 vContactTint;\n' + shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+	{
+		float blanch = clamp( vContactTint.x, 0.0, 1.0 ) * 0.4;
+		float flush = clamp( vContactTint.y, 0.0, 1.0 ) * 0.5;
+		vec3 pale = mix( vec3( dot( diffuseColor.rgb, vec3( 0.299, 0.587, 0.114 ) ) ), diffuseColor.rgb, 0.55 ) * 1.1 + vec3( 0.03 );
+		diffuseColor.rgb = mix( diffuseColor.rgb, min( pale, vec3( 1.0 ) ), blanch );
+		diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 1.05, 0.93, 0.93 ), flush );
+	}`);
+      }
     }
   };
   mat.customProgramCacheKey = function () { return (ownKey ? ownKey.call(this) : prevSrc) + '|softlips'; };
   // meshes sharing this material without the attribute read zeros
-  mat.defaultAttributeValues = Object.assign({}, mat.defaultAttributeValues, { [ATTR]: [0, 0, 0], [NATTR]: [0, 0, 0] });
+  mat.defaultAttributeValues = Object.assign({}, mat.defaultAttributeValues, { [ATTR]: [0, 0, 0], [NATTR]: [0, 0, 0], [TATTR]: [0, 0, 0] });
   mat.needsUpdate = true;
 }
 
@@ -80,7 +106,7 @@ export function commit(mesh) {
   const g = mesh.geometry;
   const L = layersOf.get(g);
   if (!L) return;
-  for (const [kind, name] of [['pos', ATTR], ['nor', NATTR]]) {
+  for (const [kind, name] of [['pos', ATTR], ['nor', NATTR], ['tint', TATTR]]) {
     const at = g.attributes[name];
     if (!at) continue;
     let lo = Infinity, hi = -1;
@@ -117,6 +143,44 @@ export function normalDeltas(list, tris, triStart, triOf, P, D, out) {
   }
 }
 
+// keep a dent from folding through itself: any triangle around the moved vertices that
+// flips over (or is crushed flat) gets its corners eased toward each other, until none do.
+// -> how many folds were found on the first pass
+export function unfold(list, tris, triStart, triOf, P, D, stamps, passes = 5) {
+  let first = -1;
+  for (let pass = 0; pass < passes; pass++) {
+    const tag = (stamps.tag = (stamps.tag || 0) + 1);
+    const bad = [];
+    for (const w of list) {
+      for (let k = triStart[w]; k < triStart[w + 1]; k++) {
+        const t = triOf[k];
+        if (stamps.a[t] === tag) continue;
+        stamps.a[t] = tag;
+        const i = tris[t * 3] * 3, j = tris[t * 3 + 1] * 3, m = tris[t * 3 + 2] * 3;
+        const ux = P[j] - P[i], uy = P[j + 1] - P[i + 1], uz = P[j + 2] - P[i + 2], vx = P[m] - P[i], vy = P[m + 1] - P[i + 1], vz = P[m + 2] - P[i + 2];
+        const ax = uy * vz - uz * vy, ay = uz * vx - ux * vz, az = ux * vy - uy * vx;
+        const Ux = ux + D[j] - D[i], Uy = uy + D[j + 1] - D[i + 1], Uz = uz + D[j + 2] - D[i + 2];
+        const Vx = vx + D[m] - D[i], Vy = vy + D[m + 1] - D[i + 1], Vz = vz + D[m + 2] - D[i + 2];
+        const bx = Uy * Vz - Uz * Vy, by = Uz * Vx - Ux * Vz, bz = Ux * Vy - Uy * Vx;
+        const la = Math.sqrt(ax * ax + ay * ay + az * az), lb = Math.sqrt(bx * bx + by * by + bz * bz);
+        if (!(la > 0)) continue;
+        // flipped over (folded through itself) or crushed flat
+        if (ax * bx + ay * by + az * bz < 0 || lb < 0.08 * la) bad.push(t);
+      }
+    }
+    if (first < 0) first = bad.length;
+    if (!bad.length) break;
+    for (const t of bad) {
+      const i = tris[t * 3] * 3, j = tris[t * 3 + 1] * 3, m = tris[t * 3 + 2] * 3;
+      for (let c = 0; c < 3; c++) {
+        const avg = (D[i + c] + D[j + c] + D[m + c]) / 3;
+        D[i + c] = 0.5 * D[i + c] + 0.5 * avg; D[j + c] = 0.5 * D[j + c] + 0.5 * avg; D[m + c] = 0.5 * D[m + c] + 0.5 * avg;
+      }
+    }
+  }
+  return Math.max(0, first);
+}
+
 // triangles of meshes as welded vertex ids, and the triangles around each vertex
 // (map(mesh) -> Int32Array vertex index -> welded id or -1)
 export function weldedTriangles(meshes, mapOf, N) {
@@ -142,6 +206,6 @@ export function weldedTriangles(meshes, mapOf, N) {
 // the GLB writer leaves the live offsets out of the file
 export function detachOffsets(models) {
   const back = [];
-  for (const m of models) m.root.traverse((o) => { const g = o.geometry; if (!g || !g.attributes) return; for (const n of [ATTR, NATTR]) if (g.attributes[n]) { back.push([g, n, g.attributes[n]]); g.deleteAttribute(n); } });
+  for (const m of models) m.root.traverse((o) => { const g = o.geometry; if (!g || !g.attributes) return; for (const n of ALL) if (g.attributes[n]) { back.push([g, n, g.attributes[n]]); g.deleteAttribute(n); } });
   return () => { for (const [g, n, a] of back) g.setAttribute(n, a); };
 }

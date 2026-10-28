@@ -16,6 +16,7 @@ import { chooseModels } from './ui/model-picker.js';
 import { QUALITY_LEVELS, QUALITY_PRESETS } from './core/settings.js';
 import { store, isTextInput, fmtBytes } from './core/util.js';
 import { bakeHumanoid } from './anim/motions.js';
+import { openIndentEditor } from './ui/indent.js';
 
 function boot() {
   const appEl = document.getElementById('app');
@@ -303,6 +304,8 @@ function boot() {
     if (mod && kl === 'd') { handled(); if (app.selection.model) app.duplicateModel(app.selection.model); return; }
     if (mod && kl === 'c') { if (tlFocused && ui.copyKeys()) { handled(); return; } if (app.selection.model) { handled(); ui.copyPose(); } return; }
     if (mod && kl === 'v') { if (tlFocused && ui.pasteKeys()) { handled(); return; } if (ui.poseClipboard) { handled(); ui.pastePose(); } return; }
+    // advanced: how the selected bone's skin dents (soft skin)
+    if (mod && e.shiftKey && (e.code === 'Digit4' || k === '4' || k === '$')) { handled(); openIndentEditor(app); return; }
     if (mod) return;
     switch (k) {
       case ' ': handled(); app.togglePlay(); return;

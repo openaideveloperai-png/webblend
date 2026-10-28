@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeMannequin } from '../src/scene/primitives.js';
 import { detectHumanoid, defaultParams, paramsToSpec } from '../src/anim/humanoid.js';
-import { softSkin, updateSoftSkin, skinContacts } from '../src/anim/softskin.js';
+import { softSkin, updateSoftSkin, skinContacts, split, hertzOut } from '../src/anim/softskin.js';
 import { faceLandmarks } from '../src/anim/landmarks.js';
 import { mouthy } from './test-softlips.mjs';
 
@@ -44,7 +44,7 @@ function fleshy() {
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 ? 0 : 1)), 4));
     return g;
   });
-  const body = new THREE.SkinnedMesh(mergeGeometries(geos), new THREE.MeshStandardMaterial());
+  const body = new THREE.SkinnedMesh(mergeGeometries(geos), new THREE.MeshStandardMaterial({ color: 0xe9c3b0 }));
   body.name = 'Body';
   old.parent.remove(old);
   root.add(body);
@@ -61,6 +61,23 @@ const rig = model.humanoid;
 const pose = (p = {}) => { rig.apply(rig.solve(paramsToSpec({ ...defaultParams(), ...p }))); root.updateMatrixWorld(true); };
 // does anything still go into the other part after the dent? (deformed positions, nearest
 // deformed vertex of the other part, along its normal)
+// triangles of the dent flipped over (the skin folding through itself)
+function flips(s, list) {
+  let n = 0;
+  const P = s.P, D = s.D, seen = new Set();
+  for (const w of list) for (let k = s.triStart[w]; k < s.triStart[w + 1]; k++) {
+    const t = s.triOf[k];
+    if (seen.has(t)) continue;
+    seen.add(t);
+    const [i, j, m] = [s.tris[t * 3] * 3, s.tris[t * 3 + 1] * 3, s.tris[t * 3 + 2] * 3];
+    const cr = (o) => { const ux = P[j] - P[i] + o * (D[j] - D[i]), uy = P[j + 1] - P[i + 1] + o * (D[j + 1] - D[i + 1]), uz = P[j + 2] - P[i + 2] + o * (D[j + 2] - D[i + 2]); const vx = P[m] - P[i] + o * (D[m] - D[i]), vy = P[m + 1] - P[i + 1] + o * (D[m + 1] - D[i + 1]), vz = P[m + 2] - P[i + 2] + o * (D[m + 2] - D[i + 2]); return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx]; };
+    const a = cr(0), b = cr(1);
+    if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] < 0) n++;
+  }
+  return n;
+}
+export { flips };
+
 function leftInside(s) {
   let worst = 0;
   const P = s.P, D = s.D, Nn = s.Nr;
@@ -68,7 +85,7 @@ function leftInside(s) {
   const byGroup = new Map();
   for (const w of list) { const g = s.group[w]; if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(w); }
   for (const w of list) {
-    if (s.src[w] !== w) continue;
+    if (!s.pushed(w)) continue;
     const x = P[w * 3] + D[w * 3], y = P[w * 3 + 1] + D[w * 3 + 1], z = P[w * 3 + 2] + D[w * 3 + 2];
     let best = Infinity, bu = -1;
     for (const [g, ws] of byGroup) { if (g === s.group[w]) continue; for (const u of ws) { const d = (x - P[u * 3] - D[u * 3]) ** 2 + (y - P[u * 3 + 1] - D[u * 3 + 1]) ** 2 + (z - P[u * 3 + 2] - D[u * 3 + 2]) ** 2; if (d < best) { best = d; bu = u; } } }
@@ -95,36 +112,59 @@ function leftInside(s) {
   ok('...nothing left inside the other part after the dent (within a quarter of an edge)', left < s.edge * 0.25, `${(left * 1000).toFixed(1)} mm (edges ${(s.edge * 1000).toFixed(0)} mm)`);
   // both sides give way: torso (soft) more than the arm
   let torsoD = 0, armD = 0;
-  for (const w of s.spreadSet) { if (s.src[w] !== w) continue; const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]); if (s.groups[s.group[w]] === 'torso') torsoD = Math.max(torsoD, d); if (s.groups[s.group[w]] === 'lArm') armD = Math.max(armD, d); }
+  for (const w of s.spreadSet) { if (!s.pushed(w)) continue; const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]); if (s.groups[s.group[w]] === 'torso') torsoD = Math.max(torsoD, d); if (s.groups[s.group[w]] === 'lArm') armD = Math.max(armD, d); }
   ok('both give way, the softer torso more than the arm', torsoD > armD && armD > 0, `torso ${(torsoD * 1000).toFixed(1)} mm, arm ${(armD * 1000).toFixed(1)} mm`);
-  // the dent is rounded off, with a slight bulge around it
-  let bulge = 0, steps = 0, maxStep = 0;
+  // the trampoline: a fingertip poking the belly pulls the skin around it down too
+  pose({ rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.6 } });
+  const poke = s.update({ write: false });
+  let ring = 0, ringN = 0, far = 0, steps = 0, maxStep = 0, pc = null;
   for (const w of s.spreadSet) {
-    if (s.src[w] === w) continue;
-    const out = s.D[w * 3] * s.Nr[w * 3] + s.D[w * 3 + 1] * s.Nr[w * 3 + 1] + s.D[w * 3 + 2] * s.Nr[w * 3 + 2];
-    if (s.skinned[w] === s.skinFrame && out > bulge) bulge = out;
+    if (s.pushed(w) || s.src[w] < 0) continue;
+    const c = s.clusters[s.src[w]];
+    if (s.groups[s.group[w]] !== 'torso' || c.depth < 0.002) continue;
+    pc = c;
+    const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]);
+    const r = c.center ? s.key[w] : c.aGeo + s.key[w];
+    if (r > 2 * c.aH && r < 3 * c.aH) { ring += d / c.depth; ringN++; }
+    if (r > c.reach * 0.98) far = Math.max(far, d / c.depth);
   }
   for (const w of s.spreadSet) for (let k = s.adjStart[w]; k < s.adjStart[w + 1]; k++) { const u = s.adj[k]; if (s.group[u] !== s.group[w]) continue; const dd = Math.hypot(s.D[w * 3] - s.D[u * 3], s.D[w * 3 + 1] - s.D[u * 3 + 1], s.D[w * 3 + 2] - s.D[u * 3 + 2]); maxStep = Math.max(maxStep, dd / Math.max(1e-6, s.adjLen[k])); steps++; }
-  ok('the skin around the dent rises a little (squeezed flesh)', bulge > 0.0003, `${(bulge * 1000).toFixed(2)} mm`);
-  ok('the dent fades smoothly (no cliffs between neighbours)', steps > 0 && maxStep < 0.9, `max slope ${maxStep.toFixed(2)}`);
+  ok('a fingertip poking the belly: the skin around it sinks too, a crater wider than the finger (trampoline)', poke.active && ringN > 3 && ring / ringN > 0.1 && pc && pc.reach > 4 * pc.aH, `2-3 contact radii out: ${(100 * ring / Math.max(1, ringN)).toFixed(0)}% of the ${pc ? (pc.depth * 1000).toFixed(1) : '?'} mm depth; crater ${pc ? (pc.reach / pc.aH).toFixed(1) : '?'}x the contact`);
+  ok('...fading to nothing at its rim', far < 0.05, `${(far * 100).toFixed(1)}% at the rim`);
+  ok('...and never folding through itself (no flipped triangles)', flips(s, s.spreadSet) === 0, `${flips(s, s.spreadSet)} flipped`);
+  ok('the dent fades smoothly (no cliffs between neighbours)', steps > 0 && maxStep < 2.5, `max slope ${maxStep.toFixed(2)}`);
+  pose({ lArmRaise: 2, rArmRaise: 2 });
+  s.update({ write: false });
+  // contact mechanics
+  ok('Hertz contact: the edge sits at half the depth, ~22% at twice the radius', Math.abs(hertzOut(1) - 0.5) < 1e-9 && Math.abs(hertzOut(2) - 0.218) < 0.005 && hertzOut(5) < hertzOut(3));
+  const a1 = split(0.01, 1, 0.03, 1, 0.03), a2 = split(0.01, 1, 0.03, 0.25, 0.03), a3 = split(0.05, 1, 0.03, 1, 0.01);
+  ok('a squeeze is shared by softness, and the side near its bone stiffens', Math.abs(a1 - 0.005) < 1e-4 && a2 > 0.007 && Math.abs(a3 - 0.03) < 1e-9, `${(a1 * 1000).toFixed(1)} / ${(a2 * 1000).toFixed(1)} / ${(a3 * 1000).toFixed(1)} mm`);
+  const st1 = split(0.02, 1, 0.025, 0.3, 0.004), st2 = split(0.04, 1, 0.025, 0.3, 0.004);
+  ok('...flesh stiffens as it fills up: twice the squeeze, less than twice the dent', st2 < 2 * st1 && st2 > st1, `${(st1 * 1000).toFixed(1)} -> ${(st2 * 1000).toFixed(1)} mm`);
   // GPU side: offsets and bent normals written, cleared again
   s.update({ write: true, force: true });
   const a = body.geometry.attributes.contactOffset, n = body.geometry.attributes.contactNormal;
   let ma = 0, mn = 0; for (let i = 0; i < a.array.length; i++) { ma = Math.max(ma, Math.abs(a.array[i])); mn = Math.max(mn, Math.abs(n.array[i])); }
   ok('offsets and bent normals reach the mesh', ma > 0.003 && mn > 0.02, `offset ${(ma * 1000).toFixed(1)} mm, normal ${mn.toFixed(3)}`);
+  const ti = body.geometry.attributes.contactTint;
+  let mt = 0; for (let i = 0; i < ti.array.length; i += 3) mt = Math.max(mt, ti.array[i]);
+  ok('pressed skin goes pale (blood pushed out)', mt > 0.08, `blanch ${mt.toFixed(2)}`);
+  const shSkin = { vertexShader: 'void main(){\n#include <skinnormal_vertex>\n#include <skinning_vertex>\n}', fragmentShader: 'void main(){\n#include <color_fragment>\n}' };
+  body.material.onBeforeCompile(shSkin, null);
+  ok('skin materials show it; the dent bends the shading', /vContactTint/.test(shSkin.fragmentShader) && /objectNormal = normalize/.test(shSkin.vertexShader));
   const v0 = a.version, solves = s.solves;
   updateSoftSkin(model);
   ok('the same pose isn\'t solved again', s.solves === solves || a.version === v0);
   model.softSkin = false;
   updateSoftSkin(model);
-  ok('switched off: the skin goes back', !a.array.some((x) => x !== 0) && !n.array.some((x) => x !== 0));
+  ok('switched off: the skin goes back', !a.array.some((x) => x !== 0) && !n.array.some((x) => x !== 0) && !ti.array.some((x) => x !== 0));
   model.softSkin = true;
   // the bones stop it: a forearm folded hard onto the upper arm can't sink all the way
   pose({ lArmRaise: 60, lElbow: 150 });
   const deep = s.update({ write: false });
   ok('past the flesh the bones stop it: the rest is reported, the dent stays within the flesh', deep.active && deep.leftCm > 0.5, JSON.stringify(deep.contacts.filter((c) => c.leftCm > 0)));
   let over = 0;
-  for (const w of s.spreadSet) { if (s.src[w] !== w) continue; const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]); over = Math.max(over, d - s.maxDepth[w] - s.edge * 0.03); }
+  for (const w of s.spreadSet) { const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]); over = Math.max(over, d - s.maxDepth[w] - s.edge * 0.03); }
   ok('...no vertex dents deeper than its flesh allows', over <= 1e-5, `${(over * 1000).toFixed(2)} mm over`);
   // joints: a bent elbow alone isn't contact; folded all the way the forearm presses the biceps
   pose({ lArmRaise: 60, lElbow: 60 });
@@ -132,6 +172,7 @@ function leftInside(s) {
   ok('a bent elbow is the joint bending, not flesh pressing', !bent.contacts.some((c) => [c.a, c.b].includes('lArm') && [c.a, c.b].includes('lFore') && c.cm > 0.3), JSON.stringify(bent.contacts));
   pose({ lArmRaise: 60, lElbow: 150 });
   const folded = s.update({ write: false });
+  ok('a hard squash (forearm folded onto the biceps) doesn\'t fold the skin through itself', flips(s, s.spreadSet) === 0, `${flips(s, s.spreadSet)} flipped, ${s.folds} eased`);
   ok('folded all the way, the forearm squashes the upper arm', folded.contacts.some((c) => [c.a, c.b].includes('lArm') && [c.a, c.b].includes('lFore') && c.cm > 0.5), JSON.stringify(folded.contacts));
   // the self-check's report
   pose();
@@ -141,6 +182,28 @@ function leftInside(s) {
   let res;
   try { res = skinContacts(model, (tt) => ev.at(clip, tt), [0, 0.5, 1]); } finally { ev.done(); }
   ok('the self-check sees where parts press (and when)', res && res.some((c) => [c.a, c.b].includes('torso') && c.t === 1), JSON.stringify(res && res.slice(0, 3)));
+  // per-bone settings (Ctrl+Shift+4): rigid, crater width, give
+  {
+    pose({ rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.6 } });
+    const spine = root.getObjectByName('Spine1');
+    const torsoMax = () => { let m = 0; for (const w of s.spreadSet) if (s.groups[s.group[w]] === 'torso') m = Math.max(m, Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2])); return m; };
+    const reachOf = () => Math.max(0, ...s.clusters.filter((c) => c.wv !== undefined && s.groups[s.group[c.wv]] === 'torso').map((c) => c.reach));
+    s.update({ write: false, force: true });
+    const base = torsoMax(), baseReach = reachOf();
+    model.indent = { [spine.uuid]: { rigid: true } }; model.indentVersion = 1;
+    s.update({ write: false, force: true });
+    const rigid = torsoMax();
+    model.indent = { [spine.uuid]: { width: 2 } }; model.indentVersion = 2;
+    s.update({ write: false, force: true });
+    const wide = reachOf();
+    model.indent = { [spine.uuid]: { give: 0.2 } }; model.indentVersion = 3;
+    s.update({ write: false, force: true });
+    const firm = torsoMax();
+    ok('per-bone indent: rigid stops the dent, wider crater, firmer flesh dents less', base > 0.003 && rigid < base * 0.05 && wide > baseReach * 1.4 && firm < base, `dent ${(base * 1000).toFixed(1)} -> rigid ${(rigid * 1000).toFixed(1)} mm; crater ${(baseReach * 100).toFixed(1)} -> ${(wide * 100).toFixed(1)} cm; firm ${(firm * 1000).toFixed(1)} mm`);
+    const info = s.boneInfo(spine);
+    ok('...and it says how much skin a bone moves and how deep it can dent', info.count > 100 && info.dentCm > 0, JSON.stringify(info));
+    model.indent = {}; model.indentVersion = 4;
+  }
   // speed
   pose({ lArmRaise: 2, rArmRaise: 2 });
   for (let i = 0; i < 3; i++) s.update({ write: false, force: true });

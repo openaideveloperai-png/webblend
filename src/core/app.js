@@ -232,6 +232,8 @@ export class App extends Emitter {
     if (model.softLipsSoftness !== undefined) m2.softLipsSoftness = model.softLipsSoftness;
     if (model.softSkin !== undefined) m2.softSkin = model.softSkin;
     if (model.softSkinSoftness !== undefined) m2.softSkinSoftness = model.softSkinSoftness;
+    // per-bone indent settings follow to the copy's bones
+    if (model.indent) { m2.indent = {}; for (const [id, v] of Object.entries(model.indent)) if (map.has(id)) m2.indent[map.get(id)] = { ...v }; m2.indentVersion = 1; }
     this.toast(`Duplicated "${model.name}"`, 'ok');
     return m2;
   }
@@ -971,6 +973,7 @@ export class App extends Emitter {
             if (!e) return;
             m.setWeight(e, ci.weight ?? 1); m.setSpeed(e, ci.speed ?? 1); m.setLoop(e, ci.loop || 'repeat'); m.setPlaying(e, ci.playing !== false);
           });
+          restoreSoftMeta(m, info);
           newModels.push(m);
           added++;
         });
@@ -1025,6 +1028,25 @@ export class App extends Emitter {
     if (sel && sel.bones.length) return sel;
     const withBones = [...fresh, ...this.models].filter((m) => m.bones.length && m.kind !== 'skeleton');
     return withBones[0] || null;
+  }
+}
+
+// soft lips / soft skin settings saved with a WebBlend scene (indents stored by bone name)
+function restoreSoftMeta(m, info) {
+  for (const k of ['softLips', 'softSkin']) if (typeof info[k] === 'boolean') m[k] = info[k];
+  for (const k of ['softLipsSoftness', 'softSkinSoftness']) if (Number.isFinite(info[k])) m[k] = Math.min(2, Math.max(0.3, info[k]));
+  if (info.indent && typeof info.indent === 'object') {
+    const byName = new Map();
+    m.root.traverse((o) => { if (o.isBone && !byName.has(o.name)) byName.set(o.name, o); });
+    const out = {};
+    const clean = (v) => {
+      const o = {};
+      for (const [k, max] of [['give', 3], ['depth', 3], ['width', 3], ['rim', 1], ['pale', 2]]) if (Number.isFinite(v[k])) o[k] = Math.min(max, Math.max(0, v[k]));
+      for (const k of ['rigid', 'children']) if (typeof v[k] === 'boolean') o[k] = v[k];
+      return o;
+    };
+    for (const [name, v] of Object.entries(info.indent)) { const b = byName.get(name); if (b && v && typeof v === 'object') out[b.uuid] = clean(v); }
+    if (Object.keys(out).length) { m.indent = out; m.indentVersion = (m.indentVersion || 0) + 1; }
   }
 }
 

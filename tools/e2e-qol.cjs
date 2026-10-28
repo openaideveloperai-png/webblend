@@ -102,6 +102,22 @@ const ok = (l, c, x = '') => { console.log((c ? 'ok   ' : 'FAIL ') + l + (x ? ' 
   });
   ok('deleting a bone\'s keys puts it back to rest; removing the clip releases the rest', rel.keyed > 10 && rel.afterDelete < 0.5 && rel.upperStill > 5 && rel.upperAfterRemove < 0.5, JSON.stringify(rel));
   ok('a bone posed by hand without keys stays posed', rel.headKept > 20, rel.headKept);
+  // advanced indent settings: select a bone, Ctrl+Shift+4
+  await page.evaluate(() => { const a = window.webblend; const m = a.models[0]; a.select(m.root.getObjectByName('Spine1'), m); });
+  await page.evaluate(() => { document.querySelectorAll('.modal-back').forEach((m) => m.remove()); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); });
+  await page.keyboard.press('Control+Shift+Digit4');
+  await page.waitForTimeout(300);
+  const dlg = await page.evaluate(() => { const m = document.querySelector('.modal'); if (!m) return { none: true, sel: window.webblend.selection.object && window.webblend.selection.object.name, toasts: [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' | ') }; return m ? { title: m.querySelector('h3').textContent, sliders: m.querySelectorAll('input[type=range]').length, info: m.querySelector('.hint').textContent } : null; });
+  ok('Ctrl+Shift+4 on a bone opens its indent settings', dlg && /Indent/.test(dlg.title) && /Spine1/.test(dlg.title) && dlg.sliders === 5, JSON.stringify(dlg));
+  await page.evaluate(() => { const r = document.querySelector('.modal input[aria-label="Crater width"]'); r.value = '2'; r.dispatchEvent(new Event('input', { bubbles: true })); });
+  const ind = await page.evaluate(() => { const a = window.webblend; const m = a.models[0]; const b = m.root.getObjectByName('Spine1'); return m.indent && m.indent[b.uuid]; });
+  ok('...the sliders set it on the bone', ind && ind.width === 2, JSON.stringify(ind));
+  await page.click('.modal button:has-text("Done")');
+  await page.evaluate(() => { const a = window.webblend; a.select(null); });
+  await page.keyboard.press('Control+Shift+Digit4');
+  await page.waitForTimeout(200);
+  const warned = await page.evaluate(() => [...document.querySelectorAll('.toast')].some((t) => /Select a bone/.test(t.textContent)) && !document.querySelector('.modal'));
+  ok('...and asks for a bone when none is selected', warned);
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
   console.log(fails ? `${fails} FAILED` : 'ALL QOL TESTS OK');

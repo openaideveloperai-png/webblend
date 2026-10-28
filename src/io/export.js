@@ -69,7 +69,7 @@ export async function exportGLB(app, models, filename) {
     used.set(base, n + 1);
     return [m, n ? `${base} ${n + 1}` : base];
   }));
-  group.userData = { webblend: { version: 1, models: models.map((m) => ({ name: uname.get(m), kind: m.kind, clips: m.clips.map((e) => ({ name: e.clip.name, playing: e.playing, weight: e.weight, speed: e.speed, loop: e.loop })) })) } };
+  group.userData = { webblend: { version: 1, models: models.map((m) => ({ name: uname.get(m), kind: m.kind, clips: m.clips.map((e) => ({ name: e.clip.name, playing: e.playing, weight: e.weight, speed: e.speed, loop: e.loop })), ...softMeta(m) })) } };
   const parents = models.map((m) => [m, m.root.parent]);
   const hidden = [];
   const clips = [];
@@ -104,6 +104,18 @@ export async function exportGLB(app, models, filename) {
     app.needsEval = true;
     app.viewport.requestRender();
   }
+}
+
+// soft lips / soft skin settings and per-bone indents (by bone name: uuids change on reopen)
+function softMeta(m) {
+  const out = {};
+  for (const k of ['softLips', 'softLipsSoftness', 'softSkin', 'softSkinSoftness']) if (m[k] !== undefined) out[k] = m[k];
+  if (m.indent && Object.keys(m.indent).length) {
+    const byName = {};
+    m.root.traverse((o) => { if (o.isBone && m.indent[o.uuid] && !(o.name in byName)) byName[o.name] = { ...m.indent[o.uuid] }; });
+    if (Object.keys(byName).length) out.indent = byName;
+  }
+  return out;
 }
 
 // "腕.L" -> "arm.L": plain names for apps that mangle anything else (Roblox)

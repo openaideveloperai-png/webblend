@@ -15,9 +15,9 @@
 // the rig and shape keys, summed with the soft lips.
 import * as THREE from 'three';
 import { evaluator, EMPTY } from './mouth.js';
-import { softLips } from './softlips.js';
+import { softLips, fingerCapsules } from './softlips.js';
 import { faceLandmarks } from './landmarks.js';
-import { prepareMesh, layer, beginLayer, setOffset, commit, ATTR, normalDeltas, weldedTriangles } from './offsets.js';
+import { prepareMesh, layer, beginLayer, setOffset, commit, ATTR, normalDeltas, weldedTriangles, unfold } from './offsets.js';
 
 const NOT_SKIN = /hair|bang|ahoge|髪|毛|eye|目|瞳|brow|眉|lash|まつ|teeth|歯|tongue|舌|べろ|ribbon|hat|horn|角|tail|尻尾|wing|羽/i;
 // which body part each humanoid bone belongs to; how soft it is (share of a squeeze it
@@ -325,6 +325,7 @@ class SoftSkin {
     // ---- softness and how deep each vertex can give (cheeks soft, skull hard)
     this.soft = new Float32Array(N);
     this.maxDepth = new Float32Array(N);
+    this.tissue = new Float32Array(N);
     const head = rig.map.head;
     let cheek = null;
     if (lm && lm.points && (lm.points.cheekL || lm.points.cheekR) && head) {
@@ -347,7 +348,16 @@ class SoftSkin {
       }
       this.soft[w] = sf;
       this.maxDepth[w] = k * this.flesh[w];
+      // how thick the soft tissue is there (sets how far a dent spreads before it's anchored)
+      this.tissue[w] = this.flesh[w] * Math.min(1, 3 * k);
     });
+    // per-bone settings (Ctrl+Shift+4): the measured values stay as the base
+    this.soft0 = this.soft.slice();
+    this.maxDepth0 = this.maxDepth.slice();
+    this.widthMul = new Float32Array(N).fill(1);
+    this.rimAdd = new Float32Array(N);
+    this.paleMul = new Float32Array(N).fill(1);
+    this.applyOverrides();
     // ---- surface graph (for the smooth dent)
     const adj = Array.from({ length: N }, () => new Set());
     const maps = new Map();
@@ -377,12 +387,22 @@ class SoftSkin {
       sumE += this.adjLen[k];
     }
     this.edge = al.length ? sumE / al.length : rig.height * 0.01;
+    // the skin area around each vertex (for the size of a contact patch)
+    this.varea = new Float32Array(N);
+    for (let i = 0; i < N; i++) { let m = 0, c = 0; for (let k = this.adjStart[i]; k < this.adjStart[i + 1]; k++) { m += this.adjLen[k]; c++; } const e = c ? m / c : this.edge; this.varea[i] = 0.866 * e * e; }
     // triangles (for the dent's shading)
     Object.assign(this, weldedTriangles(meshes, (m) => maps.get(m), N));
     // vertices of each part (for the near-part test)
     this.byPart = parts.map(() => []);
     for (let w = 0; w < N; w++) this.byPart[this.part[w]].push(w);
     this.byPart = this.byPart.map((l) => Int32Array.from(l));
+    // ---- fingers as fitted capsules too: a fingertip pressed into coarse skin can land
+    // between its vertices, so the skin under it is found from the capsule
+    const fv = new Map();
+    for (const e of raw) { if (!fv.has(e.bone)) fv.set(e.bone, []); fv.get(e.bone).push(new THREE.Vector3(e.x, e.y, e.z)); }
+    try { this.fingerCaps = fingerCapsules(model, fv); } catch { this.fingerCaps = []; }
+    const handG = (side) => { const b = rig.map[side + 'Hand']; return b && pIndex.has(b) ? this.partGroup[pIndex.get(b)] : -1; };
+    this.fingerGroup = this.fingerCaps.map((f) => { let p = f.a; while (p && !canon.has(p)) p = p.parent; return p && pIndex.has(p) ? this.partGroup[pIndex.get(p)] : handG('right'); });
     // ---- buffers
     this.P = new Float32Array(N * 3);
     this.Nr = new Float32Array(N * 3);
@@ -396,6 +416,8 @@ class SoftSkin {
     this.skinFrame = 0;
     this.frame = 1;
     this.restPen = new Float32Array(N);
+    this.press = new Float32Array(N);
+    this.tint = new Float32Array(N * 3);
     this.boneMats = new Map();
     this.active = false;
     this.sig = null;
@@ -427,11 +449,12 @@ class SoftSkin {
     root.updateWorldMatrix(true, false);
     _m.copy(root.matrixWorld).invert();
     for (const b of this.dBones) { _pre.multiplyMatrices(_m, b.matrixWorld); const e = _pre.elements; for (let i = 0; i < 16; i++) s.push(Math.round(e[i] * 1e6)); }
-    s.push(this.model.softSkinSoftness ?? 1);
+    s.push(this.model.softSkinSoftness ?? 1, this.model.indentVersion || 0);
     return s;
   }
 
   update({ write = true, force = false } = {}) {
+    if ((this.model.indentVersion || 0) !== this._ov) this.applyOverrides();
     if (write) {
       const sig = this.signature();
       let same = !force && !!this.sig && sig.length === this.sig.length;
@@ -568,15 +591,12 @@ class SoftSkin {
       pen = (pen - this.restPen[w] * 1.05) * jf;
       // a hair's breadth is noise, not a press
       if (pen <= Math.max(0.0004, this.edge * 0.03)) continue;
-      // both give way by how soft they are; when one side is down to its bone, the
-      // other takes the rest (as far as its own flesh goes)
+      // both give way until they push back equally hard; flesh stiffens as it's squeezed
+      // (collagen straightening: the J-shaped curve) and locks at the bone
       const myCap = this.maxDepth[w] * soft, otherCap = this.maxDepth[bu] * soft;
-      let mine = pen * (this.soft[w] / (this.soft[w] + this.soft[bu]));
-      const other = pen - mine;
-      if (other > otherCap) mine += other - otherCap;
-      mine += this.edge * 0.02;
-      const push = Math.min(mine, myCap);
-      const left = Math.max(0, pen - push - Math.min(pen - push, otherCap));
+      const push = Math.min(myCap, split(pen, this.soft[w], myCap, this.soft[bu], otherCap) + this.edge * 0.02);
+      const left = Math.max(0, pen - myCap - otherCap);
+      this.press[w] = myCap > 0 ? Math.min(1, push / myCap) : 1;
       if (left > maxLeft) maxLeft = left;
       H[w * 3] = mx * push; H[w * 3 + 1] = my * push; H[w * 3 + 2] = mz * push;
       this.left[w] = left;
@@ -584,6 +604,69 @@ class SoftSkin {
       const ck = gw < grp[bu] ? gw * 32 + grp[bu] : grp[bu] * 32 + gw;
       if (pen > contact[ck]) contact[ck] = pen;
       if (left > contactLeft[ck]) contactLeft[ck] = left;
+    }
+    // 4b. fingertips: the skin vertex a fingertip sinks into the most, even between vertices
+    this.probes = [];
+    if (!rest) {
+      const fc = this.fingerCaps;
+      const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _q = new THREE.Quaternion();
+      for (let fi = 0; fi < fc.length; fi++) {
+        const f = fc[fi], gF = this.fingerGroup[fi];
+        if (gF < 0) continue;
+        f.a.updateWorldMatrix(true, false);
+        _a.setFromMatrixPosition(f.a.matrixWorld);
+        if (f.b) { f.b.updateWorldMatrix(true, false); _b.setFromMatrixPosition(f.b.matrixWorld); } else _b.copy(f.tip).applyMatrix4(f.a.matrixWorld);
+        const L = _a.distanceTo(_b);
+        if (f.off) { f.a.getWorldQuaternion(_q); const o = f.off.clone().applyQuaternion(_q).multiplyScalar(L); _a.add(o); _b.add(o); }
+        const r = f.ratio * L, bit = 1 << gF;
+        // only the parts this hand is near this frame
+        let partners = 0;
+        for (const [pa, pb] of pairs) { const ga = this.partGroup[pa], gb = this.partGroup[pb]; if (ga === gF) partners |= 1 << gb; else if (gb === gF) partners |= 1 << ga; }
+        if (!partners) continue;
+        const abx = _b.x - _a.x, aby = _b.y - _a.y, abz = _b.z - _a.z, l2 = abx * abx + aby * aby + abz * abz || 1e-12;
+        let best = 0, bw = -1;
+        // skin around the finger segment, from the spatial hash (cells of the parts it may touch)
+        const pad = r + this.edge;
+        const x0 = Math.floor((Math.min(_a.x, _b.x) - pad) / cell), x1 = Math.floor((Math.max(_a.x, _b.x) + pad) / cell);
+        const y0 = Math.floor((Math.min(_a.y, _b.y) - pad) / cell), y1 = Math.floor((Math.max(_a.y, _b.y) + pad) / cell);
+        const z0 = Math.floor((Math.min(_a.z, _b.z) - pad) / cell), z1 = Math.floor((Math.max(_a.z, _b.z) + pad) / cell);
+        for (let g = 0; g < 32; g++) {
+          if (!(partners & (1 << g))) continue;
+          for (let ix = x0; ix <= x1; ix++) for (let iy = y0; iy <= y1; iy++) for (let iz = z0; iz <= z1; iz++) {
+            const hk2 = hkey(ix, iy, iz, g);
+            for (let q = hs[hk2], e = hs[hk2 + 1]; q < e; q++) {
+          const w = hi[q];
+          if (grp[w] !== g || !(cand[w] & bit)) continue;
+          const x = Pp[w * 3], y = Pp[w * 3 + 1], z = Pp[w * 3 + 2];
+          let t = ((x - _a.x) * abx + (y - _a.y) * aby + (z - _a.z) * abz) / l2;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const px = _a.x + t * abx - x, py = _a.y + t * aby - y, pz = _a.z + t * abz - z;
+          // how far the finger's axis is above the skin there (along the skin's normal), and to the side
+          const sN = px * Nn[w * 3] + py * Nn[w * 3 + 1] + pz * Nn[w * 3 + 2];
+          const side2 = px * px + py * py + pz * pz - sN * sN;
+          if (side2 > (r + this.edge) * (r + this.edge)) continue;
+          const pen = r - sN - this.restPen[w];
+          if (pen > best) { best = pen; bw = w; }
+            }
+          }
+        }
+        if (bw < 0 || best <= Math.max(0.0005, this.edge * 0.03)) continue;
+        const cap = this.maxDepth[bw] * soft;
+        const push = split(best, this.soft[bw], cap, 0.25, r * 0.15);
+        const prev = this.pushed(bw) ? len3(H[bw * 3], H[bw * 3 + 1], H[bw * 3 + 2]) : 0;
+        if (push > prev) {
+          H[bw * 3] = -Nn[bw * 3] * push; H[bw * 3 + 1] = -Nn[bw * 3 + 1] * push; H[bw * 3 + 2] = -Nn[bw * 3 + 2] * push;
+          if (!hard.includes(bw)) hard.push(bw);
+          this.press[bw] = cap > 0 ? Math.min(1, push / cap) : 1;
+        }
+        const left = Math.max(0, best - cap - r * 0.15);
+        if (left > maxLeft) maxLeft = left;
+        // a rounded fingertip of radius r sunk this deep touches over this radius
+        this.probes.push({ w: bw, a: Math.max(r * 0.6, Math.sqrt(2 * r * best)), depth: push, rho: r });
+        const ck = gF < grp[bw] ? gF * 32 + grp[bw] : grp[bw] * 32 + gF;
+        if (best > contact[ck]) contact[ck] = best;
+        if (left > contactLeft[ck]) contactLeft[ck] = left;
+      }
     }
     if (rest || !hard.length) { if (write) this.clear(); return stats; }
     // 5. the dent fades over the surface, with a slight bulge around it
@@ -660,58 +743,127 @@ class SoftSkin {
     }
   }
 
-  // each pushed vertex carries its surroundings along (a smooth, rounded dent), and just
-  // outside the dent the skin rises a little (squeezed flesh goes somewhere)
+  // The dent like real skin (a membrane over incompressible tissue, the "waterbed" /
+  // trampoline): the skin around a press is pulled down with it into a wide sloped crater
+  // (Hertz contact: the edge of the real contact sits at half the depth, ~20% of it two
+  // contact radii out, the real contact narrower than the overlap), anchored by the tissue
+  // underneath (thin tissue over bone: a short crater; a belly: a wide one). Squeezed flesh
+  // only rises in a rim where a wide contact presses thin tissue against bone. Pressed skin
+  // goes pale (blood pushed out), with a faint flush around it.
   spread(hard, soft) {
-    const N = this.N, H = this.H, D = this.D;
+    const N = this.N, H = this.H, D = this.D, TI = this.tint;
     const key = this.key || (this.key = new Float32Array(N)), src = this.src || (this.src = new Int32Array(N)), dist = this.dist || (this.dist = new Float32Array(N));
     const seen = this.seen || (this.seen = new Uint32Array(N));
+    const isHard = this.isHard || (this.isHard = new Uint32Array(N));
+    const clOf = this.clOf || (this.clOf = new Int32Array(N));
     const heap = this.heap || (this.heap = new Heap(N));
     heap.clear();
-    for (const w of this.spreadSet || []) { D[w * 3] = D[w * 3 + 1] = D[w * 3 + 2] = 0; }
+    for (const w of this.spreadSet || []) { D[w * 3] = D[w * 3 + 1] = D[w * 3 + 2] = 0; TI[w * 3] = TI[w * 3 + 1] = TI[w * 3 + 2] = 0; }
     const stamp = ++this.frame;
-    const set = [];
-    let ref = 0;
-    for (const w of hard) ref = Math.max(ref, len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]));
-    const visit = (w) => { if (seen[w] !== stamp) { seen[w] = stamp; key[w] = Infinity; src[w] = -1; dist[w] = 0; set.push(w); } };
-    for (const w of hard) {
-      visit(w);
-      const k = Math.log(ref / Math.max(1e-9, len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2])));
-      if (k < key[w]) { key[w] = k; src[w] = w; dist[w] = 0; heap.push(w, k); }
-    }
-    // falloff over the surface: a share of the part's thickness (wider dents on a belly than on a finger)
+    this.hardStamp = stamp;
+    for (const w of hard) isHard[w] = stamp;
+    // 1. contact patches: connected pushed vertices of one part -> size, depth, direction
     const as = this.adjStart, adj = this.adj, len = this.adjLen;
+    const cls = [];
+    const queue = [];
+    for (const w0 of hard) {
+      if (seen[w0] === stamp) continue;
+      const c = { area: 0, depth: 0, dx: 0, dy: 0, dz: 0, T: 0, press: 0 };
+      const id = cls.length;
+      cls.push(c);
+      queue.length = 0; queue.push(w0); seen[w0] = stamp;
+      while (queue.length) {
+        const w = queue.pop();
+        clOf[w] = id;
+        c.area += this.varea[w];
+        const hl = len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]);
+        if (hl > c.depth) { c.depth = hl; c.dx = H[w * 3] / hl; c.dy = H[w * 3 + 1] / hl; c.dz = H[w * 3 + 2] / hl; c.T = this.tissue[w]; c.wv = w; }
+        if (this.press[w] > c.press) c.press = this.press[w];
+        for (let k = as[w]; k < as[w + 1]; k++) { const u = adj[k]; if (isHard[u] === stamp && seen[u] !== stamp && this.group[u] === this.group[w]) { seen[u] = stamp; queue.push(u); } }
+      }
+      c.aGeo = Math.max(this.edge * 0.5, Math.sqrt(c.area / Math.PI));
+      // a fingertip pressing between vertices: the patch is centred on it, shaped like it
+      for (const p of this.probes || []) if (clOf[p.w] === id && seen[p.w] === stamp && p.a > c.aGeo) { c.aGeo = p.a; c.depth = Math.max(c.depth, p.depth); c.center = true; c.rho = p.rho; }
+      c.aH = c.aGeo / Math.SQRT2;
+      const wm = c.wv !== undefined ? this.widthMul[c.wv] : 1;
+      c.Lt = Math.max(this.edge, 1.3 * c.T * soft * wm);
+      c.reach = Math.min(5.5 * c.aH * soft * wm, 2 * c.Lt) + c.aGeo;
+      // a rim only where a wide contact squeezes thin tissue against the bone (or where set)
+      c.bulge = 0.25 * Math.min(1, Math.max(0, (c.aH / Math.max(1e-6, c.T) - 0.4) / 0.8)) + (c.wv !== undefined ? 0.35 * this.rimAdd[c.wv] : 0);
+    }
+    // 2. distance over the skin from each patch (the nearest patch wins)
+    const set = [];
+    const stamp2 = ++this.frame;
+    const visit = (w) => { if (seen[w] !== stamp2) { seen[w] = stamp2; key[w] = Infinity; src[w] = -1; set.push(w); } };
+    for (const w of hard) { visit(w); key[w] = 0; src[w] = clOf[w]; heap.push(w, 0); }
     while (heap.size) {
       const i = heap.pop();
-      const ki = key[i];
-      if (dist[i] > 2.4 || ki > 9) continue;
-      const Li = Math.max(this.edge, 0.3 * this.typical[this.part[i]] * soft);
+      const ki = key[i], c = cls[src[i]];
+      if (ki > (c.center ? c.reach : c.reach - c.aGeo)) continue;
       for (let k = as[i]; k < as[i + 1]; k++) {
         const j = adj[k];
+        if (isHard[j] === stamp) continue;
         visit(j);
-        const step = len[k] / Li;
-        const d = ki + step;
-        if (d < key[j]) { key[j] = d; src[j] = src[i]; dist[j] = dist[i] + step; heap.push(j, d); }
+        const d = ki + len[k];
+        if (d < key[j]) { key[j] = d; src[j] = src[i]; heap.push(j, d); }
       }
     }
+    // 3. the crater
     for (const w of set) {
-      const s = src[w];
-      if (s < 0) { D[w * 3] = D[w * 3 + 1] = D[w * 3 + 2] = 0; continue; }
-      const hx = H[s * 3], hy = H[s * 3 + 1], hz = H[s * 3 + 2], hl = len3(hx, hy, hz);
-      const x = dist[w];
-      // dent: full at the contact, rounded off around it
-      const f = s === w ? 1 : Math.exp(-x * x * 2.2);
-      // bulge: the squeezed flesh rises in a ridge just outside the dent (along its own normal)
-      const xb = x / 0.75;
-      const b = s === w ? 0 : 0.35 * hl * xb * xb * Math.exp(1 - xb * xb);
-      D[w * 3] = hx * f; D[w * 3 + 1] = hy * f; D[w * 3 + 2] = hz * f;
-      if (b > 0) {
-        // the normal of a vertex we didn't skin this frame: take the dent's own direction reversed
+      const ci = src[w];
+      if (ci < 0) continue;
+      const c = cls[ci];
+      const hard_ = isHard[w] === stamp;
+      const hl = hard_ ? len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]) : 0;
+      // how far from the middle of the contact (a pushed vertex: from how deep it's pushed;
+      // around a fingertip, straight from it)
+      const r = c.center ? key[w] : hard_ ? c.aGeo * Math.sqrt(Math.max(0, 1 - hl / Math.max(1e-9, c.depth))) : c.aGeo + key[w];
+      // inside the contact the skin takes the fingertip's round shape; outside, the crater
+      const crater = r <= c.aH ? (c.center ? Math.max(c.depth * 0.5, c.depth - (r * r) / (2 * c.rho)) : hard_ ? hl : c.depth * 0.5) : c.depth * hertzOut(r / c.aH) * Math.exp(-(r - c.aH) / c.Lt);
+      let ux, uy, uz;
+      if (hard_ && hl >= crater) { ux = H[w * 3]; uy = H[w * 3 + 1]; uz = H[w * 3 + 2]; } else { ux = c.dx * crater; uy = c.dy * crater; uz = c.dz * crater; }
+      // never deeper than this spot's own flesh (the bone under it stops it)
+      const lim = this.maxDepth[w] * soft, ul = len3(ux, uy, uz);
+      if (ul > lim && ul > 0) { const f = lim / ul; ux *= f; uy *= f; uz *= f; }
+      // fade out at the crater's edge
+      const edgeF = 1 - smoothstep(0.75, 1, (r - c.aGeo) / Math.max(1e-6, c.reach - c.aGeo));
+      // (the reach counts from the patch's edge, or from the fingertip's middle)
+      ux *= edgeF; uy *= edgeF; uz *= edgeF;
+      D[w * 3] = ux; D[w * 3 + 1] = uy; D[w * 3 + 2] = uz;
+      // squeezed rim (along the skin's own normal) where tissue is thin under a wide contact
+      const xr = (r - c.aH) / Math.max(this.edge, 0.6 * c.T);
+      if (!hard_ && c.bulge > 0 && xr > 0) {
+        const b = c.bulge * c.depth * xr * Math.exp(1 - xr) * edgeF;
         const has = this.skinned[w] === this.skinFrame;
-        const nx = has ? this.Nr[w * 3] : -hx / (hl || 1), ny = has ? this.Nr[w * 3 + 1] : -hy / (hl || 1), nz = has ? this.Nr[w * 3 + 2] : -hz / (hl || 1);
-        D[w * 3] += nx * b; D[w * 3 + 1] += ny * b; D[w * 3 + 2] += nz * b;
+        D[w * 3] += (has ? this.Nr[w * 3] : -c.dx) * b; D[w * 3 + 1] += (has ? this.Nr[w * 3 + 1] : -c.dy) * b; D[w * 3 + 2] += (has ? this.Nr[w * 3 + 2] : -c.dz) * b;
+      }
+      // pale where pressed, a faint flush just around it
+      TI[w * 3] = this.paleMul[w] * c.press * (hard_ ? Math.max(0.35, this.press[w]) : Math.min(1, crater / Math.max(1e-9, c.depth)) * 0.6) * edgeF;
+      const xf = (r - c.aGeo) / Math.max(this.edge, c.aGeo);
+      TI[w * 3 + 1] = hard_ ? 0 : 0.5 * c.press * Math.max(0, xf) * Math.exp(1 - Math.max(0, xf)) * edgeF;
+    }
+    // 4. the membrane settles: a few smoothing passes over the free skin (no seams where craters meet)
+    const D2 = this.D2 || (this.D2 = new Float32Array(N * 3));
+    for (let it = 0; it < 3; it++) {
+      for (const w of set) { D2[w * 3] = D[w * 3]; D2[w * 3 + 1] = D[w * 3 + 1]; D2[w * 3 + 2] = D[w * 3 + 2]; }
+      for (const w of set) {
+        if (isHard[w] === stamp || src[w] < 0) continue;
+        let sx = 0, sy = 0, sz = 0, n = 0;
+        for (let k = as[w]; k < as[w + 1]; k++) { const u = adj[k]; if (seen[u] !== stamp2) continue; sx += D2[u * 3]; sy += D2[u * 3 + 1]; sz += D2[u * 3 + 2]; n++; }
+        if (!n) continue;
+        D[w * 3] = 0.5 * D2[w * 3] + (0.5 * sx) / n; D[w * 3 + 1] = 0.5 * D2[w * 3 + 1] + (0.5 * sy) / n; D[w * 3 + 2] = 0.5 * D2[w * 3 + 2] + (0.5 * sz) / n;
       }
     }
+    // 5. never folding through itself: every corner of the triangles around the dent gets
+    // its real position, and triangles that would flip are eased back
+    const need = [];
+    for (const w of set) for (let k = this.triStart[w]; k < this.triStart[w + 1]; k++) { const t = this.triOf[k] * 3; for (let c = 0; c < 3; c++) { const u = this.tris[t + c]; if (this.skinned[u] !== this.skinFrame) { this.skinned[u] = this.skinFrame; need.push(u); } } }
+    for (const u of need) this.skinned[u] = 0;
+    if (need.length) this.skin(need);
+    for (const u of need) if (seen[u] !== stamp2) { D[u * 3] = D[u * 3 + 1] = D[u * 3 + 2] = 0; }
+    this.foldStamps = this.foldStamps || { a: new Uint32Array(this.tris.length / 3 + 1) };
+    this.folds = unfold(set, this.tris, this.triStart, this.triOf, this.P, D, this.foldStamps);
+    this.clusters = cls;
     this.spreadSet = set;
     return D;
   }
@@ -720,18 +872,17 @@ class SoftSkin {
   write() {
     if (!this.prepared) { for (const m of this.meshes) prepareMesh(m); this.prepared = true; }
     const set = this.spreadSet || [];
-    // the bent normals: every corner of the triangles around the dent needs a position
-    const need = [];
-    for (const w of set) for (let k = this.triStart[w]; k < this.triStart[w + 1]; k++) { const t = this.triOf[k] * 3; for (let c = 0; c < 3; c++) { const u = this.tris[t + c]; if (this.skinned[u] !== this.skinFrame) { this.skinned[u] = this.skinFrame; need.push(u); } } }
-    for (const u of need) this.skinned[u] = 0;
-    if (need.length) this.skin(need);
+    // the bent normals (every corner of the triangles around the dent was skinned in spread)
     normalDeltas(set, this.tris, this.triStart, this.triOf, this.P, this.D, this.ND);
     const inv = this.meshes.map((m) => new THREE.Matrix3().setFromMatrix4(m.matrixWorld).invert());
     const rinv = this.meshes.map((m) => new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().extractRotation(m.matrixWorld)).invert());
     const ls = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'skin') : null));
     const ln = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'skin', 'nor') : null));
+    const lt = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'skin', 'tint') : null));
     for (const l of ls) if (l) beginLayer(l);
     for (const l of ln) if (l) beginLayer(l);
+    for (const l of lt) if (l) beginLayer(l);
+    const TI = this.tint;
     const D = this.D, ND = this.ND, Nr = this.Nr, v = new THREE.Vector3();
     for (const w of set) {
       const dx = D[w * 3], dy = D[w * 3 + 1], dz = D[w * 3 + 2];
@@ -746,11 +897,66 @@ class SoftSkin {
         setOffset(l, this.memIdx[k], v.x, v.y, v.z);
         v.set(nx, ny, nz).applyQuaternion(rinv[m]);
         setOffset(ln[m], this.memIdx[k], v.x, v.y, v.z);
+        if (TI[w * 3] || TI[w * 3 + 1]) setOffset(lt[m], this.memIdx[k], TI[w * 3], TI[w * 3 + 1], 0);
       }
     }
     for (const m of this.meshes) commit(m);
     this.active = true;
   }
+
+  // the per-bone indent settings (model.indent[bone uuid] = { give, depth, width, rim, pale,
+  // rigid, children }) -> per-vertex values; a bone's setting covers the vertices it moves
+  // most, and its child bones' unless they have their own (or children is off)
+  applyOverrides() {
+    const ov = this.model.indent || {};
+    this._ov = this.model.indentVersion || 0;
+    const byBone = new Map();
+    // a setting reaches down through helper bones (twist, breast, skirt...) but stops at the
+    // next main body bone, which is its own region
+    const canon = this.model.humanoid ? this.model.humanoid.canonOf : new Map();
+    const lookup = (b) => {
+      if (byBone.has(b)) return byBone.get(b);
+      let found = null;
+      for (let p = b, first = true; p; p = p.parent, first = false) {
+        const o = ov[p.uuid];
+        if (o && (first || o.children !== false)) { found = o; break; }
+        if (!p.isBone || (canon.has(p) && !ov[p.uuid])) { if (!first || canon.has(p)) break; }
+      }
+      byBone.set(b, found);
+      return found;
+    };
+    for (let w = 0; w < this.N; w++) {
+      const o = lookup(this.dBones[this.dbone[w]]);
+      const rigid = o && o.rigid;
+      this.soft[w] = rigid ? 1e-4 : this.soft0[w] * (o ? Math.max(0.01, o.give ?? 1) : 1);
+      this.maxDepth[w] = rigid ? 0 : this.maxDepth0[w] * (o ? Math.max(0, o.depth ?? 1) : 1);
+      this.widthMul[w] = o ? Math.max(0.1, o.width ?? 1) : 1;
+      this.rimAdd[w] = o ? Math.max(0, o.rim ?? 0) : 0;
+      this.paleMul[w] = o ? Math.max(0, o.pale ?? 1) : 1;
+    }
+  }
+
+  // skin vertices a bone moves most (and its children's, unless they have their own setting)
+  // -> { count, fleshCm (deepest flesh over the bone), dentCm (how deep it can dent) }
+  boneInfo(bone, children = true) {
+    let count = 0, flesh = 0, dent = 0;
+    const canon = this.model.humanoid ? this.model.humanoid.canonOf : new Map();
+    const under = (b) => { for (let p = b; p; p = p.parent) { if (p === bone) return true; if (!children || !p.isBone || canon.has(p)) return false; } return false; };
+    const memo = new Map();
+    for (let w = 0; w < this.N; w++) {
+      const b = this.dBones[this.dbone[w]];
+      let u = memo.get(b);
+      if (u === undefined) memo.set(b, (u = b === bone || under(b)));
+      if (!u) continue;
+      count += this.memStart[w + 1] - this.memStart[w];
+      flesh = Math.max(flesh, this.tissue[w]);
+      dent = Math.max(dent, this.maxDepth[w] * Math.min(2, Math.max(0.2, this.model.softSkinSoftness ?? 1)));
+    }
+    return { count, fleshCm: +(flesh * 100).toFixed(1), dentCm: +(dent * 100).toFixed(1) };
+  }
+
+  // was this vertex in contact (pushed by the other part) in the last solve?
+  pushed(w) { return !!this.isHard && this.isHard[w] === this.hardStamp; }
 
   // do this vertex's triangles face against its own normal? (mirrored or flipped meshes)
   windingFlip(w) {
@@ -771,9 +977,32 @@ class SoftSkin {
       if (!m.geometry.attributes[ATTR]) continue;
       beginLayer(layer(m, 'skin'));
       beginLayer(layer(m, 'skin', 'nor'));
+      beginLayer(layer(m, 'skin', 'tint'));
       commit(m);
     }
   }
+}
+
+// ---------------------------------------------------------------- contact mechanics
+// surface outside a rounded press on soft tissue (Hertz contact on an elastic half-space),
+// as a share of the depth at the middle; rho = distance / contact radius (>= 1): 0.5 at the
+// edge of the contact, ~0.22 at twice the radius, ~0.14 at three times
+export function hertzOut(rho) {
+  if (rho <= 1) return 0.5;
+  return ((2 - rho * rho) * Math.asin(1 / rho) + Math.sqrt(rho * rho - 1)) / Math.PI;
+}
+function smoothstep(a, b, x) { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+
+// how a squeeze of depth pen is shared: each side pushes back harder the more it's
+// squeezed and locks at its bone (force ~ u / (soft (1 - u / cap))); -> this side's share
+export function split(pen, sA, cA, sB, cB) {
+  if (!(cA > 0)) return 0;
+  if (!(cB > 0)) return Math.min(pen, cA);
+  if (pen >= cA + cB) return cA;
+  const F = (u, sf, c) => u / (sf * Math.max(1e-6, 1 - u / c));
+  let lo = Math.max(0, pen - cB * 0.9999), hi = Math.min(pen, cA * 0.9999);
+  for (let i = 0; i < 18; i++) { const m = (lo + hi) / 2; if (F(m, sA, cA) > F(pen - m, sB, cB)) hi = m; else lo = m; }
+  return (lo + hi) / 2;
 }
 
 // ---------------------------------------------------------------- geometry helpers

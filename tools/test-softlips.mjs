@@ -83,6 +83,14 @@ if (typeof process !== 'undefined' && process.argv && process.argv[1] && process
     ok('the whole upper lip lifts (squished a little, not pinched thin)', top > at(U, 0) * 0.55, `top ${top.toFixed(1)} mm vs edge ${at(U, 0).toFixed(1)} mm`);
     const bulge = (() => { let m = 0; for (let i = 0; i < s.N; i++) m = Math.max(m, s.D[i * 3 + 2]); return m * 1000; })();
     ok('squeezed lips bulge forward a little', bulge > 0.3 && bulge < 3, `${bulge.toFixed(2)} mm`);
+    let flipped = 0;
+    for (let t = 0; t < s.tris.length; t += 3) {
+      const [i, j, m] = [s.tris[t] * 3, s.tris[t + 1] * 3, s.tris[t + 2] * 3], P = s.P, D = s.D;
+      const cr = (o) => { const ux = P[j] - P[i] + o * (D[j] - D[i]), uy = P[j + 1] - P[i + 1] + o * (D[j + 1] - D[i + 1]), uz = P[j + 2] - P[i + 2] + o * (D[j + 2] - D[i + 2]); const vx = P[m] - P[i] + o * (D[m] - D[i]), vy = P[m + 1] - P[i + 1] + o * (D[m + 1] - D[i + 1]), vz = P[m + 2] - P[i + 2] + o * (D[m + 2] - D[i + 2]); return [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx]; };
+      const a = cr(0), b = cr(1);
+      if (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] < 0) flipped++;
+    }
+    ok('the lips never fold through themselves', flipped === 0, `${flipped} flipped triangles`);
     // lips a little apart: the edges close onto the tongue (seal) instead of leaving a gap
     {
       const both = new THREE.AnimationClip('c', 1, faceTracks(model, [{ t: 0, control: 'tongue_out', value: 1 }, { t: 1, control: 'tongue_out', value: 1 }, { t: 0, control: 'mouth_open', value: 0.75 }, { t: 1, control: 'mouth_open', value: 0.75 }], 1).tracks);

@@ -20,6 +20,7 @@ export const SHORTCUTS = [
   ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / redo'], ['Ctrl+C / Ctrl+V', 'Copy / paste pose (keys when timeline focused)'], ['Ctrl+D', 'Duplicate model'],
   ['Del', 'Delete selected keys, or the selected model'], ['P', 'Select parent'], ['H', 'Hide / show model'], ['Esc', 'Deselect'],
   ['`', 'Fly mode: WASD move, E/Q up/down, right-drag look, Shift faster, wheel speed, Esc exits'],
+  ['Ctrl+Shift+4', 'Indent settings for the selected bone (how its skin dents)'],
   ['1 / 3 / 7 / 5', 'Front / right / top / perspective view'], ['0', 'Look through camera'], ['Ctrl+O', 'Open files'], ['Ctrl+E', 'Export GLB'],
   ['Timeline', 'Drag keys to retime · double-click to key · right-click for curves · Ctrl+wheel to zoom'],
 ];

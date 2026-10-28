@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { mouthProbe, mouthEffects, evaluator, headFrame, EMPTY, NOT_FACE, TONGUE, nameOf } from './mouth.js';
 import { faceTracks } from './face.js';
-import { ATTR, prepareMesh, layer, beginLayer, setOffset, commit, detachOffsets } from './offsets.js';
+import { ATTR, prepareMesh, layer, beginLayer, setOffset, commit, detachOffsets, weldedTriangles, unfold } from './offsets.js';
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
@@ -166,9 +166,11 @@ class SoftLips {
     this.hugRange = 0.3 * g.hw;
     // ---- edges between welded vertices (for the smoothing)
     const adj = Array.from({ length: N }, () => new Set());
+    const maps = new Map();
     for (const m of this.meshes) {
       const map = new Int32Array(m.geometry.attributes.position.count).fill(-1);
       for (const e of raw) if (e.mesh === m) map[e.i] = e.w;
+      maps.set(m, map);
       const ix = m.geometry.index;
       const n = ix ? ix.count : m.geometry.attributes.position.count;
       for (let t = 0; t + 2 < n; t += 3) {
@@ -178,6 +180,9 @@ class SoftLips {
         if (a >= 0 && c >= 0 && a !== c) { adj[a].add(c); adj[c].add(a); }
       }
     }
+    Object.assign(this, weldedTriangles(this.meshes, (m) => maps.get(m), N));
+    this.foldStamps = { a: new Uint32Array(this.tris.length / 3 + 1) };
+    this.allIds = Int32Array.from({ length: N }, (_, i) => i);
     this.adjStart = new Int32Array(N + 1);
     const al = [];
     for (let i = 0; i < N; i++) { this.adjStart[i] = al.length; for (const j of adj[i]) al.push(j); }
@@ -450,6 +455,8 @@ class SoftLips {
     }
     if (!anyHard) { if (write) { this.clear(); this.stats = stats; } return stats; }
     this.smooth();
+    // never folding through itself
+    this.folds = unfold(this.allIds, this.tris, this.triStart, this.triOf, this.P, this.D, this.foldStamps);
     // whatever the smoothing moved into the tongue or a finger goes back out
     const D = this.D;
     let maxD = 0;
@@ -771,7 +778,7 @@ function capHit(ox, oy, oz, dx, dy, dz, ax, ay, az, bx, by, bz, r) {
 
 // each finger bone as a capsule to its child (the last one to the fingertip); its
 // thickness measured from the skin around it (a share of its length, so it scales)
-function fingerCapsules(model, verts) {
+export function fingerCapsules(model, verts) {
   const rig = model.humanoid;
   const out = [];
   for (const side of ['left', 'right']) {
