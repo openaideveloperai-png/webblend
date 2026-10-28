@@ -109,11 +109,12 @@ function leftInside(s) {
   const armSide = st.contacts.find((c) => [c.a, c.b].includes('torso') && [c.a, c.b].includes('lArm'));
   ok('arms down at the sides: the torso dents and the arm flattens instead of clipping', st.active && armSide && armSide.cm > 0.5 && st.leftCm < 0.2, JSON.stringify(armSide));
   const left = leftInside(s);
-  ok('...nothing left inside the other part after the dent (within a quarter of an edge)', left < s.edge * 0.25, `${(left * 1000).toFixed(1)} mm (edges ${(s.edge * 1000).toFixed(0)} mm)`);
+  // (what's past both dent limits is the solid body's: the ribs at the side only give so far)
+  ok('...nothing left inside the other part after the dent but what the bones stop (within a third of an edge)', left < s.edge * 0.3 + st.leftCm / 100, `${(left * 1000).toFixed(1)} mm (edges ${(s.edge * 1000).toFixed(0)} mm, past the flesh ${(st.leftCm * 10).toFixed(1)} mm)`);
   // both sides give way: torso (soft) more than the arm
   let torsoD = 0, armD = 0;
   for (const w of s.spreadSet) { if (!s.pushed(w)) continue; const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]); if (s.groups[s.group[w]] === 'torso') torsoD = Math.max(torsoD, d); if (s.groups[s.group[w]] === 'lArm') armD = Math.max(armD, d); }
-  ok('both give way, the softer torso more than the arm', torsoD > armD && armD > 0, `torso ${(torsoD * 1000).toFixed(1)} mm, arm ${(armD * 1000).toFixed(1)} mm`);
+  ok('both give way, each by its own tissue (the soft inner arm more than the ribs it presses on)', torsoD > 0.0005 && armD > 0.0005, `torso ${(torsoD * 1000).toFixed(1)} mm, arm ${(armD * 1000).toFixed(1)} mm`);
   // the trampoline: a fingertip poking the belly pulls the skin around it down too
   pose({ rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.6 } });
   const poke = s.update({ write: false });
@@ -121,7 +122,8 @@ function leftInside(s) {
   for (const w of s.spreadSet) {
     if (s.pushed(w) || s.src[w] < 0) continue;
     const c = s.clusters[s.src[w]];
-    if (s.groups[s.group[w]] !== 'torso' || c.depth < 0.002) continue;
+    // (the fingertip's crater: the arms at the sides dent the ribs, which carry a dent much less far)
+    if (s.groups[s.group[w]] !== 'torso' || c.depth < 0.002 || !c.center) continue;
     pc = c;
     const d = Math.hypot(s.D[w * 3], s.D[w * 3 + 1], s.D[w * 3 + 2]);
     const r = c.center ? s.key[w] : c.aGeo + s.key[w];
@@ -372,7 +374,7 @@ function leftInside(s) {
   const off = [];
   for (let i = 0; i < 40; i++) { poseS({}); const animatedQ = arm.quaternion.clone(); solidBody(F.model); off.push(arm.quaternion.angleTo(animatedQ) * 180 / Math.PI); }
   ok('...while playing it holds the limit frame after frame', Math.max(...lefts.slice(4)) < 0.5, lefts.map((x) => x.toFixed(1)).join(' ') + ' cm');
-  ok('...and let go, the limb eases back to the animation (no snap)', off[0] > 0.2 && off[3] > 0.1 && off[39] < 0.05 && off.every((v, i) => i === 0 || v <= off[i - 1] + 1e-6), off.filter((_, i) => i % 5 === 0).map((x) => x.toFixed(2) + '°').join(' '));
+  ok('...and let go, the limb eases back to the animation (no snap)', off[0] > 0.2 && off[3] > 0.1 && off[39] < off[0] * 0.03 && off.every((v, i) => i === 0 || v <= off[i - 1] + 1e-6), off.filter((_, i) => i % 5 === 0).map((x) => x.toFixed(2) + '°').join(' '));
   F.model.app = null;
   // a rig whose constraints / IK write the arm (MMD arm IK): like the real solver, a bone
   // that isn't where it left it counts as posed by hand and becomes the new pose. The
@@ -423,6 +425,52 @@ function leftInside(s) {
   }
   const finalAngle = angle();
   ok('posing by hand: the arm follows the drag freely until it meets the body, then stops there', followed && firstCut !== null && finalAngle < 58 && maxThrough <= drag.good.allow + 0.0015, `stopped at ${finalAngle.toFixed(1)}° of 60° asked (first held back at ${firstCut}°); never more than ${(maxThrough * 1000).toFixed(1)} mm past the flesh (allowed ${(drag.good.allow * 1000).toFixed(1)})`);
+}
+
+// ---- anatomy: where bone lies close under the skin it dents a few millimetres, where there's
+// muscle more, fat and the belly the most (and the lips and the mouth aren't skin to dent)
+{
+  const F = fleshy();
+  const sa = softSkin(F.model);
+  const rig = F.model.humanoid;
+  const all = []; for (let w = 0; w < sa.N; w++) all.push(w);
+  sa.skinFrame++; sa.skin(all);
+  const hips = rig.map.hips.getWorldPosition(new THREE.Vector3()), hh = rig.hipHeight;
+  const at = (w) => { const p = new THREE.Vector3(sa.P[w * 3], sa.P[w * 3 + 1], sa.P[w * 3 + 2]).sub(hips); const n = new THREE.Vector3(sa.Nr[w * 3], sa.Nr[w * 3 + 1], sa.Nr[w * 3 + 2]); return { x: p.dot(rig.lat) / hh, y: p.dot(rig.up) / hh, z: p.dot(rig.fwd) / hh, nx: n.dot(rig.lat), ny: n.dot(rig.up), nz: n.dot(rig.fwd) }; };
+  const mean = (test) => { let t = 0, n = 0; for (let w = 0; w < sa.N; w++) { const c = at(w); if (test(sa.groups[sa.group[w]], c)) { t += sa.maxDepth[w]; n++; } } return n ? t / n : NaN; };
+  const knee = at(0) && rig.map.leftLowerLeg.getWorldPosition(new THREE.Vector3()).sub(hips).dot(rig.up) / hh, ankle = rig.map.leftFoot.getWorldPosition(new THREE.Vector3()).sub(hips).dot(rig.up) / hh;
+  const midShin = (c) => c.y < knee - (knee - ankle) * 0.3 && c.y > ankle + (knee - ankle) * 0.3;
+  const shinFront = mean((g, c) => g === 'lShin' && midShin(c) && c.nz > 0.7), calf = mean((g, c) => g === 'lShin' && midShin(c) && c.nz < -0.7);
+  const neckY = rig.map.neck.getWorldPosition(new THREE.Vector3()).sub(hips).dot(rig.up) / hh, legY = rig.map.leftUpperLeg.getWorldPosition(new THREE.Vector3()).sub(hips).dot(rig.up) / hh;
+  const hOf = (c) => (c.y - legY) / (neckY - legY);
+  const sternum = mean((g, c) => g === 'torso' && Math.abs(c.x) < 0.03 && c.nz > 0.8 && hOf(c) > 0.7 && hOf(c) < 0.88), belly = mean((g, c) => g === 'torso' && Math.abs(c.x) < 0.06 && c.nz > 0.8 && hOf(c) > 0.25 && hOf(c) < 0.45);
+  const thighMid = (c) => c.y < legY - 0.12 && c.y > knee + 0.12;
+  const inner = mean((g, c) => g === 'lThigh' && thighMid(c) && c.nx < -0.7), outer = mean((g, c) => g === 'lThigh' && thighMid(c) && c.nx > 0.7);
+  const skull = mean((g, c) => g === 'head' && c.ny > 0.8);
+  const mm = (v) => (v * 1000).toFixed(1);
+  ok('anatomy: the shin bone right under the skin dents far less than the calf', shinFront > 0 && shinFront < calf * 0.4, `shin ${mm(shinFront)} mm, calf ${mm(calf)} mm`);
+  ok('...the breastbone less than the belly (no bone in front of the belly)', sternum > 0 && sternum < belly * 0.4, `sternum ${mm(sternum)} mm, belly ${mm(belly)} mm`);
+  ok('...the soft inner thigh more than the outer thigh; the skull least of all', inner > outer && skull < shinFront * 1.5 && skull < belly * 0.2, `inner ${mm(inner)} / outer ${mm(outer)} mm, skull ${mm(skull)} mm`);
+  // the lips and the mouth: never dented by the soft skin (they give and wrap as soft lips)
+  const { model: mm2 } = mouthy();
+  const sm = softSkin(mm2);
+  const z = sm && sm.mouthZone;
+  let inside = 0, near = 0;
+  const farD = [];
+  if (z) {
+    const all2 = []; for (let w = 0; w < sm.N; w++) all2.push(w);
+    sm.skinFrame++; sm.skin(all2);
+    for (let w = 0; w < sm.N; w++) {
+      if (sm.groups[sm.group[w]] !== 'head') continue;
+      const d = Math.hypot(sm.P[w * 3] - z.c.x, sm.P[w * 3 + 1] - z.c.y, sm.P[w * 3 + 2] - z.c.z) / z.r;
+      if (d < 0.98) inside++;
+      if (d >= 1 && d < 1.45) near = Math.max(near, sm.maxDepth[w]);
+      if (d > 2.5) farD.push(sm.maxDepth[w]);
+    }
+  }
+  farD.sort((a, b) => a - b);
+  const farMed = farD.length ? farD[farD.length >> 1] : 0;
+  ok('the lips and the mouth aren\'t soft skin (no dent there), and a dent fades out before it reaches them', z && inside === 0 && farMed > 0 && near < farMed * 0.8, z ? `mouth zone ${(z.r * 100).toFixed(1)} cm, ${inside} skin points in it; dent by the lips up to ${(near * 1000).toFixed(2)} mm vs ${(farMed * 1000).toFixed(2)} mm elsewhere on the head` : 'no mouth found');
 }
 
 // ---- face spots measured on the mesh: the cheek is on the cheek

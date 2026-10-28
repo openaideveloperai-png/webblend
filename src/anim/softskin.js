@@ -390,12 +390,46 @@ function build(model) {
   const ev = evaluator(model);
   try {
     ev.at(EMPTY, 0);
-    return new SoftSkin(model, { partOf, canon, lipKeys, lm });
+    return new SoftSkin(model, { partOf, canon, lipKeys, lm, mouth: mouthZone(model, lips, lm) });
   } finally { ev.done(); }
 }
 
+// The lips and the mouth (rest pose, world): real lips don't dent like skin, they give and
+// wrap (that's the soft lips' job), and what's inside the mouth isn't skin at all. A finger
+// in the mouth isn't flesh going through flesh either. -> { c, r } or null
+function mouthZone(model, lips, lm) {
+  const rig = model.humanoid;
+  const lat = rig.lat.clone().transformDirection(model.root.matrixWorld);
+  const v = new THREE.Vector3();
+  if (lips && lips.N) {
+    const pts = [];
+    for (let k = 0; k < lips.memIdx.length; k += Math.max(1, Math.floor(lips.memIdx.length / 400))) {
+      const m = lips.meshes[lips.memMesh[k]];
+      m.getVertexPosition(lips.memIdx[k], v).applyMatrix4(m.matrixWorld);
+      pts.push(v.clone());
+    }
+    if (pts.length) {
+      const c = pts.reduce((a, p) => a.add(p), new THREE.Vector3()).divideScalar(pts.length);
+      let half = 0;
+      for (const p of pts) half = Math.max(half, Math.abs(p.clone().sub(c).dot(lat)));
+      if (half > 0) return { c, r: half * 1.3 };
+    }
+  }
+  const head = rig.map.head;
+  if (lm && lm.points && lm.points.mouth && head) {
+    head.updateWorldMatrix(true, false);
+    const hq = new THREE.Quaternion(); head.getWorldQuaternion(hq);
+    const hrq = rig.rest.get(head).Wq.clone().invert();
+    const ax = (d) => d.clone().applyQuaternion(hrq).applyQuaternion(hq);
+    const mp = lm.points.mouth.p;
+    const c = new THREE.Vector3().setFromMatrixPosition(head.matrixWorld).addScaledVector(ax(rig.lat), mp.x).addScaledVector(ax(rig.up), mp.y).addScaledVector(ax(rig.fwd), mp.z);
+    return { c, r: (lm.eyeX || 0.03) * 1.05 };
+  }
+  return null;
+}
+
 class SoftSkin {
-  constructor(model, { partOf, canon, lipKeys, lm }) {
+  constructor(model, { partOf, canon, lipKeys, lm, mouth }) {
     this.model = model;
     const rig = model.humanoid;
     // ---- body parts: a segment along each humanoid bone, its group, its neighbours
@@ -443,8 +477,15 @@ class SoftSkin {
         const part = partOf.get(b);
         if (!part) continue;
         s.getVertexPosition(i, v).applyMatrix4(s.matrixWorld);
+        // the lips and the mouth: not soft skin (and a dent fades out before it reaches them)
+        let nearMouth = 1;
+        if (mouth && GROUP[canon.get(part)] === 'head') {
+          const d = v.distanceTo(mouth.c) / mouth.r;
+          if (d < 1) continue;
+          nearMouth = smoothstep(1, 1.6, d);
+        }
         n.fromBufferAttribute(na, i).applyMatrix3(nm).normalize();
-        raw.push({ mesh: s, i, x: v.x, y: v.y, z: v.z, nx: n.x, ny: n.y, nz: n.z, part: pIndex.get(part), bone: b });
+        raw.push({ mesh: s, i, x: v.x, y: v.y, z: v.z, nx: n.x, ny: n.y, nz: n.z, part: pIndex.get(part), bone: b, nearMouth });
         used = true;
       }
       if (used) meshes.push(s);
@@ -455,6 +496,7 @@ class SoftSkin {
     const followers = findFollowers(raw, meshes);
     if (followers.size || raw.some((e) => e.drop)) raw = raw.filter((e) => !followers.has(e) && !e.drop);
     this.followerMeshes = [...new Set([...followers.keys()].map((e) => e.mesh))].map((m) => m.name);
+    this.mouthZone = mouth || null;
     this.meshes = meshes;
     const mi = new Map(meshes.map((m, i) => [m, i]));
     // weld seams (same spot, same part)
@@ -598,8 +640,20 @@ class SoftSkin {
       const pts = ['cheekL', 'cheekR'].map((k) => lm.points[k]).filter(Boolean).map((c) => hp.clone().addScaledVector(ax.lat, c.p.x).addScaledVector(ax.up, c.p.y).addScaledVector(ax.fwd, c.p.z));
       cheek = { pts, r: (lm.eyeX || 0.03) * 1.1 };
     }
+    // what's under the skin at each spot (bone close under it, muscle, fat, the belly...)
+    let anatomy = null;
+    try { anatomy = anatomyMap(model, rig, parts, canon, restPos, segB, reps, groups, this.group, cheek); } catch (e) { console.warn('soft skin anatomy', e); }
     reps.forEach((e, w) => {
       const g = groups[this.group[w]];
+      const a = anatomy ? anatomy(e, g, w) : null;
+      if (a) {
+        // how readily it gives, how deep before what's under it stops it (never past the bone
+        // the rig has there), and how thick the soft tissue is (how far a dent spreads)
+        this.soft[w] = a.soft;
+        this.maxDepth[w] = Math.min(this.flesh[w] * 0.95, a.thick * a.give) * (e.nearMouth ?? 1);
+        this.tissue[w] = Math.min(this.flesh[w], a.thick * a.spread);
+        return;
+      }
       let [sf, k] = kindOf(g);
       if (g === 'head' && cheek) {
         let f = 0;
@@ -608,7 +662,7 @@ class SoftSkin {
         sf += (CHEEK[0] - sf) * f; k += (CHEEK[1] - k) * f;
       }
       this.soft[w] = sf;
-      this.maxDepth[w] = k * this.flesh[w];
+      this.maxDepth[w] = k * this.flesh[w] * (e.nearMouth ?? 1);
       // how thick the soft tissue is there (sets how far a dent spreads before it's anchored)
       this.tissue[w] = this.flesh[w] * Math.min(1, 3 * k);
     });
@@ -1260,8 +1314,9 @@ class SoftSkin {
       // inside the contact the skin takes the fingertip's round shape; outside, the crater
       // (around a finger: from how deep the nearest pressed vertex went, so a groove along a
       // finger lying on the skin is as deep as the finger there, never deeper)
+      // (the crater outside the contact follows the whole press, as Hertz has it)
       const d0 = c.center ? Math.min(c.depth, sd[w] || c.depth) : c.depth;
-      const crater = c.center && hard_ ? hl : r <= c.aH ? (c.center ? Math.max(d0 * 0.5, d0 - (r * r) / (2 * c.rho)) : hard_ ? hl : c.depth * 0.5) : d0 * hertzOut(r / c.aH) * Math.exp(-(r - c.aH) / c.Lt);
+      const crater = c.center && hard_ ? hl : r <= c.aH ? (c.center ? Math.max(d0 * 0.5, d0 - (r * r) / (2 * c.rho)) : hard_ ? hl : c.depth * 0.5) : c.depth * hertzOut(r / c.aH) * Math.exp(-(r - c.aH) / c.Lt);
       let ux, uy, uz;
       if (hard_ && hl >= crater) { ux = H[w * 3]; uy = H[w * 3 + 1]; uz = H[w * 3 + 2]; } else {
         // the press's direction, turned toward this spot's own inward normal (on a curved
@@ -1433,6 +1488,132 @@ class SoftSkin {
       commit(m);
     }
   }
+}
+
+// ---------------------------------------------------------------- anatomy
+// What lies under the skin at each spot, from where the spot is on the body (rest pose, the
+// character's own axes and proportions) and which way the skin faces. Each kind of tissue
+// gives differently: fat is about a hundred times softer than skin (forearm indentation:
+// fat ~2 kPa, skin ~200 kPa), relaxed muscle in between (~10-90 kPa in the leg), and where
+// bone lies close under the skin (shin, sternum, spine, skull, knuckles) there's only a few
+// millimetres to give. Thicknesses (cm) are for an average adult, scaled to the character;
+// soft tissue compresses to roughly half before it stiffens up hard.
+//   kind:    soft (share of a squeeze it takes) / give (share of its thickness it can dent)
+//            spread (how far a dent is carried around it: the belly wall over the organs is a
+//            membrane over fluid, a waterbed; fat a little less; thin skin over bone hardly)
+const TISSUE = { fat: [1.25, 0.7, 1.6], belly: [1.1, 0.75, 3.0], muscle: [0.6, 0.55, 1.1], firm: [0.3, 0.45, 0.8], hard: [0.15, 0.35, 0.6] };
+function anatomyMap(model, rig, parts, canon, segA, segB, reps, groups, group, cheek) {
+  if (!rig || !rig.up || !rig.fwd || !rig.lat || !rig.map.hips) return null;
+  const M = model.root.matrixWorld;
+  const up = rig.up.clone().transformDirection(M), fwd = rig.fwd.clone().transformDirection(M), lat = rig.lat.clone().transformDirection(M);
+  const sc = new THREE.Vector3(); model.root.getWorldScale(sc);
+  const hh = rig.hipHeight * ((Math.abs(sc.x) + Math.abs(sc.y) + Math.abs(sc.z)) / 3);
+  if (!(hh > 0)) return null;
+  const unit = hh / 0.9; // this character's size: world units per metre of an adult body
+  const wpos = (k) => { const b = rig.map[k]; if (!b) return null; b.updateWorldMatrix(true, false); return new THREE.Vector3().setFromMatrixPosition(b.matrixWorld); };
+  const hips = wpos('hips');
+  const tmp = new THREE.Vector3();
+  const Y = (p) => (p ? tmp.copy(p).sub(hips).dot(up) / hh : null), X = (p) => (p ? tmp.copy(p).sub(hips).dot(lat) / hh : null);
+  const avg = (a, b) => (a !== null && b !== null ? (a + b) / 2 : a ?? b);
+  const legY = avg(Y(wpos('leftUpperLeg')), Y(wpos('rightUpperLeg'))) ?? -0.05;
+  const neckY = Y(wpos('neck')) ?? Y(wpos('head')) ?? 0.6;
+  const shX = Math.abs((X(wpos('leftUpperArm')) ?? 0.2) - (X(wpos('rightUpperArm')) ?? -0.2)) / 2 || 0.2;
+  const span = Math.max(0.05, neckY - legY);
+  const char = (e) => { tmp.set(e.x, e.y, e.z).sub(hips); return { x: tmp.dot(lat) / hh, y: tmp.dot(up) / hh, z: tmp.dot(fwd) / hh }; };
+  // the chest's own front line (above and below the breasts, near the middle): anything
+  // well forward of it at chest height is breast (soft, and as deep as it sticks out)
+  const hiZ = [], loZ = [];
+  reps.forEach((e, w) => {
+    if (groups[group[w]] !== 'torso') return;
+    const c = char(e), h = (c.y - legY) / span;
+    if (Math.abs(c.x) > shX * 0.15) return;
+    const nz = e.nx * fwd.x + e.ny * fwd.y + e.nz * fwd.z;
+    if (nz < 0.5) return;
+    if (h > 0.88 && h < 0.98) hiZ.push(c.z); else if (h > 0.42 && h < 0.52) loZ.push(c.z);
+  });
+  const med = (a) => { if (!a.length) return null; a.sort((x, y) => x - y); return a[a.length >> 1]; };
+  const zHi = med(hiZ), zLo = med(loZ);
+  const coreZ = zHi !== null && zLo !== null ? (h) => zLo + (zHi - zLo) * Math.min(1, Math.max(0, (h - 0.47) / 0.46)) : null;
+  // which way each limb part faces the middle (for inner / outer thigh and arm)
+  const partX = segA.map((p) => X(p) || 0);
+  const handNormal = {};
+  for (const side of ['left', 'right']) {
+    const hb = rig.map[side + 'Hand'], ax = rig.handAxes && rig.handAxes[side];
+    if (hb && ax && ax.n) { const q = new THREE.Quaternion(); hb.getWorldQuaternion(q); handNormal[side[0] + 'Hand'] = ax.n.clone().applyQuaternion(q); }
+  }
+  const T = (kind, cm) => ({ soft: TISSUE[kind][0], give: TISSUE[kind][1], thick: cm * 0.01 * unit, spread: TISSUE[kind][2] });
+  const mix = (a, b, f) => ({ soft: a.soft + (b.soft - a.soft) * f, give: a.give + (b.give - a.give) * f, thick: a.thick + (b.thick - a.thick) * f, spread: a.spread + (b.spread - a.spread) * f });
+  return (e, g) => {
+    const c = char(e);
+    const nx = e.nx * lat.x + e.ny * lat.y + e.nz * lat.z, ny = e.nx * up.x + e.ny * up.y + e.nz * up.z, nz = e.nx * fwd.x + e.ny * fwd.y + e.nz * fwd.z;
+    if (g === 'torso') {
+      const h = (c.y - legY) / span, ax = Math.abs(c.x) / shX;
+      // breasts: as deep as they stick out past the chest wall, plus what covers the ribs
+      if (coreZ && h > 0.45 && h < 0.97 && ax < 1.05) {
+        // (real breasts stand well clear of the chest wall; a rounded chest only a little, and
+        // on the middle only breasts that meet cover the breastbone)
+        const out = (c.z - coreZ(h)) * 90; // cm
+        if (out > (ax < 0.1 ? 4 : 2.5)) return T('fat', 1.5 + out);
+      }
+      if (nz > 0.45) {
+        if (h > 0.9) return T('firm', 0.8); // collarbones
+        if (h > 0.6) return ax < 0.12 ? T('firm', 1.0) : T('muscle', 1.6); // sternum, pectorals over the ribs
+        if (h > 0.12) return T('belly', 4.5); // the belly: no bone in front, it gives deep
+        return ax < 0.15 ? T('firm', 2.0) : T('muscle', 2.5); // pubic bone, groin
+      }
+      if (nz < -0.45) {
+        if (ax < 0.06 && h > 0.12) return T('firm', 0.7); // the spine
+        if (h > 0.62) return T('muscle', 1.5); // shoulder blades
+        if (h > 0.15) return T('muscle', 3.0); // muscles of the lower back
+        return T('fat', 4.5); // buttocks
+      }
+      if (h > 0.6) return T('muscle', 1.5); // ribs at the side
+      if (h > 0.3) return T('fat', 3.0); // waist
+      if (h > 0.08) return T('firm', 1.5); // top of the hip bone
+      return T('muscle', 2.5); // side of the hip
+    }
+    if (g === 'neck') return nz > 0.4 ? T('muscle', 1.2) : nz < -0.4 ? T('muscle', 2.0) : T('muscle', 1.5);
+    if (g === 'head') {
+      // the skull (a few mm), cheeks soft over the mouth
+      let f = 0;
+      if (cheek) for (const p of cheek.pts) f = Math.max(f, 1 - Math.min(1, Math.hypot(e.x - p.x, e.y - p.y, e.z - p.z) / cheek.r));
+      f = f * f * (3 - 2 * f);
+      return mix(T('hard', 0.55), T('fat', 1.8), f);
+    }
+    // the limbs: where along the bone, and which way the skin faces
+    const k = e.part, A = segA[k], B = segB[k];
+    const abx = B.x - A.x, aby = B.y - A.y, abz = B.z - A.z, l2 = abx * abx + aby * aby + abz * abz;
+    const t = l2 > 1e-12 ? Math.min(1, Math.max(0, ((e.x - A.x) * abx + (e.y - A.y) * aby + (e.z - A.z) * abz) / l2)) : 0.5;
+    const inward = -nx * Math.sign(partX[k] || 1); // facing the body's middle
+    const kind = g.slice(1);
+    if (kind === 'Arm') {
+      if (t > 0.85) return T('firm', 0.6); // elbow
+      if (nz < -0.35) return T('fat', 2.5); // back of the arm
+      return inward > 0.5 ? T('fat', 2.0) : T('muscle', 2.0); // inner arm / biceps, shoulder
+    }
+    if (kind === 'Fore') return t < 0.12 || t > 0.85 ? T('firm', 0.6) : T('muscle', 1.5); // elbow and wrist bony
+    if (kind === 'Hand') {
+      if (e.bone && e.bone !== rig.map[g === 'lHand' ? 'leftHand' : 'rightHand']) return T('hard', 0.35); // fingers
+      const pn = handNormal[g];
+      return pn && e.nx * pn.x + e.ny * pn.y + e.nz * pn.z > 0.4 ? T('muscle', 0.9) : T('firm', 0.45); // palm / back of the hand
+    }
+    if (kind === 'Thigh') {
+      if (t > 0.86) return nz > 0.3 ? T('hard', 0.5) : T('firm', 0.9); // kneecap, knee
+      if (inward > 0.45) return T('fat', 4.5); // inner thigh
+      if (nz < -0.4) return t < 0.3 ? T('fat', 4.5) : T('muscle', 4.0); // under the buttock, hamstrings
+      if (inward < -0.5) return T('muscle', 2.0); // outer thigh
+      return T('muscle', 4.0); // front of the thigh
+    }
+    if (kind === 'Shin') {
+      if (t < 0.1) return T('firm', 0.7); // below the knee
+      if (t > 0.85) return T('firm', 0.6); // ankle
+      if (nz > 0.35 && Math.abs(inward) < 0.8) return T('hard', 0.5); // the shin bone right under the skin
+      if (nz < -0.35) return T('muscle', 3.5); // calf
+      return T('muscle', 1.5);
+    }
+    if (kind === 'Foot') return ny < -0.5 ? T('muscle', 1.2) : T('hard', 0.4); // sole / top of the foot
+    return null;
+  };
 }
 
 // ---------------------------------------------------------------- contact mechanics
