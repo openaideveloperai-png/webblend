@@ -46,6 +46,8 @@ export function checkMotion(model, clip, { prompt = '' } = {}) {
   const issues = [];
   const lines = [];
   for (const n of plan.unknownBones || []) issues.push(`boneKeys name a bone this rig doesn't have: "${n}" (use a name from the bone map)`);
+  for (const n of plan.drivenBones || []) issues.push(`boneKeys on "${n}" were skipped: the rig moves that bone itself (constraints); key the handle that drives it instead`);
+  for (const n of plan.limitedBones || []) issues.push(`boneKeys on "${n}" went past what that part can do and were limited (face handles move about 1-3 cm and turn up to 35°); use smaller values`);
   for (const n of plan.unknownFace || []) issues.push(`faceKeys name a control this model doesn't have: "${n}" (use one from the face / pose controls list)`);
   if (!rig) return { text: issues.join('\n'), issues };
   const scale = rig.height || 1.7;

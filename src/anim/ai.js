@@ -573,7 +573,7 @@ export class AIAssistant {
       if (m.clips.length) s += `; existing clips: ${m.clips.map((c) => c.clip.name).join(', ')}`;
       if (m.adopt) { const held = heldProps(m); if (held.length) s += `; holding: ${held.map((p) => `"${p.name}" (${p.userData.hold.side} hand, ${p.userData.prop.kind}${p.userData.prop.preset !== 'custom' ? ', preset ' + p.userData.prop.preset : ''})`).join(', ')}`; }
       if (m.kind === 'prop') s += ' (a prop model)';
-      if (app.selection.model === m) s += ' [SELECTED]';
+      if (app.selection.model === m) s += ' [SELECTED]' + (app.selection.object && app.selection.object.isBone && app.selection.object !== m.root ? ` (the user has the bone "${app.selection.object.name}" selected; animate the whole character, and that bone with boneKeys only if the request is about it)` : '');
       lines.push(s);
       if (h) { try { const b = describeBody(m); if (b) lines.push(b); } catch (e) { console.warn('body map', e); } }
       if (m.bones.length) { try { const r = describeRig(m); if (r) lines.push(r); } catch (e) { console.warn('rig scan', e); } }
@@ -1266,7 +1266,10 @@ ${parts.join('\n\n')}`;
     const notes = [...pr.notes];
     for (const c of (spec && spec.clips) || []) {
       const targets = this.resolveTargets(c.target || 'selected');
-      for (const { model, object } of targets) {
+      for (const { model, object: picked } of targets) {
+        // a bone picked in a character (say, the teeth) doesn't make the clip that bone's:
+        // Claude moves bones by name with boneKeys
+        const object = model.humanoid && picked && picked.isBone ? model.root : picked;
         try {
           const clip = this.buildClip(model, object, c);
           if (clip && clip.tracks.length) results.push({ model, clip, loop: !!c.loop });
@@ -1433,7 +1436,7 @@ ${parts.join('\n\n')}`;
     clip.userData = { generated: 'ai', prop: heldProp ? heldProp.uuid : undefined, swings: driver ? driver.swings.map((w) => ({ ...w })) : [], shots: driver ? driver.shots.slice() : [] };
     // what the self-check needs to know about the request
     clip.userData.spec = JSON.parse(JSON.stringify(c));
-    clip.userData.plan = { touches: tKeys.map((k) => ({ t: Number(k.t), hand: k.hand, spot: k.spot, weight: Number(k.weight ?? 1), ...how(k) })), unknownBones: bPlan.unknown, keyedBones: bPlan.bones.map((b) => b.bone.name), unknownFace: face.unknown, face: face.used };
+    clip.userData.plan = { touches: tKeys.map((k) => ({ t: Number(k.t), hand: k.hand, spot: k.spot, weight: Number(k.weight ?? 1), ...how(k) })), unknownBones: bPlan.unknown, drivenBones: bPlan.driven || [], limitedBones: bPlan.limited || [], keyedBones: bPlan.bones.map((b) => b.bone.name), unknownFace: face.unknown, face: face.used };
     // effects follow the finished motion
     if (Array.isArray(c.vfx) && c.vfx.length && model.adopt) {
       const { report } = bakeVFX(model, clip, c.vfx, { prop: heldProp || undefined, swings: clip.userData.swings, shots: clip.userData.shots });

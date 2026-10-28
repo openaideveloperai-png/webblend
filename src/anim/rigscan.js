@@ -67,7 +67,9 @@ export function scanRig(model) {
       if (POS_TARGET.has(type)) posTargets.add(it.target);
     }
     if (type === 'IK') { for (const b of it.chain) ikChain.add(b); if (it.target && it.target.isBone) ikTargets.add(it.target); }
-    if (FOLLOW.has(type) && (it.c.influence ?? 1) > 0.5) { if (!follows.has(it.owner)) follows.set(it.owner, []); follows.get(it.owner).push(type); }
+    // (a bone that copies another's location almost fully, like teeth riding on the lip
+    // handles, is driven too: moving it by hand only tears the mesh)
+    if ((FOLLOW.has(type) && (it.c.influence ?? 1) > 0.5) || (type === 'COPY_LOCATION' && (it.c.influence ?? 1) >= 0.85)) { if (!follows.has(it.owner)) follows.set(it.owner, []); follows.get(it.owner).push(type); }
   }
   // what each bone moves: itself, its children, and bones following it (transitively)
   const affects = new Map();

@@ -119,6 +119,13 @@ ok('scan description', /finger bones/.test(describeRig(model)));
   ok('bone keys: x+ nods the head forward; unknown bones reported', top.z > 0.08 && plan.unknown.join() === 'Nope', f3(top));
 }
 
+// ---- bone keys stay within what a body part can do
+{
+  const plan = boneKeyPlan(model, [{ t: 0, bone: 'HeadTop_End', x: 0, y: 0, z: 0, mx: 0, my: -50, mz: 0 }, { t: 0, bone: 'Spine', x: 400, y: 0, z: 0, mx: 0, my: 0, mz: 0 }]);
+  const face = plan.bones.find((b) => b.bone.name === 'HeadTop_End').keys[0], spine = plan.bones.find((b) => b.bone.name === 'Spine').keys[0];
+  ok('bone keys: a face bone slides at most a few cm, any bone turns within limits', face.my >= -3.5 && face.my < 0 && spine.x <= 150 && plan.limited.length === 2, JSON.stringify({ my: face.my, x: spine.x, limited: plan.limited }));
+}
+
 // ---- the self-check
 {
   const T = (t) => ({ t, hand: 'right', spot: 'mouth', weight: 1, finger: 'index', mode: 'tip', depth: 0.3 });

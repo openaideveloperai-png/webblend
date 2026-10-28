@@ -6,6 +6,7 @@
 // lips and jaw). Applied on top of whatever the body pose does at that moment.
 import * as THREE from 'three';
 import { translateName } from '../core/jp.js';
+import { scanRig } from './rigscan.js';
 
 const D2R = THREE.MathUtils.DEG2RAD;
 
@@ -28,18 +29,35 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 // keys -> { bones: [{bone, keys}], unknown: [names] }, bones ordered parents first
 export function boneKeyPlan(model, keys) {
   const by = new Map();
-  const unknown = new Set();
+  const unknown = new Set(), driven = new Set(), limited = new Set();
+  let info = null;
+  try { info = scanRig(model).info; } catch { /* no scan: no limits */ }
+  const rig = model.humanoid;
+  const head = rig && rig.map.head;
+  const onFace = (b) => { if (!head || HAIR.test(b.name)) return false; for (let p = b.parent; p; p = p.parent) if (p === head) return true; return false; };
+  const height = (rig && rig.height) || model.size || 1.7;
   for (const k of keys || []) {
     if (!k || !k.bone || !Number.isFinite(Number(k.t))) continue;
     const bone = findBone(model, k.bone);
     if (!bone) { unknown.add(String(k.bone)); continue; }
+    const i = info && info.get(bone);
+    // the rig moves these itself (teeth riding on the lip handles, stretch / track helpers):
+    // keys on them would fight the constraints and tear the mesh
+    if (i && (i.role === 'auto' || i.role === 'ik')) { driven.add(bone.name); continue; }
+    // how far a bone may go: a face handle a couple of cm (a little more than the
+    // file's own poses move it), anything else a fraction of the body
+    const face = onFace(bone);
+    const maxCm = face ? Math.min(3.5, Math.max(1.2, (i && i.rangeCm ? i.rangeCm * 1.5 : 0))) : height * 100 * 0.15;
+    const maxDeg = face ? 35 : 150;
+    const c = (v, m) => { const x = num(v); if (Math.abs(x) > m) limited.add(bone.name); return Math.max(-m, Math.min(m, x)); };
     if (!by.has(bone)) by.set(bone, []);
-    by.get(bone).push({ t: Number(k.t), x: num(k.x), y: num(k.y), z: num(k.z), mx: num(k.mx), my: num(k.my), mz: num(k.mz) });
+    by.get(bone).push({ t: Number(k.t), x: c(k.x, maxDeg), y: c(k.y, maxDeg), z: c(k.z, maxDeg), mx: c(k.mx, maxCm), my: c(k.my, maxCm), mz: c(k.mz, maxCm) });
   }
   const depth = (o) => { let d = 0; for (let p = o.parent; p; p = p.parent) d++; return d; };
   const bones = [...by].map(([bone, ks]) => ({ bone, keys: ks.sort((a, b) => a.t - b.t) })).sort((a, b) => depth(a.bone) - depth(b.bone));
-  return { bones, unknown: [...unknown] };
+  return { bones, unknown: [...unknown], driven: [...driven], limited: [...limited] };
 }
+const HAIR = /hair|bang|ahoge|fringe|ponytail|braid|髪|毛|もみあげ|ear|耳|horn|角/i;
 
 function valueAt(ks, t) {
   const F = ['x', 'y', 'z', 'mx', 'my', 'mz'];
