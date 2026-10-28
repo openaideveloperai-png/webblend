@@ -49,6 +49,14 @@ const RING = [];
 for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) RING.push([dx, dy, dz]);
 RING.sort((a, b) => Math.abs(a[0]) + Math.abs(a[1]) + Math.abs(a[2]) - (Math.abs(b[0]) + Math.abs(b[1]) + Math.abs(b[2])));
 const IDENT = new THREE.Matrix4();
+// which of the PA angle bins (x, y) falls in: a pseudo-angle (same order as the real angle,
+// without the trigonometry), used for the shape profiles and the per-frame test alike
+function abin(x, y) {
+  const s = (x < 0 ? -x : x) + (y < 0 ? -y : y);
+  if (!(s > 0)) return 0;
+  const p = y >= 0 ? 1 - x / s : 3 + x / s;
+  return Math.floor(p * PA * 0.25) % PA;
+}
 const len3 = (x, y, z) => Math.sqrt(x * x + y * y + z * z);
 const len2 = (x, y) => Math.sqrt(x * x + y * y);
 function visibleChain(o) { for (let p = o; p; p = p.parent) if (!p.visible) return false; return true; }
@@ -75,7 +83,8 @@ export function updateSoftSkin(model, dt) {
   if (!s) return;
   // heavy rigs during playback: every other frame (paused / scrubbing is always exact)
   const playing = model.app && model.app.transport && model.app.transport.playing;
-  if (playing && s.lastMs > 12 && (s.skipOdd = !s.skipOdd)) return;
+  // (the solid body, when on, has already decided this frame for both)
+  if (s.frameSkip !== undefined) { const k = s.frameSkip; s.frameSkip = undefined; if (k) return; } else if (playing && (s.lastMs || 0) > 12 && (s.skipOdd = !s.skipOdd)) return;
   const t0 = performance.now();
   const before = s.solves;
   // the skin eases in time while playing or posing; scrubbing to another time is exact
@@ -133,7 +142,8 @@ export function solidBody(model) {
   // a heavy rig while playing: the soft skin skips every other frame, and so does this
   // (keeping last frame's correction as it is)
   const playing = !!(app && app.transport && app.transport.playing);
-  const skip = playing && (s.lastMs || 0) > 12 && !s.skipOdd;
+  const skip = playing && (s.lastMs || 0) + (model._solidMs || 0) > 12 && (model._solidOdd = !model._solidOdd);
+  s.frameSkip = skip;
   if (live && prev && prev.size) {
     for (const [bone, qd] of prev) {
       const e = { base: bone.quaternion.clone(), applied: new THREE.Quaternion() };
@@ -148,10 +158,11 @@ export function solidBody(model) {
     model.root.updateMatrixWorld(true);
   }
   if (skip) { model.root.updateMatrixWorld(true); s.measured = null; return model._solidLast ? model._solidLast.out : null; }
+  const t0 = performance.now();
   let res = null, moved = 0, dirty = false;
   for (let pass = 0, passes = live ? 2 : 4; pass < passes; pass++) {
     model.root.updateMatrixWorld(true);
-    res = s.solve({ write: false });
+    res = s.solve({ write: false, measure: true });
     dirty = false;
     const ex = s.excess || [];
     if (!ex.length) break;
@@ -229,9 +240,9 @@ export function solidBody(model) {
     if (!any) break;
   }
   model.root.updateMatrixWorld(true);
-  // the pose shown has been measured: soft skin shows that measurement as it is
-  if (res && dirty) res = s.solve({ write: false });
-  if (res) s.measured = { sig: s.signature().slice(), stats: res };
+  // the last measurement is of the pose shown: the soft skin only adds the crater to it
+  if (res && dirty) res = s.solve({ write: false, measure: true });
+  s.measured = res ? { sig: s.signature().slice(), stats: res, found: s.pending } : null;
   const out = { moved, leftCm: res ? res.leftCm : 0 };
   // each corrected limb's turn (world space), to start from next frame
   const pd = new Map();
@@ -243,6 +254,7 @@ export function solidBody(model) {
     if (Math.abs(qd.w) < 0.9999995) pd.set(bone, qd);
   }
   model._solidPrev = pd;
+  model._solidMs = performance.now() - t0;
   model._solidLast = { sig: baseSig, map: new Map([...st].map(([b, e]) => [b, { base: e.base.clone(), applied: e.applied.clone() }])), out };
   return out;
 }
@@ -461,7 +473,7 @@ class SoftSkin {
         p.set(e.x, e.y, e.z).applyMatrix4(inv);
         const a = p.dot(u), x = p.dot(e1), y = p.dot(e2), r = Math.hypot(x, y);
         const ti = Math.min(PT - 1, Math.max(0, Math.floor(((a / len) - PT0) / PTS)));
-        const ai = ((Math.floor(((Math.atan2(y, x) + Math.PI) / (2 * Math.PI)) * PA) % PA) + PA) % PA;
+        const ai = abin(x, y);
         if (r > bins[ti * PA + ai]) bins[ti * PA + ai] = r;
       }
       // grow a bin into its neighbours (no holes between sparse vertices)
@@ -485,7 +497,7 @@ class SoftSkin {
         if (e.part !== k) return;
         p.set(e.x, e.y, e.z).applyMatrix4(inv);
         const a = p.dot(pr.u), x = p.dot(pr.e1), y = p.dot(pr.e2);
-        const ti = Math.floor(((a / pr.len) - PT0) / (PTS / 2)), ai = ((Math.floor(((Math.atan2(y, x) + Math.PI) / (2 * Math.PI)) * PA) % PA) + PA) % PA;
+        const ti = Math.floor(((a / pr.len) - PT0) / (PTS / 2)), ai = abin(x, y);
         const key = ti * 64 + ai;
         let c = cells.get(key);
         if (!c) cells.set(key, (c = { ids: [], sx: 0, sy: 0, sz: 0 }));
@@ -664,7 +676,7 @@ class SoftSkin {
       if (!same && !force && m && m.sig.length === sig.length && m.sig.every((x, i) => x === sig[i])) {
         // the solid body just solved this exact pose: show that instead of solving again
         this.solves = (this.solves || 0) + 1;
-        if (m.stats.active) { this.target = this.spreadSet; this.settle(this.spreadSet, true); this.write(); } else this.release();
+        if (m.stats.active && m.found) this.finish(m.found.hard, m.found.soft, m.stats, true); else this.release();
         this.stats = m.stats;
         return m.stats;
       }
@@ -680,7 +692,10 @@ class SoftSkin {
     return st;
   }
 
-  solve({ write = false, rest = false } = {}) {
+  // measure: only what presses where and what goes through (no crater: the solid body
+  // just needs to know what's still through)
+  solve({ write = false, rest = false, measure = false } = {}) {
+    this.pending = null;
     const N = this.N, caps = this.capsules();
     const stats = { active: false, dentCm: 0, leftCm: 0, contacts: [] };
     // 1. which parts are near each other (not across a joint's own two parts)
@@ -725,7 +740,7 @@ class SoftSkin {
           const tt = al / pr.len;
           let ti = Math.floor((tt - PT0) / PTS), over = 0;
           if (ti < 0) { over = (PT0 - tt) * pr.len; ti = 0; } else if (ti >= PT) { over = (tt - PT0 - PT * PTS) * pr.len; ti = PT - 1; }
-          const ai = ((Math.floor(((Math.atan2(py, px) + Math.PI) / (2 * Math.PI)) * PA) % PA) + PA) % PA;
+          const ai = abin(px, py);
           const reach = pr.bins[ti * PA + ai];
           if (!(reach > 0)) continue;
           const out = len2(px, py) - reach;
@@ -746,17 +761,21 @@ class SoftSkin {
     // 4. skin against skin: a vertex behind the other part's surface is inside it
     // (a flat spatial hash of this frame's vertices: nearest vertex of a part it may touch)
     const cell = Math.max(this.edge * 1.5, 1e-4);
-    const T = 1 << 15, MASK = T - 1;
-    const hs = this.hashStart || (this.hashStart = new Int32Array(T + 1));
+    // (sized to this frame's vertices: clearing and summing a big table costs too)
+    let T = 1024;
+    while (T < nt * 2 && T < 1 << 15) T <<= 1;
+    const MASK = T - 1;
+    const hs = this.hashStart && this.hashStart.length === T + 1 ? this.hashStart : (this.hashStart = new Int32Array(T + 1));
     const hi = this.hashItems || (this.hashItems = new Int32Array(N));
     const hk = this.hashKey || (this.hashKey = new Int32Array(N));
     const Pp = this.P, Nn = this.Nr, grp = this.group;
+    const lastNear = this.lastNear || (this.lastNear = new Int32Array(N).fill(-1));
     // keyed by cell and body part, so a lookup only meets the parts it may touch
     const hkey = (ix, iy, iz, g) => ((ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791) ^ (g * 2654435761)) & MASK;
     hs.fill(0);
     for (const w of touched) { const k = hkey(Math.floor(Pp[w * 3] / cell), Math.floor(Pp[w * 3 + 1] / cell), Math.floor(Pp[w * 3 + 2] / cell), grp[w]); hk[w] = k; hs[k + 1]++; }
     for (let k = 0; k < T; k++) hs[k + 1] += hs[k];
-    const fillAt = this.fillAt || (this.fillAt = new Int32Array(T));
+    const fillAt = this.fillAt && this.fillAt.length === T ? this.fillAt : (this.fillAt = new Int32Array(T));
     fillAt.set(hs.subarray(0, T));
     for (const w of touched) hi[fillAt[hk[w]]++] = w;
     const soft = Math.min(2, Math.max(0.2, this.model.softSkinSoftness ?? 1));
@@ -780,11 +799,21 @@ class SoftSkin {
       const ix = Math.floor(x / cell), iy = Math.floor(y / cell), iz = Math.floor(z / cell);
       let best = Infinity, bu = -1;
       const good = (cell * 0.35) ** 2;
+      // start from last frame's match (it hardly moves): usually close enough to stop at once
+      const ln = lastNear[w];
+      if (ln >= 0 && this.stamp[ln] === this.frame && (mask & (1 << grp[ln]))) { best = (x - Pp[ln * 3]) ** 2 + (y - Pp[ln * 3 + 1]) ** 2 + (z - Pp[ln * 3 + 2]) ** 2; bu = ln; }
+      // where in its cell the vertex sits: a neighbouring cell can't hold anything closer
+      // than its wall, so cells farther than the best match so far are skipped
+      const fx = x / cell - ix, fy = y / cell - iy, fz = z / cell - iz, c2 = cell * cell;
       for (let g = 0; g < 32 && best > good; g++) {
         if (!(mask & (1 << g))) continue;
         // own cell first, then the ring around it (stop once something is close enough)
         for (let r = 0; r < 27 && best > good; r++) {
           const o = RING[r];
+          if (r) {
+            const gx = o[0] > 0 ? 1 - fx : o[0] < 0 ? fx : 0, gy = o[1] > 0 ? 1 - fy : o[1] < 0 ? fy : 0, gz = o[2] > 0 ? 1 - fz : o[2] < 0 ? fz : 0;
+            if ((gx * gx + gy * gy + gz * gz) * c2 >= best) continue;
+          }
           const k = hkey(ix + o[0], iy + o[1], iz + o[2], g);
           for (let q = hs[k], e = hs[k + 1]; q < e; q++) {
             const u = hi[q];
@@ -794,6 +823,7 @@ class SoftSkin {
           }
         }
       }
+      lastNear[w] = bu;
       // (the hash can mix in vertices from far cells: those are no match)
       if (bu < 0 || best > cell * cell * 4) continue;
       const ux = Pp[bu * 3], uy = Pp[bu * 3 + 1], uz = Pp[bu * 3 + 2], mx = Nn[bu * 3], my = Nn[bu * 3 + 1], mz = Nn[bu * 3 + 2];
@@ -935,14 +965,20 @@ class SoftSkin {
     }
     if (rest) { if (write) this.clear(); return stats; }
     if (!hard.length) { if (write) this.release(); return stats; }
-    // 5. the dent fades over the surface, with a slight bulge around it
+    stats.active = true;
+    stats.leftCm = +(maxLeft * 100).toFixed(2);
+    for (let k = 0; k < contact.length; k++) if (contact[k] > 0) stats.contacts.push({ a: this.groups[(k / 32) | 0], b: this.groups[k % 32], cm: +(contact[k] * 100).toFixed(1), leftCm: +(contactLeft[k] * 100).toFixed(1) });
+    if (measure) { this.pending = { hard, soft }; return stats; }
+    return this.finish(hard, soft, stats, write);
+  }
+
+  // 5. the dent fades over the surface, with a slight bulge around it (from what the contact
+  // test found: this solve's, or the solid body's last measurement of this same pose)
+  finish(hard, soft, stats, write) {
     const D = this.spread(hard, soft);
     let maxD = 0;
     for (const w of this.spreadSet) maxD = Math.max(maxD, len3(D[w * 3], D[w * 3 + 1], D[w * 3 + 2]));
-    stats.active = true;
     stats.dentCm = +(maxD * 100).toFixed(2);
-    stats.leftCm = +(maxLeft * 100).toFixed(2);
-    for (let k = 0; k < contact.length; k++) if (contact[k] > 0) stats.contacts.push({ a: this.groups[(k / 32) | 0], b: this.groups[k % 32], cm: +(contact[k] * 100).toFixed(1), leftCm: +(contactLeft[k] * 100).toFixed(1) });
     if (write) { this.target = this.spreadSet; this.settle(this.spreadSet, true); this.write(); }
     return stats;
   }
@@ -1004,7 +1040,7 @@ class SoftSkin {
     for (const u of need) if (mark[u] !== tag || !(S[u * 3] || S[u * 3 + 1] || S[u * 3 + 2])) { if (mark[u] !== tag) { S[u * 3] = S[u * 3 + 1] = S[u * 3 + 2] = 0; } }
     if (moving && list.length) {
       this.foldStamps = this.foldStamps || { a: new Uint32Array(this.tris.length / 3 + 1) };
-      unfold(list, this.tris, this.triStart, this.triOf, this.P, S, this.foldStamps);
+      unfold(list, this.tris, this.triStart, this.triOf, this.P, S, this.foldStamps, 2);
       // pressed skin stays with the press
       for (const w of set) if (this.isHard[w] === hardNow) { const d = D[w * 3] * D[w * 3] + D[w * 3 + 1] * D[w * 3 + 1] + D[w * 3 + 2] * D[w * 3 + 2], e = S[w * 3] * S[w * 3] + S[w * 3 + 1] * S[w * 3 + 1] + S[w * 3 + 2] * S[w * 3 + 2]; if (d > e) { S[w * 3] = D[w * 3]; S[w * 3 + 1] = D[w * 3 + 1]; S[w * 3 + 2] = D[w * 3 + 2]; } }
     }
@@ -1020,7 +1056,7 @@ class SoftSkin {
     const lx = e[0] * x + e[4] * y + e[8] * z + e[12], ly = e[1] * x + e[5] * y + e[9] * z + e[13], lz = e[2] * x + e[6] * y + e[10] * z + e[14];
     const al = lx * pr.u.x + ly * pr.u.y + lz * pr.u.z, px = lx * pr.e1.x + ly * pr.e1.y + lz * pr.e1.z, py = lx * pr.e2.x + ly * pr.e2.y + lz * pr.e2.z;
     const ti = Math.min(PT - 1, Math.max(0, Math.floor((al / pr.len - PT0) / PTS)));
-    const ai = ((Math.floor(((Math.atan2(py, px) + Math.PI) / (2 * Math.PI)) * PA) % PA) + PA) % PA;
+    const ai = abin(px, py);
     return pr.bins[ti * PA + ai] * pr.scale;
   }
 
