@@ -109,7 +109,7 @@ export async function exportGLB(app, models, filename) {
 // soft lips / soft skin settings and per-bone indents (by bone name: uuids change on reopen)
 function softMeta(m) {
   const out = {};
-  for (const k of ['softLips', 'softLipsSoftness', 'softSkin', 'softSkinSoftness']) if (m[k] !== undefined) out[k] = m[k];
+  for (const k of ['softLips', 'softLipsSoftness', 'softSkin', 'softSkinSoftness', 'solidBody']) if (m[k] !== undefined) out[k] = m[k];
   if (m.indent && Object.keys(m.indent).length) {
     const byName = {};
     m.root.traverse((o) => { if (o.isBone && m.indent[o.uuid] && !(o.name in byName)) byName[o.name] = { ...m.indent[o.uuid] }; });

@@ -276,8 +276,11 @@ export function initProperties(app, ui) {
       const redraw = () => { app.needsEval = true; app.viewport.requestRender(); };
       on.addEventListener('change', () => { model.softSkin = on.checked; if (!on.checked && model._skin) model._skin.clear(); else if (model._skin) model._skin.update({ force: true }); redraw(); });
       range.addEventListener('input', () => { model.softSkinSoftness = parseFloat(range.value); val.textContent = fmt(model.softSkinSoftness, 2); if (model._skin) model._skin.update({ force: true }); redraw(); });
+      const solid = h('input', { type: 'checkbox', checked: model.solidBody !== false || undefined, 'aria-label': 'Solid body' });
+      solid.addEventListener('change', () => { model.solidBody = solid.checked; model._solidLast = null; if (!solid.checked && model._solid) { for (const [b, e] of model._solid) if (b.quaternion.equals(e.applied)) b.quaternion.copy(e.base); model._solid.clear(); } redraw(); });
       root.append(sec('Soft skin',
         h('div', { class: 'field' }, h('label', {}, 'Dent'), h('label', { class: 'toggle' }, on)),
+        h('div', { class: 'field' }, h('label', { title: 'Where a press goes past what the flesh can take, the arm or leg stops there instead of going through (the keys stay as they are)' }, 'Solid body'), h('label', { class: 'toggle' }, solid)),
         h('div', { class: 'field' }, h('label', { title: 'How far the flesh gives way where body parts press together' }, 'Softness'), range, val),
         h('div', { class: 'hint' }, 'Where body parts press together (an arm against the side, a hand on the cheek, fingers pinching, thighs) the skin dents and bulges instead of clipping, up to how much flesh there is over the bone. Live, like a soft body.')));
     }

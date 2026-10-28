@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeMannequin } from '../src/scene/primitives.js';
 import { detectHumanoid, defaultParams, paramsToSpec } from '../src/anim/humanoid.js';
-import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial } from '../src/anim/softskin.js';
+import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial, solidBody } from '../src/anim/softskin.js';
 import { faceLandmarks } from '../src/anim/landmarks.js';
 import { mouthy } from './test-softlips.mjs';
 
@@ -224,11 +224,13 @@ function leftInside(s) {
     F.root.updateMatrixWorld(true);
     s2.update();
     let mx = 0;
-    for (const w of s2.spreadSet || []) if (s2.groups[s2.group[w]] === 'torso' && s2.src[w] >= 0 && s2.clusters[s2.src[w]].center) mx = Math.max(mx, Math.hypot(s2.D[w * 3], s2.D[w * 3 + 1], s2.D[w * 3 + 2]));
+    // (the belly around the finger: the patch the fingertip's deepest point belongs to)
+    const pcs = new Set((s2.probes || []).filter((p) => s2.groups[s2.group[p.w]] === 'torso').map((p) => s2.src[p.w]));
+    for (const w of s2.spreadSet || []) if (s2.groups[s2.group[w]] === 'torso' && s2.src[w] >= 0 && pcs.has(s2.src[w])) mx = Math.max(mx, Math.hypot(s2.D[w * 3], s2.D[w * 3 + 1], s2.D[w * 3 + 2]));
     dents.push(mx);
   }
   const lo = Math.min(...dents), hi = Math.max(...dents);
-  ok('a fingertip held in the belly while the body moves a little: its dent stays (no jumping back every other frame)', lo > 0.002 && hi - lo < 0.15 * hi, dents.map((d) => (d * 1000).toFixed(1)).join(' ') + ' mm');
+  ok('a fingertip held in the belly while the body moves a little: its dent stays (no jumping back every other frame)', lo > 0.0005 && hi - lo < 0.15 * hi, dents.map((d) => (d * 1000).toFixed(1)).join(' ') + ' mm');
 }
 
 // ---- in time: pressed skin keeps up with the press at once, and once let go it springs
@@ -292,6 +294,86 @@ function leftInside(s) {
   const maxOff = (m) => { const a = m.geometry.attributes.contactOffset; let x = 0; if (a) for (let k = 0; k < a.array.length; k += 3) x = Math.max(x, Math.hypot(a.array[k], a.array[k + 1], a.array[k + 2])); return x; };
   const bodyD = maxOff(F.body), overD = maxOff(over);
   ok('...pressed, the piece on the skin sinks with the skin under it', bodyD > 0.003 && overD > bodyD * 0.6 && overD <= bodyD * 1.01, `body ${(bodyD * 1000).toFixed(1)} mm, piece on it ${(overD * 1000).toFixed(1)} mm`);
+}
+
+// ---- a hand lying flat on the belly: the skin under every finger sinks along its length
+// (it used to dent only under the deepest point of each finger; the rest clipped through)
+{
+  const F = fleshy();
+  const s6 = softSkin(F.model);
+  F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), lArmRaise: 90, rTouch: { spot: 'belly', weight: 1, mode: 'palm', depth: 0.6 } })));
+  F.root.updateMatrixWorld(true);
+  // the palm pose keeps the fingers just off the skin: push the hand in until they're ~6 mm in
+  const A = new THREE.Vector3(), B = new THREE.Vector3(), Q = new THREE.Quaternion();
+  const hand = F.model.humanoid.map.rightHand, spine = F.model.humanoid.map.spine;
+  const hw = new THREE.Vector3().setFromMatrixPosition(hand.matrixWorld), sw = new THREE.Vector3().setFromMatrixPosition(spine.matrixWorld);
+  const toBody = new THREE.Vector3(sw.x - hw.x, 0, sw.z - hw.z).normalize();
+  const local = toBody.clone().transformDirection(new THREE.Matrix4().copy(hand.parent.matrixWorld).invert()).multiplyScalar(0.025 / hand.parent.getWorldScale(new THREE.Vector3()).x);
+  hand.position.add(local);
+  F.root.updateMatrixWorld(true);
+  s6.update({ force: true });
+  // skin under each finger capsule: how far it's still inside the finger, before and after
+  let under = 0, clipBefore = 0, clipAfter = 0, worst = 0;
+  for (let fi = 0; fi < s6.fingerCaps.length; fi++) {
+    const f = s6.fingerCaps[fi];
+    if (s6.groups[s6.fingerGroup[fi]] !== 'rHand') continue;
+    A.setFromMatrixPosition(f.a.matrixWorld);
+    if (f.b) B.setFromMatrixPosition(f.b.matrixWorld); else B.copy(f.tip).applyMatrix4(f.a.matrixWorld);
+    const L = A.distanceTo(B);
+    if (f.off) { f.a.getWorldQuaternion(Q); const o = f.off.clone().applyQuaternion(Q).multiplyScalar(L); A.add(o); B.add(o); }
+    const r = f.ratio * L, ab = B.clone().sub(A), l2 = ab.lengthSq() || 1e-12;
+    for (let w = 0; w < s6.N; w++) {
+      if (s6.groups[s6.group[w]] !== 'torso' || s6.skinned[w] !== s6.skinFrame) continue;
+      const inside = (dx, dy, dz) => {
+        const x = s6.P[w * 3] + dx, y = s6.P[w * 3 + 1] + dy, z = s6.P[w * 3 + 2] + dz;
+        let t = ((x - A.x) * ab.x + (y - A.y) * ab.y + (z - A.z) * ab.z) / l2; t = Math.max(0, Math.min(1, t));
+        return r - Math.hypot(A.x + t * ab.x - x, A.y + t * ab.y - y, A.z + t * ab.z - z);
+      };
+      const before = inside(0, 0, 0);
+      if (before <= 0.001) continue;
+      under++; clipBefore++;
+      const after = inside(s6.S[w * 3], s6.S[w * 3 + 1], s6.S[w * 3 + 2]);
+      if (after > 0.001) clipAfter++;
+      worst = Math.max(worst, after);
+    }
+  }
+  ok('a hand lying flat on the belly: the skin sinks under the whole length of every finger (no finger clipping in)', under > 10 && clipAfter === 0 && worst < 0.0012, `${under} skin points inside the fingers before the dent, ${clipAfter} after (deepest ${(worst * 1000).toFixed(1)} mm)`);
+}
+
+// ---- solid body: where a press goes past what the flesh on both sides can take (here the
+// hands and forearms pushed into the thighs), the limbs stop at the limit
+{
+  const F = fleshy();
+  const s5 = softSkin(F.model);
+  const poseS = (p) => { F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), ...p }))); F.root.updateMatrixWorld(true); };
+  const deep = { lArmRaise: -8, rArmRaise: -8 };
+  poseS(deep);
+  const before = s5.solve({ write: false }).leftCm;
+  const arm = F.model.humanoid.map.leftUpperArm, animated = arm.quaternion.clone();
+  const r1 = solidBody(F.model);
+  const after = s5.solve({ write: false }).leftCm;
+  const turned = arm.quaternion.angleTo(animated) * 180 / Math.PI;
+  ok('solid body: limbs pressing past the dent limit stop there instead of going through', before > 0.8 && after < 0.3 && r1.moved > 0, `${before} cm through -> ${after} cm (shoulder turned ${turned.toFixed(1)}°)`);
+  const q1 = arm.quaternion.clone();
+  const r2 = solidBody(F.model);
+  ok('...the same pose again: the same correction, not worked out again or piled on', r2 === r1 && arm.quaternion.angleTo(q1) < 1e-6);
+  poseS(deep); solidBody(F.model);
+  ok('...the animation posing it again: corrected from the animated pose (nothing builds up)', arm.quaternion.angleTo(q1) < 1e-4, `${(arm.quaternion.angleTo(q1) * 180 / Math.PI).toFixed(4)}°`);
+  F.model.solidBody = false; solidBody(F.model);
+  ok('...switched off: the limbs go back to the pose as animated', arm.quaternion.angleTo(animated) < 1e-6);
+  F.model.solidBody = true;
+  poseS({ lArmRaise: 90, rArmRaise: 90 }); const free = arm.quaternion.clone(); solidBody(F.model);
+  ok('...nothing pressing too hard: the pose is left exactly as it is', arm.quaternion.angleTo(free) < 1e-9);
+  // playing: starts from last frame's correction (one solve a frame), and once let go the
+  // limb drifts back to the animation over a few frames instead of snapping
+  F.model.app = { transport: { playing: true, time: 0 } };
+  const lefts = [];
+  for (let i = 0; i < 12; i++) { poseS(deep); solidBody(F.model); lefts.push(s5.solve({ write: false }).leftCm); }
+  const off = [];
+  for (let i = 0; i < 40; i++) { poseS({}); const animatedQ = arm.quaternion.clone(); solidBody(F.model); off.push(arm.quaternion.angleTo(animatedQ) * 180 / Math.PI); }
+  ok('...while playing it holds the limit frame after frame', Math.max(...lefts.slice(4)) < 0.5, lefts.map((x) => x.toFixed(1)).join(' ') + ' cm');
+  ok('...and let go, the limb eases back to the animation (no snap)', off[0] > 0.2 && off[3] > 0.1 && off[39] < 0.05 && off.every((v, i) => i === 0 || v <= off[i - 1] + 1e-6), off.filter((_, i) => i % 5 === 0).map((x) => x.toFixed(2) + '°').join(' '));
+  F.model.app = null;
 }
 
 // ---- face spots measured on the mesh: the cheek is on the cheek

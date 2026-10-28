@@ -20,7 +20,7 @@ import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITI
 import { onDecorationReady } from '../scene/patterns.js';
 import { updateSoftLips } from '../anim/softlips.js';
 import { faceLandmarks } from '../anim/landmarks.js';
-import { updateSoftSkin } from '../anim/softskin.js';
+import { updateSoftSkin, solidBody } from '../anim/softskin.js';
 
 const _v = new THREE.Vector3();
 
@@ -232,6 +232,7 @@ export class App extends Emitter {
     if (model.softLipsSoftness !== undefined) m2.softLipsSoftness = model.softLipsSoftness;
     if (model.softSkin !== undefined) m2.softSkin = model.softSkin;
     if (model.softSkinSoftness !== undefined) m2.softSkinSoftness = model.softSkinSoftness;
+    if (model.solidBody !== undefined) m2.solidBody = model.solidBody;
     // per-bone indent settings follow to the copy's bones
     if (model.indent) { m2.indent = {}; for (const [id, v] of Object.entries(model.indent)) if (map.has(id)) m2.indent[map.get(id)] = { ...v }; m2.indentVersion = 1; }
     this.toast(`Duplicated "${model.name}"`, 'ok');
@@ -834,6 +835,8 @@ export class App extends Emitter {
     this.world.updateMatrixWorld(true);
     // bone constraints (control bones driving deform bones, IK legs...)
     for (const m of this.models) if (m.constraints && m.root.visible && m.solveConstraints()) m.root.updateMatrixWorld(true);
+    // solid body: a limb pressing past what the flesh can take stops there instead of clipping
+    if (this.settings.preset().softSkin !== false) for (const m of this.models) if (m.humanoid && m._skin && m.root.visible) { try { solidBody(m); } catch (e) { console.warn('solid body', e); m.solidBody = false; } }
     // soft lips wrap around the tongue / a finger (only works when something's near the mouth)
     for (const m of this.models) if (m.humanoid) { try { updateSoftLips(m); } catch (e) { console.warn('soft lips', e); m.softLips = false; } }
     // soft skin: body parts pressing each other dent instead of clipping
@@ -1033,7 +1036,7 @@ export class App extends Emitter {
 
 // soft lips / soft skin settings saved with a WebBlend scene (indents stored by bone name)
 function restoreSoftMeta(m, info) {
-  for (const k of ['softLips', 'softSkin']) if (typeof info[k] === 'boolean') m[k] = info[k];
+  for (const k of ['softLips', 'softSkin', 'solidBody']) if (typeof info[k] === 'boolean') m[k] = info[k];
   for (const k of ['softLipsSoftness', 'softSkinSoftness']) if (Number.isFinite(info[k])) m[k] = Math.min(2, Math.max(0.3, info[k]));
   if (info.indent && typeof info.indent === 'object') {
     const byName = new Map();

@@ -92,6 +92,161 @@ export function updateSoftSkin(model, dt) {
 // a few frames, and once let go it springs back over a fraction of a second, not instantly
 const SETTLE_IN = 0.03, SETTLE_OUT = 0.16;
 
+// ---------------------------------------------------------------- solid body
+// The body can't go through itself: where a press goes past what the flesh on both sides
+// can take (the bones would meet), the limb doing it stops at that limit. Each arm / leg
+// turns at its shoulder / hip just enough to back the contact out (a few passes, since
+// moving one contact can change another). Changes the pose that's shown; the keys stay.
+const LIMBS = [['left', 'UpperArm', ['lArm', 'lFore', 'lHand']], ['right', 'UpperArm', ['rArm', 'rFore', 'rHand']], ['left', 'UpperLeg', ['lThigh', 'lShin', 'lFoot']], ['right', 'UpperLeg', ['rThigh', 'rShin', 'rFoot']]];
+const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vj = new THREE.Vector3();
+export function solidBody(model) {
+  if (model.solidBody === false || model.softSkin === false || !model.humanoid) {
+    // switched off: the limbs go back to the pose as animated
+    if (model._solid && model._solid.size) { for (const [b, e] of model._solid) if (b.quaternion.equals(e.applied)) b.quaternion.copy(e.base); model._solid.clear(); model.root.updateMatrixWorld(true); }
+    model._solidLast = null;
+    return null;
+  }
+  const s = model._skin;
+  if (!s) return null;
+  const rig = model.humanoid;
+  // the shoulders / hips as the pose has them (not last frame's correction on top)
+  const st = model._solid || (model._solid = new Map());
+  for (const [bone, e] of st) { if (bone.quaternion.equals(e.applied)) bone.quaternion.copy(e.base); }
+  st.clear();
+  model.root.updateMatrixWorld(true);
+  // paused on the same pose as last time: the same correction, no need to work it out again
+  // (while playing it keeps easing frame to frame)
+  const app = model.app;
+  const live = !!(app && ((app.transport && app.transport.playing) || app._drag));
+  const baseSig = s.signature().slice();
+  const last = model._solidLast;
+  if (!live && last && last.sig.length === baseSig.length && last.sig.every((x, i) => x === baseSig[i])) {
+    for (const [bone, e] of last.map) { e.base.copy(bone.quaternion); bone.quaternion.copy(e.applied); st.set(bone, e); }
+    if (last.map.size) model.root.updateMatrixWorld(true);
+    return last.out;
+  }
+  const limbs = LIMBS.map(([side, k, gs]) => ({ bone: rig.map[side + k], leg: k === 'UpperLeg', gs: new Set(gs.map((g) => s.groups.indexOf(g)).filter((i) => i >= 0)) })).filter((l) => l.bone && l.gs.size);
+  // while playing or dragging: start from last frame's correction, eased a little back toward
+  // the animation (warm start: usually one solve a frame, and a limb let go drifts back
+  // smoothly); paused / scrubbed: worked out from scratch, exactly
+  const prev = model._solidPrev;
+  // a heavy rig while playing: the soft skin skips every other frame, and so does this
+  // (keeping last frame's correction as it is)
+  const playing = !!(app && app.transport && app.transport.playing);
+  const skip = playing && (s.lastMs || 0) > 12 && !s.skipOdd;
+  if (live && prev && prev.size) {
+    for (const [bone, qd] of prev) {
+      const e = { base: bone.quaternion.clone(), applied: new THREE.Quaternion() };
+      _q.identity().slerp(qd, skip ? 1 : 0.9);
+      bone.getWorldQuaternion(_q2);
+      const parentQ = new THREE.Quaternion();
+      if (bone.parent) bone.parent.getWorldQuaternion(parentQ);
+      bone.quaternion.copy(parentQ.invert().multiply(_q.multiply(_q2)));
+      e.applied.copy(bone.quaternion);
+      st.set(bone, e);
+    }
+    model.root.updateMatrixWorld(true);
+  }
+  if (skip) { model.root.updateMatrixWorld(true); s.measured = null; return model._solidLast ? model._solidLast.out : null; }
+  let res = null, moved = 0, dirty = false;
+  for (let pass = 0, passes = live ? 2 : 4; pass < passes; pass++) {
+    model.root.updateMatrixWorld(true);
+    res = s.solve({ write: false });
+    dirty = false;
+    const ex = s.excess || [];
+    if (!ex.length) break;
+    let any = false;
+    for (const L of limbs) {
+      // the one small turn at the limb's root that best moves every contact of it out of the
+      // other part by as much as it's through (least squares over all of them at once, along
+      // each contact's own direction only, so they may slide). Contacts freed in an earlier
+      // pass stay in with "don't go back in", or freeing one would push another back through
+      // (hands crossing in front, forearms on the thighs)
+      L.bone.updateWorldMatrix(true, false);
+      _vj.setFromMatrixPosition(L.bone.matrixWorld);
+      const rows = [];
+      let most = 0;
+      for (const e of ex) {
+        const mine = L.gs.has(e.g), theirs = L.gs.has(e.o);
+        if (mine === theirs) continue;
+        // against another limb, each backs off half; but an arm against a leg is the arm's
+        // to move (the legs carry the stance, the feet may be planted)
+        const other = limbs.find((M) => M !== L && M.gs.has(mine ? e.o : e.g));
+        if (other && L.leg && !other.leg) continue;
+        const share = other && L.leg === other.leg ? 0.5 : 1, sign = mine ? 1 : -1;
+        // away from the other part's bone (deep inside thin parts the surface normals point
+        // every which way; the line between the two bones doesn't)
+        let dx = sign * e.dx, dy = sign * e.dy, dz = sign * e.dz;
+        const lp = mine ? e.pa : e.po, op = mine ? e.po : e.pa;
+        if (lp >= 0 && op >= 0 && s.caps) {
+          segDist(s.caps[lp], s.caps[op]);
+          const ax = _cpA.x - _cpB.x, ay = _cpA.y - _cpB.y, az = _cpA.z - _cpB.z, al = len3(ax, ay, az);
+          if (al > 1e-4) { dx = ax / al; dy = ay / al; dz = az / al; }
+        }
+        // (the deepest points count most: they set the turn, the rest steer it)
+        const dw = (e.left + 0.002) * 100;
+        rows.push({ rx: e.x - _vj.x, ry: e.y - _vj.y, rz: e.z - _vj.z, dx, dy, dz, need: e.left * share + 0.001, w: dw * dw * dw, pair: Math.min(e.g, e.o) * 32 + Math.max(e.g, e.o) });
+        most = Math.max(most, e.left * share);
+      }
+      // (playing: a second pass only for what's clearly still through)
+      const fresh = most >= (live && pass ? 0.004 : 0.0015);
+      const keep = L.keep || (L.keep = []);
+      if (!fresh) { for (const k of keep) k.need = 0; continue; }
+      // (only contacts already freed: the ones still through are in this pass's rows)
+      const live2 = new Set(rows.map((r) => r.pair));
+      const all = rows.concat(keep.filter((k) => !live2.has(k.pair)).map((k) => ({ ...k, need: 0, w: k.w * 0.7 })));
+      // normal equations for omega: sum w g g^T omega = sum w need g, with g = r x d
+      let a00 = 0, a01 = 0, a02 = 0, a11 = 0, a12 = 0, a22 = 0, b0 = 0, b1 = 0, b2 = 0;
+      for (const c of all) {
+        const gx = c.ry * c.dz - c.rz * c.dy, gy = c.rz * c.dx - c.rx * c.dz, gz = c.rx * c.dy - c.ry * c.dx;
+        a00 += c.w * gx * gx; a01 += c.w * gx * gy; a02 += c.w * gx * gz; a11 += c.w * gy * gy; a12 += c.w * gy * gz; a22 += c.w * gz * gz;
+        b0 += c.w * c.need * gx; b1 += c.w * c.need * gy; b2 += c.w * c.need * gz;
+      }
+      // a little damping: the smallest turn that does it
+      const tr = (a00 + a11 + a22) * 0.004 + 1e-14;
+      const m00 = a00 + tr, m11 = a11 + tr, m22 = a22 + tr;
+      const det = m00 * (m11 * m22 - a12 * a12) - a01 * (a01 * m22 - a12 * a02) + a02 * (a01 * a12 - m11 * a02);
+      if (!(Math.abs(det) > 1e-40)) continue;
+      const wx = (b0 * (m11 * m22 - a12 * a12) - a01 * (b1 * m22 - a12 * b2) + a02 * (b1 * a12 - m11 * b2)) / det;
+      const wy = (m00 * (b1 * m22 - a12 * b2) - b0 * (a01 * m22 - a12 * a02) + a02 * (a01 * b2 - b1 * a02)) / det;
+      const wz = (m00 * (m11 * b2 - b1 * a12) - a01 * (a01 * b2 - b1 * a02) + b0 * (a01 * a12 - m11 * a02)) / det;
+      const ang = len3(wx, wy, wz);
+      if (!(ang > 1e-7)) continue;
+      // never more than a fair turn in one pass
+      _q.setFromAxisAngle(_va.set(wx / ang, wy / ang, wz / ang), Math.min(ang, 0.35));
+      // remember this pass's contacts (turned with the limb) for the next passes
+      L.keep = all.map((c) => { _vb.set(c.rx, c.ry, c.rz).applyQuaternion(_q); return { rx: _vb.x, ry: _vb.y, rz: _vb.z, dx: c.dx, dy: c.dy, dz: c.dz, w: c.w, pair: c.pair }; }).slice(-400);
+      const e = st.get(L.bone) || { base: L.bone.quaternion.clone(), applied: new THREE.Quaternion() };
+      L.bone.getWorldQuaternion(_q2);
+      const parentQ = new THREE.Quaternion();
+      if (L.bone.parent) L.bone.parent.getWorldQuaternion(parentQ);
+      L.bone.quaternion.copy(parentQ.invert().multiply(_q.multiply(_q2)));
+      e.applied.copy(L.bone.quaternion);
+      st.set(L.bone, e);
+      any = true; moved++;
+    }
+    dirty = any;
+    if (!any) break;
+  }
+  model.root.updateMatrixWorld(true);
+  // the pose shown has been measured: soft skin shows that measurement as it is
+  if (res && dirty) res = s.solve({ write: false });
+  if (res) s.measured = { sig: s.signature().slice(), stats: res };
+  const out = { moved, leftCm: res ? res.leftCm : 0 };
+  // each corrected limb's turn (world space), to start from next frame
+  const pd = new Map();
+  for (const [bone, e] of st) {
+    const parentQ = new THREE.Quaternion();
+    if (bone.parent) bone.parent.getWorldQuaternion(parentQ);
+    const wa = parentQ.clone().multiply(e.applied), wb = parentQ.clone().multiply(e.base);
+    const qd = wa.multiply(wb.invert());
+    if (Math.abs(qd.w) < 0.9999995) pd.set(bone, qd);
+  }
+  model._solidPrev = pd;
+  model._solidLast = { sig: baseSig, map: new Map([...st].map(([b, e]) => [b, { base: e.base.clone(), applied: e.applied.clone() }])), out };
+  return out;
+}
+
 const PART_NAME = { torso: 'body', neck: 'neck', head: 'head', lArm: 'left upper arm', rArm: 'right upper arm', lFore: 'left forearm', rFore: 'right forearm', lHand: 'left hand', rHand: 'right hand', lThigh: 'left thigh', rThigh: 'right thigh', lShin: 'left shin', rShin: 'right shin', lFoot: 'left foot', rFoot: 'right foot' };
 export const partName = (g) => PART_NAME[g] || g;
 
@@ -431,6 +586,20 @@ class SoftSkin {
     try { this.fingerCaps = fingerCapsules(model, fv); } catch { this.fingerCaps = []; }
     const handG = (side) => { const b = rig.map[side + 'Hand']; return b && pIndex.has(b) ? this.partGroup[pIndex.get(b)] : -1; };
     this.fingerGroup = this.fingerCaps.map((f) => { let p = f.a; while (p && !canon.has(p)) p = p.parent; return p && pIndex.has(p) ? this.partGroup[pIndex.get(p)] : handG('right'); });
+    this.fingerPart = this.fingerCaps.map((f) => { let p = f.a; while (p && !canon.has(p)) p = p.parent; return p && pIndex.has(p) ? pIndex.get(p) : -1; });
+    // for contact the capsule has to hold the whole finger, not its middle: radius from 90%
+    // of the finger's skin (the fitted one is the median, so half the finger stuck out of it)
+    this.fingerR = this.fingerCaps.map((f) => {
+      const A = new THREE.Vector3().setFromMatrixPosition(f.a.matrixWorld), B = new THREE.Vector3();
+      if (f.b) B.setFromMatrixPosition(f.b.matrixWorld); else B.copy(f.tip).applyMatrix4(f.a.matrixWorld);
+      const L = A.distanceTo(B) || 1e-6;
+      if (f.off) { const q = new THREE.Quaternion(); f.a.getWorldQuaternion(q); const o = f.off.clone().applyQuaternion(q).multiplyScalar(L); A.add(o); B.add(o); }
+      const ab = B.clone().sub(A), l2 = ab.lengthSq() || 1e-12, ds = [];
+      for (const p of fv.get(f.a) || []) { let t = p.clone().sub(A).dot(ab) / l2; t = Math.max(0, Math.min(1, t)); ds.push(p.distanceTo(A.clone().addScaledVector(ab, t))); }
+      if (ds.length < 6) return f.ratio;
+      ds.sort((a, b) => a - b);
+      return Math.max(f.ratio, Math.min(f.ratio * 1.8, ds[Math.floor(0.9 * (ds.length - 1))] / L));
+    });
     // ---- buffers
     this.P = new Float32Array(N * 3);
     this.Nr = new Float32Array(N * 3);
@@ -490,6 +659,15 @@ class SoftSkin {
       let same = !force && !!this.sig && sig.length === this.sig.length;
       if (same) for (let i = 0; i < sig.length; i++) if (sig[i] !== this.sig[i]) { same = false; break; }
       this.sig = sig.slice();
+      const m = this.measured;
+      this.measured = null;
+      if (!same && !force && m && m.sig.length === sig.length && m.sig.every((x, i) => x === sig[i])) {
+        // the solid body just solved this exact pose: show that instead of solving again
+        this.solves = (this.solves || 0) + 1;
+        if (m.stats.active) { this.target = this.spreadSet; this.settle(this.spreadSet, true); this.write(); } else this.release();
+        this.stats = m.stats;
+        return m.stats;
+      }
       if (same) {
         // the same pose: the skin may still be springing back
         if (this.settling) { this.settle(this.target || [], false); this.write(); }
@@ -517,7 +695,7 @@ class SoftSkin {
     }
     const H = this.H, cand = this.cand;
     this.frame++;
-    if (!pairs.length) { if (write) this.release(); return stats; }
+    if (!pairs.length) { this.excess = []; if (write) this.release(); return stats; }
     // 2. vertices of each part close to the other part (estimated from their bone)
     const mats = this.mats || (this.mats = []);
     for (let i = 0; i < this.dBones.length; i++) { const b = this.dBones[i]; b.updateWorldMatrix(true, false); mats[i] = b.matrixWorld.elements; }
@@ -560,7 +738,7 @@ class SoftSkin {
         }
       }
     }
-    if (!nt) { if (write) this.release(); return stats; }
+    if (!nt) { this.excess = []; if (write) this.release(); return stats; }
     const touched = tbuf.subarray(0, nt);
     // 3. exact positions + normals of those vertices (shape keys and bones)
     this.skinFrame++;
@@ -583,6 +761,9 @@ class SoftSkin {
     for (const w of touched) hi[fillAt[hk[w]]++] = w;
     const soft = Math.min(2, Math.max(0.2, this.model.softSkinSoftness ?? 1));
     const hard = [];
+    // what still goes through past both dent limits: where, how far, which way each side
+    // would have to move to clear it (the solid body stops the limb there)
+    const excess = (this.excess = []);
     // which vertices this solve has pushed so far (not the last solve's: that made every
     // other frame skip the fingertips, and the dent jumped back while still pressed)
     const hardTag = this.hardTag || (this.hardTag = new Uint32Array(N));
@@ -635,23 +816,39 @@ class SoftSkin {
       const myCap = this.maxDepth[w] * soft, otherCap = this.maxDepth[bu] * soft;
       const push = Math.min(myCap, split(pen, this.soft[w], myCap, this.soft[bu], otherCap) + this.edge * 0.02);
       const left = Math.max(0, pen - myCap - otherCap);
-      this.press[w] = myCap > 0 ? Math.min(1, push / myCap) : 1;
+      if (left > 0) excess.push({ x, y, z, left, g: gw, o: grp[bu], pa: this.part[w], po: this.part[bu], dx: mx, dy: my, dz: mz });
+      if (!(hardTag[w] === htag && this.press[w] > (myCap > 0 ? push / myCap : 1))) this.press[w] = myCap > 0 ? Math.min(1, push / myCap) : 1;
       if (left > maxLeft) maxLeft = left;
       // into its own flesh, halfway between out of the other surface and in along its own
       // normal (a noisy normal on the other side can't slide the skin sideways)
       let bx = mx - nx, by = my - ny, bz = mz - nz;
       const bl = len3(bx, by, bz) || 1;
       bx /= bl; by /= bl; bz /= bl;
-      H[w * 3] = bx * push; H[w * 3 + 1] = by * push; H[w * 3 + 2] = bz * push;
-      this.rp[w] = this.typical[this.part[bu]] || this.edge;
+      // (unless this solve already pushed it further, as the other side of another contact)
+      const hadW = hardTag[w] === htag ? len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]) : 0;
+      if (push >= hadW) { H[w * 3] = bx * push; H[w * 3 + 1] = by * push; H[w * 3 + 2] = bz * push; this.rp[w] = this.typical[this.part[bu]] || this.edge; }
+      // ...and the other side takes its share of this same overlap: a finger sunk into the
+      // skin between the skin's vertices pushes the skin under it too, not only itself (with
+      // only its own small share it stayed mostly inside)
+      const other = Math.min(otherCap, Math.max(0, pen - push));
+      if (other > 0 && !rest) {
+        const hadU = hardTag[bu] === htag ? len3(H[bu * 3], H[bu * 3 + 1], H[bu * 3 + 2]) : 0;
+        if (other > hadU) {
+          H[bu * 3] = -mx * other; H[bu * 3 + 1] = -my * other; H[bu * 3 + 2] = -mz * other;
+          this.rp[bu] = this.typical[this.part[w]] || this.edge;
+          this.press[bu] = otherCap > 0 ? Math.min(1, other / otherCap) : 1;
+          if (hardTag[bu] !== htag) { hardTag[bu] = htag; hard.push(bu); }
+        }
+      }
       this.left[w] = left;
-      hard.push(w);
-      hardTag[w] = htag;
+      if (hardTag[w] !== htag) { hardTag[w] = htag; hard.push(w); }
       const ck = gw < grp[bu] ? gw * 32 + grp[bu] : grp[bu] * 32 + gw;
       if (pen > contact[ck]) contact[ck] = pen;
       if (left > contactLeft[ck]) contactLeft[ck] = left;
     }
-    // 4b. fingertips: the skin vertex a fingertip sinks into the most, even between vertices
+    // 4b. fingers as capsules: every skin vertex under a finger's length and width is pushed
+    // down to the capsule's surface (a finger lying flat on the skin dents a groove along
+    // it, not just one spot), even where it falls between the vertices of coarse skin
     this.probes = [];
     if (!rest) {
       const fc = this.fingerCaps;
@@ -664,13 +861,14 @@ class SoftSkin {
         if (f.b) { f.b.updateWorldMatrix(true, false); _b.setFromMatrixPosition(f.b.matrixWorld); } else _b.copy(f.tip).applyMatrix4(f.a.matrixWorld);
         const L = _a.distanceTo(_b);
         if (f.off) { f.a.getWorldQuaternion(_q); const o = f.off.clone().applyQuaternion(_q).multiplyScalar(L); _a.add(o); _b.add(o); }
-        const r = f.ratio * L, bit = 1 << gF;
+        const r = (this.fingerR ? this.fingerR[fi] : f.ratio) * L, bit = 1 << gF;
         // only the parts this hand is near this frame
         let partners = 0;
         for (const [pa, pb] of pairs) { const ga = this.partGroup[pa], gb = this.partGroup[pb]; if (ga === gF) partners |= 1 << gb; else if (gb === gF) partners |= 1 << ga; }
         if (!partners) continue;
         const abx = _b.x - _a.x, aby = _b.y - _a.y, abz = _b.z - _a.z, l2 = abx * abx + aby * aby + abz * abz || 1e-12;
         let best = 0, bw = -1;
+        const thresh = Math.max(0.0005, this.edge * 0.03);
         // skin around the finger segment, from the spatial hash (cells of the parts it may touch)
         const pad = r + this.edge;
         const x0 = Math.floor((Math.min(_a.x, _b.x) - pad) / cell), x1 = Math.floor((Math.max(_a.x, _b.x) + pad) / cell);
@@ -694,12 +892,29 @@ class SoftSkin {
           // the finger has to be at this skin, not somewhere along its normal far away
           const reach = r + this.maxDepth[w] * soft + this.edge;
           if (d2 > reach * reach) continue;
-          const pen = r - sN - this.restPen[w];
+          // the finger's lower surface above this vertex (along its normal), over its width
+          const side = side2 < r * r ? Math.sqrt(r * r - side2) : 0;
+          const pen = side - sN - this.restPen[w];
           if (pen > best) { best = pen; bw = w; }
+          if (pen <= thresh || side2 >= r * r) continue;
+          const capW = this.maxDepth[w] * soft;
+          const pushW = split(pen, this.soft[w], capW, 0.25, r * 0.15);
+          const had = hardTag[w] === htag ? len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]) : 0;
+          if (pushW > had) {
+            H[w * 3] = -Nn[w * 3] * pushW; H[w * 3 + 1] = -Nn[w * 3 + 1] * pushW; H[w * 3 + 2] = -Nn[w * 3 + 2] * pushW;
+            this.rp[w] = r;
+            if (hardTag[w] !== htag) { hardTag[w] = htag; hard.push(w); }
+            this.press[w] = capW > 0 ? Math.min(1, pushW / capW) : 1;
+          }
+          const leftW = Math.max(0, pen - capW - r * 0.15);
+          if (leftW > 0) {
+            excess.push({ x, y, z, left: leftW, g: gF, o: grp[w], pa: this.fingerPart[fi], po: this.part[w], dx: Nn[w * 3], dy: Nn[w * 3 + 1], dz: Nn[w * 3 + 2] });
+            if (leftW > maxLeft) maxLeft = leftW;
+          }
             }
           }
         }
-        if (bw < 0 || best <= Math.max(0.0005, this.edge * 0.03)) continue;
+        if (bw < 0 || best <= thresh) continue;
         const cap = this.maxDepth[bw] * soft;
         const push = split(best, this.soft[bw], cap, 0.25, r * 0.15);
         const prev = hardTag[bw] === htag ? len3(H[bw * 3], H[bw * 3 + 1], H[bw * 3 + 2]) : 0;
@@ -913,7 +1128,8 @@ class SoftSkin {
     const set = [];
     const stamp2 = ++this.frame;
     const visit = (w) => { if (seen[w] !== stamp2) { seen[w] = stamp2; key[w] = Infinity; src[w] = -1; set.push(w); } };
-    for (const w of hard) { visit(w); key[w] = 0; src[w] = clOf[w]; heap.push(w, 0); }
+    const sd = this.sd || (this.sd = new Float32Array(N));
+    for (const w of hard) { visit(w); key[w] = 0; src[w] = clOf[w]; sd[w] = len3(H[w * 3], H[w * 3 + 1], H[w * 3 + 2]); heap.push(w, 0); }
     while (heap.size) {
       const i = heap.pop();
       const ki = key[i], c = cls[src[i]];
@@ -923,7 +1139,7 @@ class SoftSkin {
         if (isHard[j] === stamp) continue;
         visit(j);
         const d = ki + len[k];
-        if (d < key[j]) { key[j] = d; src[j] = src[i]; heap.push(j, d); }
+        if (d < key[j]) { key[j] = d; src[j] = src[i]; sd[j] = sd[i]; heap.push(j, d); }
       }
     }
     // 3. the crater (every vertex of it needs its current normal)
@@ -940,7 +1156,10 @@ class SoftSkin {
       // around a fingertip, straight from it)
       const r = c.center ? key[w] : hard_ ? c.aGeo * Math.sqrt(Math.max(0, 1 - hl / Math.max(1e-9, c.depth))) : c.aGeo + key[w];
       // inside the contact the skin takes the fingertip's round shape; outside, the crater
-      const crater = r <= c.aH ? (c.center ? Math.max(c.depth * 0.5, c.depth - (r * r) / (2 * c.rho)) : hard_ ? hl : c.depth * 0.5) : c.depth * hertzOut(r / c.aH) * Math.exp(-(r - c.aH) / c.Lt);
+      // (around a finger: from how deep the nearest pressed vertex went, so a groove along a
+      // finger lying on the skin is as deep as the finger there, never deeper)
+      const d0 = c.center ? Math.min(c.depth, sd[w] || c.depth) : c.depth;
+      const crater = c.center && hard_ ? hl : r <= c.aH ? (c.center ? Math.max(d0 * 0.5, d0 - (r * r) / (2 * c.rho)) : hard_ ? hl : c.depth * 0.5) : d0 * hertzOut(r / c.aH) * Math.exp(-(r - c.aH) / c.Lt);
       let ux, uy, uz;
       if (hard_ && hl >= crater) { ux = H[w * 3]; uy = H[w * 3 + 1]; uz = H[w * 3 + 2]; } else {
         // the press's direction, turned toward this spot's own inward normal (on a curved
