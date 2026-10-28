@@ -50,8 +50,8 @@ for (const file of process.argv.slice(2)) {
       ok(`${side} hand on ${spot}${sp.hit ? '' : ' (no mesh hit)'}`, miss < 0.03 && facing > 0.85 && feetMove < 0.002, `miss ${(miss * 100).toFixed(1)}% hip height, palm facing ${facing.toFixed(2)}, feet moved ${(feetMove * 100).toFixed(2)}%`);
     }
   }
-  // between the legs: on the body's midline, under it (below the hip joints, above the
-  // knees), measured on the mesh, and not the lap (that's in front and higher)
+  // between the legs: from the front, on the body's midline, low (where the thighs meet),
+  // measured on the mesh; not the lap (higher, off to the side), not behind the body
   {
     reset();
     const pp = defaultParams();
@@ -67,7 +67,13 @@ for (const file of process.argv.slice(2)) {
     const l = rel(rig.lastTouch.right.contact);
     const sp = rig.spot('betweenLegs', 'right');
     ok('between the legs: measured on the mesh, on the midline, under the body between the hips, above the knees', sp.measured === 'ray' && Math.abs(b.lat) < 0.03 && b.up < Math.min(hipL.up, hipR.up) + 0.08 && b.up > knee.up + 0.15 && Math.abs(b.lat) < Math.abs(hipL.lat - hipR.lat) * 0.25, JSON.stringify({ measured: sp.measured, at: b, hipL, knee }, (k, v) => (typeof v === 'number' ? +v.toFixed(3) : v)));
-    ok('...not the lap: lower than it and further back', b.up < l.up && b.fwd < l.fwd - 0.05, `lap ${l.up.toFixed(3)} up / ${l.fwd.toFixed(3)} fwd, between the legs ${b.up.toFixed(3)} / ${b.fwd.toFixed(3)}`);
+    ok('...not the lap: lower than it and on the midline, at the front of the body (not under or behind it)', b.up < l.up && Math.abs(b.lat) < Math.abs(l.lat) - 0.02 && b.fwd > 0.03, `lap ${l.up.toFixed(3)} up / ${l.lat.toFixed(3)} side, between the legs ${b.up.toFixed(3)} / ${b.lat.toFixed(3)} / ${b.fwd.toFixed(3)} fwd`);
+    // the hand from the front: palm against the body, fingers pointing down (not back
+    // through the body)
+    rig.apply(rig.solve(paramsToSpec(pp)));
+    const hq = rig.map.rightHand.getWorldQuaternion(new THREE.Quaternion()), hx = rig.handAxes.right;
+    const fd = hx.f.clone().applyQuaternion(hq), pd = hx.n.clone().applyQuaternion(hq);
+    ok('...the hand comes from the front: palm toward the body, fingers down', pd.dot(rig.fwd) < -0.7 && fd.dot(rig.up) < -0.7 && rel(wp(rig.map.rightHand)).fwd > b.fwd - 0.02, `palm.fwd ${pd.dot(rig.fwd).toFixed(2)}, fingers.up ${fd.dot(rig.up).toFixed(2)}, wrist ${rel(wp(rig.map.rightHand)).fwd.toFixed(3)} fwd`);
   }
   // the hand turns, not only the arm (lap: palm toward the body)
   reset();

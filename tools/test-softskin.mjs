@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { makeMannequin } from '../src/scene/primitives.js';
 import { detectHumanoid, defaultParams, paramsToSpec } from '../src/anim/humanoid.js';
-import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial, solidBody, unsolidBody } from '../src/anim/softskin.js';
+import { softSkin, updateSoftSkin, skinContacts, split, hertzOut, notSkinMaterial, solidBody, unsolidBody, limitDrag } from '../src/anim/softskin.js';
 import { faceLandmarks } from '../src/anim/landmarks.js';
 import { mouthy } from './test-softlips.mjs';
 
@@ -388,6 +388,41 @@ function leftInside(s) {
   const late = turns.slice(-15);
   ok('...on a rig whose IK writes the arm, the turn settles instead of piling up (arms folding)', ik.base.angleTo(animatedQ) < 1e-6 && Math.max(...late) - Math.min(...late) < 0.3 && Math.max(...turns) < 26, `turn ${turns.filter((_, i) => i % 16 === 0).map((x) => x.toFixed(1)).join(' -> ')}°, IK sees ${(ik.base.angleTo(animatedQ) * 57.3).toFixed(2)}° from the pose`);
   F.model.app = null;
+}
+
+// ---- posing by hand: dragging an arm into the body, it follows freely, then stops where the
+// flesh can't give any more (it isn't shoved back out, and it can't go further in)
+{
+  const F = fleshy();
+  const s7 = softSkin(F.model);
+  F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), lArmRaise: 30, rArmRaise: 90 })));
+  F.root.updateMatrixWorld(true);
+  const arm = F.model.humanoid.map.leftUpperArm;
+  const drag = { objs: [arm], before: [{ p: arm.position.clone(), q: arm.quaternion.clone(), s: arm.scale.clone() }] };
+  const q0 = arm.quaternion.clone();
+  // the turn that brings the arm down toward (and into) the side
+  arm.updateWorldMatrix(true, false);
+  const axis = new THREE.Vector3().copy(F.model.humanoid.fwd).transformDirection(new THREE.Matrix4().copy(arm.parent.matrixWorld).invert());
+  const turn = (deg) => q0.clone().premultiply(new THREE.Quaternion().setFromAxisAngle(axis, (deg * Math.PI) / 180));
+  // whichever way brings the hand in toward the body
+  const handTo = (q) => { arm.quaternion.copy(q); F.root.updateMatrixWorld(true); return F.model.humanoid.map.leftHand.getWorldPosition(new THREE.Vector3()).distanceTo(F.model.humanoid.map.spine.getWorldPosition(new THREE.Vector3())); };
+  const sgn = handTo(turn(30)) < handTo(turn(-30)) ? 1 : -1;
+  arm.quaternion.copy(q0); F.root.updateMatrixWorld(true);
+  const at = (deg) => turn(sgn * deg);
+  const through = () => { s7.solve({ write: false, measure: true }); let m = 0; for (const e of s7.excess) if ([e.g, e.o].includes(s7.groups.indexOf('lArm')) || [e.g, e.o].includes(s7.groups.indexOf('lFore'))) m = Math.max(m, e.left); return m; };
+  const angle = () => arm.quaternion.angleTo(q0) * 180 / Math.PI;
+  let followed = true, firstCut = null, maxThrough = 0;
+  for (let deg = 2; deg <= 60; deg += 2) {
+    // try both ways round (which way is "down" depends on the side)
+    arm.quaternion.copy(at(deg));
+    const cut = limitDrag(F.model, drag);
+    const got = angle();
+    if (!cut && Math.abs(got - deg) > 0.01) followed = false;
+    if (cut && firstCut === null) firstCut = deg;
+    maxThrough = Math.max(maxThrough, through());
+  }
+  const finalAngle = angle();
+  ok('posing by hand: the arm follows the drag freely until it meets the body, then stops there', followed && firstCut !== null && finalAngle < 58 && maxThrough <= drag.good.allow + 0.0015, `stopped at ${finalAngle.toFixed(1)}° of 60° asked (first held back at ${firstCut}°); never more than ${(maxThrough * 1000).toFixed(1)} mm past the flesh (allowed ${(drag.good.allow * 1000).toFixed(1)})`);
 }
 
 // ---- face spots measured on the mesh: the cheek is on the cheek

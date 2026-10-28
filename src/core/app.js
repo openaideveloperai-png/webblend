@@ -20,7 +20,7 @@ import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITI
 import { onDecorationReady } from '../scene/patterns.js';
 import { updateSoftLips } from '../anim/softlips.js';
 import { faceLandmarks } from '../anim/landmarks.js';
-import { updateSoftSkin, solidBody, unsolidBody } from '../anim/softskin.js';
+import { updateSoftSkin, solidBody, unsolidBody, limitDrag } from '../anim/softskin.js';
 
 const _v = new THREE.Vector3();
 
@@ -393,6 +393,11 @@ export class App extends Emitter {
         const o = this.selection.object;
         const chain = ikChain(o, this.settings.get('ikChain'));
         solveIK(chain, o, this.ikTarget.getWorldPosition(new THREE.Vector3()));
+      }
+      // posing a character by hand: a limb stops where the flesh can't give any more
+      const md = this.selection.model;
+      if (this._drag && md && md.humanoid && this.selection.object && this.selection.object.isBone && this.settings.preset().softSkin !== false) {
+        try { limitDrag(md, this._drag); } catch (e) { console.warn('drag limit', e); }
       }
       this.updateSelBox();
       this.emit('transform');

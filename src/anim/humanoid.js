@@ -1211,6 +1211,19 @@ export class HumanoidRig {
     const ctx = { m, legY, legX, hipX, kneeX, chestY, neckY, headY, headTop, eyeY, eyeX, shX, shY, kneeY, side, mouthY };
     const g = def.at(ctx); // {y, x, from: 'front'|'back'|'side'|'top'|'below', depth (fallback), z?, reach?}
     const region = def.region || g.region || 'torso';
+    // between the legs: how low the body goes on the midline (a ray straight up from between
+    // the thighs), then the front of the body just above that
+    if (g.crotch) {
+      if (this._crotchY === undefined) {
+        this._crotchY = null;
+        const h = this.surfaceHit(charPt(0, legY - 0.32, fwdOf(this.rest.get(this.map.hips).pos) + 0.01), this.charToModel(new THREE.Vector3(0, 1, 0)).normalize(), 'torso');
+        const y = h ? upOf(h.point) : null;
+        if (y !== null && y < legY + 0.08 && y > legY - 0.3) this._crotchY = y;
+      }
+      // (a little above the underside, but under the lap's height; on bodies that end at the
+      // hip joints, just above the bottom)
+      if (this._crotchY !== null) g.y = Math.max(this._crotchY + 0.015, Math.min(this._crotchY + 0.045, legY));
+    }
     // depth is measured from the body part the spot sits on (heads and knees
     // are often forward of the hips)
     const refKey = this.map[def.ref(side)] ? def.ref(side) : 'hips';
@@ -1233,7 +1246,8 @@ export class HumanoidRig {
       const st = new THREE.Vector3(g.x, g.y, gz).addScaledVector(dc, -(g.reach ?? 3)).addScaledVector(u, a).addScaledVector(w, b);
       const h = this.surfaceHit(charPt(st.x, st.y, st.z), this.charToModel(dc).normalize(), region);
       // ignore hits far from where that body part should be (ray slipped past it)
-      const d = h ? h.point.distanceTo(expectedM) : Infinity;
+      let d = h ? h.point.distanceTo(expectedM) : Infinity;
+      if (h && g.crotch && fwdOf(h.point) < z0) d = Infinity;
       if (d < 0.3 * hh && d < bestD) { hit = h; bestD = d; }
       if (hit && a === 0 && b === 0) break;
     }
@@ -1457,7 +1471,7 @@ const HAIR_RE = /hair|kami|ahoge|bang|fringe|ponytail|twintail|tail_?hair|é«ª|ã‚
 export const SPOTS = {
   // between the legs: under the middle of the body, where the tops of the thighs meet,
   // measured with a ray straight up the middle (the hand comes from the front, palm up)
-  betweenLegs: { label: 'between the legs (under the middle of the body, between the tops of the thighs; NOT the lap, which is the front of the lower belly, and not a thigh)', lean: 'dip', ref: () => 'hips', at: (c) => ({ x: 0, y: c.legY, z: 0.01, from: 'below', depth: 0.11, reach: 0.32 }), palm: () => V(0, 0.95, -0.3), fingers: () => V(0, -0.3, -0.95), hint: (m) => V(m * 0.85, 0, -0.5) },
+  betweenLegs: { label: 'between the legs, from the front (the middle, low, where the tops of the thighs meet under the belly: palm against the body, fingers pointing down between the thighs; NOT the lap, which is higher and off to the side, and not a thigh)', lean: 'dip', ref: () => 'hips', at: (c) => ({ x: 0, y: c.legY - 0.06, z: 0, from: 'front', depth: 0.11, crotch: true }), palm: () => V(0, 0.3, -0.95), fingers: () => V(0, -0.95, -0.3), hint: (m) => V(m * 0.85, -0.1, -0.35) },
   lap: { label: 'lap (below the belly)', ref: () => 'hips', at: (c) => ({ x: c.m * c.legX * 0.35, y: c.legY + 0.02, from: 'front', depth: 0.12 }), palm: () => V(0, -0.35, -1), fingers: (m) => V(-m * 0.5, -0.85, 0.15), hint: (m) => V(m * 0.85, -0.35, -0.45) },
   belly: { label: 'belly', ref: () => 'spine', at: (c) => ({ x: c.m * c.legX * 0.3, y: c.legY + (c.chestY - c.legY) * 0.42, from: 'front', depth: 0.15 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.9, -0.3, 0), hint: (m) => V(m * 0.9, -0.4, -0.3) },
   chest: { label: 'chest', ref: () => 'chest', at: (c) => ({ x: c.m * c.shX * 0.35, y: c.chestY + (c.neckY - c.chestY) * 0.3, from: 'front', depth: 0.17 }), palm: () => V(0, 0, -1), fingers: (m) => V(-m * 0.6, 0.75, 0), hint: (m) => V(m * 0.7, -0.7, 0) },

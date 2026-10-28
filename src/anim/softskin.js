@@ -111,6 +111,48 @@ const SETTLE_IN = 0.03, SETTLE_OUT = 0.16;
 const LIMBS = [['left', 'UpperArm', ['lArm', 'lFore', 'lHand']], ['right', 'UpperArm', ['rArm', 'rFore', 'rHand']]];
 const MAX_TURN = 0.45; // never more than ~26 degrees away from the pose as animated
 const _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _va = new THREE.Vector3(), _vb = new THREE.Vector3(), _vj = new THREE.Vector3();
+// Posing by hand (dragging a bone or a hand's IK): the limb can't be pushed in any further
+// than the flesh on both sides can take. Each move of the drag that would go past it is cut
+// back to the furthest point that doesn't (instead of the solid body shoving it out again).
+// drag = { objs, good } is kept across the drag; -> true when the move was cut back.
+export function limitDrag(model, drag) {
+  if (!drag || model.solidBody === false || model.softSkin === false || !model.humanoid) return false;
+  const s = model._skin;
+  if (!s || !drag.objs.length) return false;
+  // the body parts this drag moves: the dragged bones' parts and everything below them
+  if (!drag.groups) {
+    const parts = new Set();
+    s.parts.forEach((b, k) => { for (const o of drag.objs) for (let p = b; p; p = p.parent) if (p === o) { parts.add(k); break; } });
+    for (const o of drag.objs) for (let p = o; p; p = p.parent) { const k = s.parts.indexOf(p); if (k >= 0) { parts.add(k); break; } }
+    drag.groups = new Set([...parts].map((k) => s.partGroup[k]));
+  }
+  const through = () => {
+    model.root.updateMatrixWorld(true);
+    s.solve({ write: false, measure: true });
+    let m = 0;
+    for (const e of s.excess || []) if ((drag.groups.has(e.g) || drag.groups.has(e.o)) && e.left > m) m = e.left;
+    return m;
+  };
+  const snap = () => drag.objs.map((o) => ({ p: o.position.clone(), q: o.quaternion.clone() }));
+  if (!drag.good) {
+    // where the drag started (what already pressed then doesn't block it)
+    const now = snap();
+    drag.objs.forEach((o, i) => { o.position.copy(drag.before[i].p); o.quaternion.copy(drag.before[i].q); });
+    drag.good = { pose: snap(), allow: Math.max(through(), 0.003) + 0.001 };
+    drag.objs.forEach((o, i) => { o.position.copy(now[i].p); o.quaternion.copy(now[i].q); });
+  }
+  const now = snap();
+  if (through() <= drag.good.allow) { drag.good.pose = now; return false; }
+  // the furthest point between the last allowed pose and this one
+  const set = (t) => drag.objs.forEach((o, i) => { o.position.copy(drag.good.pose[i].p).lerp(now[i].p, t); o.quaternion.copy(drag.good.pose[i].q).slerp(now[i].q, t); });
+  let lo = 0, hi = 1;
+  for (let k = 0; k < 5; k++) { const m = (lo + hi) / 2; set(m); if (through() <= drag.good.allow) lo = m; else hi = m; }
+  set(lo);
+  model.root.updateMatrixWorld(true);
+  drag.good.pose = snap();
+  return true;
+}
+
 // Take the solid body's turn back off before anything else poses the model this frame
 // (the clip, bone constraints, IK). Constraints take a bone that isn't where they left it
 // as posed by hand: they adopted the turn as the new pose, the next turn went on top of
@@ -152,7 +194,10 @@ export function solidBody(model) {
   // follow directly would do nothing, and the turn would only grow)
   const follows = s.followsCache || (s.followsCache = new Map());
   const skinFollows = (bone) => { if (!follows.has(bone)) follows.set(bone, s.dBones.some((d) => { for (let p = d; p; p = p.parent) if (p === bone) return true; return false; })); return follows.get(bone); };
-  const limbs = LIMBS.map(([side, k, gs]) => ({ bone: rig.map[side + k], leg: k === 'UpperLeg', gs: new Set(gs.map((g) => s.groups.indexOf(g)).filter((i) => i >= 0)) })).filter((l) => l.bone && l.gs.size && skinFollows(l.bone));
+  // (a limb being posed by hand is left to the drag, which stops at the limit itself)
+  const dragged = app && app._drag && app._drag.objs ? app._drag.objs : null;
+  const inDrag = (bone) => !!dragged && dragged.some((o) => { for (let p = o; p; p = p.parent) if (p === bone) return true; for (let p = bone; p; p = p.parent) if (p === o) return true; return false; });
+  const limbs = LIMBS.map(([side, k, gs]) => ({ bone: rig.map[side + k], leg: k === 'UpperLeg', gs: new Set(gs.map((g) => s.groups.indexOf(g)).filter((i) => i >= 0)) })).filter((l) => l.bone && l.gs.size && skinFollows(l.bone) && !inDrag(l.bone));
   // while playing or dragging: start from last frame's correction, eased a little back toward
   // the animation (warm start: usually one solve a frame, and a limb let go drifts back
   // smoothly); paused / scrubbed: worked out from scratch, exactly
