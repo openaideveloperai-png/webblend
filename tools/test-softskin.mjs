@@ -231,6 +231,36 @@ function leftInside(s) {
   ok('a fingertip held in the belly while the body moves a little: its dent stays (no jumping back every other frame)', lo > 0.002 && hi - lo < 0.15 * hi, dents.map((d) => (d * 1000).toFixed(1)).join(' ') + ' mm');
 }
 
+// ---- in time: pressed skin keeps up with the press at once, and once let go it springs
+// back over a fraction of a second instead of snapping (scrubbing stays exact)
+{
+  const F = fleshy();
+  const s3 = softSkin(F.model);
+  const poseT = (p) => { F.model.humanoid.apply(F.model.humanoid.solve(paramsToSpec({ ...defaultParams(), ...p }))); F.root.updateMatrixWorld(true); };
+  // (the belly, where the finger pressed: knees and elbows touch a little even in a T-pose)
+  const shownMax = () => { let m = 0; for (const w of s3.shown || []) if (s3.groups[s3.group[w]] === 'torso') m = Math.max(m, Math.hypot(s3.S[w * 3], s3.S[w * 3 + 1], s3.S[w * 3 + 2])); return m; };
+  const poke = { lArmRaise: 90, rTouch: { spot: 'belly', weight: 1, finger: 'index', mode: 'tip', depth: 0.6 } };
+  const free = { lArmRaise: 90, rArmRaise: 90, lElbow: 0, rElbow: 0 };
+  poseT(free); s3.update({ dt: 1 / 60 });
+  poseT(poke); s3.update({ dt: 1 / 60 });
+  let lag = 0;
+  for (const w of s3.spreadSet) if (s3.pushed(w)) lag = Math.max(lag, Math.hypot(s3.D[w * 3] - s3.S[w * 3], s3.D[w * 3 + 1] - s3.S[w * 3 + 1], s3.D[w * 3 + 2] - s3.S[w * 3 + 2]));
+  ok('pressed skin moves with the press in the same frame (it can\'t lag into clipping)', lag < 1e-6, `${(lag * 1000).toFixed(3)} mm behind`);
+  for (let i = 0; i < 30; i++) s3.update({ dt: 1 / 60 });
+  const full = shownMax();
+  poseT(free);
+  const curve = [];
+  for (let i = 0; i < 60; i++) { s3.update({ dt: 1 / 60 }); curve.push(shownMax() / full); }
+  const at = (t) => curve[Math.round(t * 60) - 1];
+  ok('let go, the skin springs back smoothly over a fraction of a second (not in one frame)', at(1 / 60) > 0.8 && at(0.2) > 0.25 && at(0.2) < 0.55 && at(1) < 0.02 && curve.every((v, i) => i === 0 || v <= curve[i - 1] + 1e-9), `${[1 / 60, 0.1, 0.2, 0.5, 1].map((t) => (at(t) * 100).toFixed(0) + '%').join(' / ')} after 1 frame / 0.1 / 0.2 / 0.5 / 1 s`);
+  let more = 0;
+  while (s3.settling && more < 300) { s3.update({ dt: 1 / 60 }); more++; }
+  ok('...and it keeps drawing until it has settled (then stops), the belly back as it was', !s3.settling && shownMax() < 1e-4 && more < 60, `settled ${((60 + more) / 60).toFixed(1)} s after letting go, ${(shownMax() * 1000).toFixed(3)} mm left`);
+  poseT(poke); for (let i = 0; i < 10; i++) s3.update({ dt: 1 / 60 });
+  poseT(free); s3.update({ dt: 0 });
+  ok('scrubbing (no time step) shows the pose exactly: nothing left from before', shownMax() < 1e-4, `${(shownMax() * 1000).toFixed(3)} mm`);
+}
+
 // ---- face spots measured on the mesh: the cheek is on the cheek
 {
   const { model: m2 } = mouthy();

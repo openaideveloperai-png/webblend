@@ -838,7 +838,7 @@ export class App extends Emitter {
     for (const m of this.models) if (m.humanoid) { try { updateSoftLips(m); } catch (e) { console.warn('soft lips', e); m.softLips = false; } }
     // soft skin: body parts pressing each other dent instead of clipping
     // (off on the lowest quality: it costs a few ms per frame while body parts press together)
-    if (this.settings.preset().softSkin !== false) for (const m of this.models) if (m.humanoid) { try { updateSoftSkin(m); } catch (e) { console.warn('soft skin', e); m.softSkin = false; } }
+    if (this.settings.preset().softSkin !== false) for (const m of this.models) if (m.humanoid) { try { updateSoftSkin(m, dt); } catch (e) { console.warn('soft skin', e); m.softSkin = false; } }
     else for (const m of this.models) if (m._skin) m._skin.clear();
     for (const m of this.models) m.updateHelpers();
     for (const [m, h] of this.cameraHelpers) if (h.visible) { m.root.updateProjectionMatrix?.(); this.updateCameraHelper(m, h); }

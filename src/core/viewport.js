@@ -406,7 +406,8 @@ export class Viewport {
     if (turning) { this.orbit.autoRotate = true; this.orbit.autoRotateSpeed = 1.6; this.orbit.update(dt); } else if (this.orbit.autoRotate) this.orbit.autoRotate = false;
     this.app.tick(dt);
     this.render();
-    this.dirty = false;
+    // skin still springing back after a press: keep drawing until it settles
+    this.dirty = this.app.models.some((m) => m._skin && m._skin.settling);
     this.perf.frame(now, elapsed, playing || this.interacting || this.continuous > 0 || flying);
     this.app.emit('frame', dt);
   }

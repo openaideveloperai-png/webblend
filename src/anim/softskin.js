@@ -57,7 +57,7 @@ export function softSkin(model) {
 
 export const softSkinOn = (model) => model.softSkin !== false && !!softSkin(model);
 
-export function updateSoftSkin(model) {
+export function updateSoftSkin(model, dt) {
   if (!model.humanoid || !model.root.visible) return;
   if (model.softSkin === false) { if (model._skin) model._skin.clear(); return; }
   // not built yet: only once two body parts (not joined at a joint) come close
@@ -69,9 +69,19 @@ export function updateSoftSkin(model) {
   if (playing && s.lastMs > 12 && (s.skipOdd = !s.skipOdd)) return;
   const t0 = performance.now();
   const before = s.solves;
-  s.update();
+  // the skin eases in time while playing or posing; scrubbing to another time is exact
+  const tr = model.app && model.app.transport;
+  const time = tr ? tr.time : 0;
+  const jumped = s.lastTime !== undefined && Math.abs(time - s.lastTime) > 1e-6 && !playing;
+  s.lastTime = time;
+  s.update({ dt: dt > 0 && !jumped ? Math.min(dt, 0.1) : 0 });
   if (s.solves !== before) s.lastMs = performance.now() - t0;
 }
+
+// how the skin follows a press in time (viscoelastic, Kelvin-Voigt-like): pressed skin moves
+// with what presses it at once (it can't lag into clipping); the crater around it settles in
+// a few frames, and once let go it springs back over a fraction of a second, not instantly
+const SETTLE_IN = 0.03, SETTLE_OUT = 0.2;
 
 const PART_NAME = { torso: 'body', neck: 'neck', head: 'head', lArm: 'left upper arm', rArm: 'right upper arm', lFore: 'left forearm', rFore: 'right forearm', lHand: 'left hand', rHand: 'right hand', lThigh: 'left thigh', rThigh: 'right thigh', lShin: 'left shin', rShin: 'right shin', lFoot: 'left foot', rFoot: 'right foot' };
 export const partName = (g) => PART_NAME[g] || g;
@@ -453,14 +463,19 @@ class SoftSkin {
     return s;
   }
 
-  update({ write = true, force = false } = {}) {
+  update({ write = true, force = false, dt = 0 } = {}) {
     if ((this.model.indentVersion || 0) !== this._ov) this.applyOverrides();
+    this.dt = dt;
     if (write) {
       const sig = this.signature();
       let same = !force && !!this.sig && sig.length === this.sig.length;
       if (same) for (let i = 0; i < sig.length; i++) if (sig[i] !== this.sig[i]) { same = false; break; }
       this.sig = sig.slice();
-      if (same) return this.stats;
+      if (same) {
+        // the same pose: the skin may still be springing back
+        if (this.settling) { this.settle(this.target || [], false); this.write(); }
+        return this.stats;
+      }
     }
     const st = this.solve({ write });
     this.solves = (this.solves || 0) + 1;
@@ -483,7 +498,7 @@ class SoftSkin {
     }
     const H = this.H, cand = this.cand;
     this.frame++;
-    if (!pairs.length) { if (write) this.clear(); return stats; }
+    if (!pairs.length) { if (write) this.release(); return stats; }
     // 2. vertices of each part close to the other part (estimated from their bone)
     const mats = this.mats || (this.mats = []);
     for (let i = 0; i < this.dBones.length; i++) { const b = this.dBones[i]; b.updateWorldMatrix(true, false); mats[i] = b.matrixWorld.elements; }
@@ -526,7 +541,7 @@ class SoftSkin {
         }
       }
     }
-    if (!nt) { if (write) this.clear(); return stats; }
+    if (!nt) { if (write) this.release(); return stats; }
     const touched = tbuf.subarray(0, nt);
     // 3. exact positions + normals of those vertices (shape keys and bones)
     this.skinFrame++;
@@ -673,7 +688,8 @@ class SoftSkin {
         if (left > contactLeft[ck]) contactLeft[ck] = left;
       }
     }
-    if (rest || !hard.length) { if (write) this.clear(); return stats; }
+    if (rest) { if (write) this.clear(); return stats; }
+    if (!hard.length) { if (write) this.release(); return stats; }
     // 5. the dent fades over the surface, with a slight bulge around it
     const D = this.spread(hard, soft);
     let maxD = 0;
@@ -682,8 +698,73 @@ class SoftSkin {
     stats.dentCm = +(maxD * 100).toFixed(2);
     stats.leftCm = +(maxLeft * 100).toFixed(2);
     for (let k = 0; k < contact.length; k++) if (contact[k] > 0) stats.contacts.push({ a: this.groups[(k / 32) | 0], b: this.groups[k % 32], cm: +(contact[k] * 100).toFixed(1), leftCm: +(contactLeft[k] * 100).toFixed(1) });
-    if (write) this.write();
+    if (write) { this.target = this.spreadSet; this.settle(this.spreadSet, true); this.write(); }
     return stats;
+  }
+
+  // nothing presses any more: the skin springs back (at once when not easing in time)
+  release() {
+    this.target = [];
+    if (!this.active && !this.settling) return;
+    if (!(this.dt > 0)) { this.clear(); return; }
+    this.settle([], false);
+    this.write();
+  }
+
+  // the shown offsets follow this solve's offsets (D over the set) in time
+  settle(set, solved) {
+    const N = this.N, D = this.D, TI = this.tint;
+    const S = this.S || (this.S = new Float32Array(N * 3)), ST = this.ST || (this.ST = new Float32Array(N * 3));
+    const inSet = this.inSet || (this.inSet = new Uint32Array(N));
+    const tag = (this.setTag = (this.setTag || 0) + 1);
+    for (const w of set) inSet[w] = tag;
+    const dt = this.dt > 0 ? this.dt : 0;
+    const aIn = dt ? 1 - Math.exp(-dt / SETTLE_IN) : 1, aOut = dt ? 1 - Math.exp(-dt / SETTLE_OUT) : 1;
+    const hardNow = solved && this.isHard ? this.hardStamp : -1;
+    const old = this.shown || [];
+    const list = [];
+    const mark = this.shownMark || (this.shownMark = new Uint32Array(N));
+    let moving = false;
+    const step = (w) => {
+      if (mark[w] === tag) return;
+      mark[w] = tag;
+      const on = inSet[w] === tag;
+      const tx = on ? D[w * 3] : 0, ty = on ? D[w * 3 + 1] : 0, tz = on ? D[w * 3 + 2] : 0;
+      const sx = S[w * 3], sy = S[w * 3 + 1], sz = S[w * 3 + 2];
+      const deeper = tx * tx + ty * ty + tz * tz > sx * sx + sy * sy + sz * sz;
+      // pressed skin keeps up with the press; the rest eases (in fast, out slower)
+      const a = deeper && this.isHard && this.isHard[w] === hardNow ? 1 : deeper ? aIn : aOut;
+      S[w * 3] = sx + (tx - sx) * a; S[w * 3 + 1] = sy + (ty - sy) * a; S[w * 3 + 2] = sz + (tz - sz) * a;
+      for (let c = 0; c < 3; c++) { const t = on ? TI[w * 3 + c] : 0; ST[w * 3 + c] += (t - ST[w * 3 + c]) * (t > ST[w * 3 + c] ? aIn : aOut); }
+      const rx = tx - S[w * 3], ry = ty - S[w * 3 + 1], rz = tz - S[w * 3 + 2];
+      // within a fiftieth of a millimetre: there
+      if (rx * rx + ry * ry + rz * rz > 4e-10) moving = true; else { S[w * 3] = tx; S[w * 3 + 1] = ty; S[w * 3 + 2] = tz; }
+      if (on || S[w * 3] || S[w * 3 + 1] || S[w * 3 + 2]) {
+        if (!on && Math.abs(S[w * 3]) + Math.abs(S[w * 3 + 1]) + Math.abs(S[w * 3 + 2]) < 2e-6) { S[w * 3] = S[w * 3 + 1] = S[w * 3 + 2] = 0; ST[w * 3] = ST[w * 3 + 1] = ST[w * 3 + 2] = 0; return; }
+        list.push(w);
+      }
+    };
+    for (const w of set) step(w);
+    for (const w of old) step(w);
+    // the positions of everything shown (and its triangles' corners) for the shading
+    if (!solved) this.skinFrame++;
+    const need = [];
+    for (const w of list) {
+      if (this.skinned[w] !== this.skinFrame) { this.skinned[w] = this.skinFrame; need.push(w); }
+      for (let k = this.triStart[w]; k < this.triStart[w + 1]; k++) { const t = this.triOf[k] * 3; for (let c = 0; c < 3; c++) { const u = this.tris[t + c]; if (this.skinned[u] !== this.skinFrame) { this.skinned[u] = this.skinFrame; need.push(u); } } }
+    }
+    for (const u of need) this.skinned[u] = 0;
+    if (need.length) this.skin(need);
+    // corners outside what's shown stay where they are
+    for (const u of need) if (mark[u] !== tag || !(S[u * 3] || S[u * 3 + 1] || S[u * 3 + 2])) { if (mark[u] !== tag) { S[u * 3] = S[u * 3 + 1] = S[u * 3 + 2] = 0; } }
+    if (moving && list.length) {
+      this.foldStamps = this.foldStamps || { a: new Uint32Array(this.tris.length / 3 + 1) };
+      unfold(list, this.tris, this.triStart, this.triOf, this.P, S, this.foldStamps);
+      // pressed skin stays with the press
+      for (const w of set) if (this.isHard[w] === hardNow) { const d = D[w * 3] * D[w * 3] + D[w * 3 + 1] * D[w * 3 + 1] + D[w * 3 + 2] * D[w * 3 + 2], e = S[w * 3] * S[w * 3] + S[w * 3 + 1] * S[w * 3 + 1] + S[w * 3 + 2] * S[w * 3 + 2]; if (d > e) { S[w * 3] = D[w * 3]; S[w * 3 + 1] = D[w * 3 + 1]; S[w * 3 + 2] = D[w * 3 + 2]; } }
+    }
+    this.shown = list;
+    this.settling = moving;
   }
 
   // how far part k's skin reaches from its bone toward a world point (its shape profile)
@@ -876,9 +957,9 @@ class SoftSkin {
   // world offsets -> each mesh's local space -> the GPU (summed with the soft lips)
   write() {
     if (!this.prepared) { for (const m of this.meshes) prepareMesh(m); this.prepared = true; }
-    const set = this.spreadSet || [];
-    // the bent normals (every corner of the triangles around the dent was skinned in spread)
-    normalDeltas(set, this.tris, this.triStart, this.triOf, this.P, this.D, this.ND);
+    const set = this.shown || [];
+    // the bent normals (every corner of the triangles around what's shown was skinned)
+    normalDeltas(set, this.tris, this.triStart, this.triOf, this.P, this.S, this.ND);
     const inv = this.meshes.map((m) => new THREE.Matrix3().setFromMatrix4(m.matrixWorld).invert());
     const rinv = this.meshes.map((m) => new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().extractRotation(m.matrixWorld)).invert());
     const ls = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'skin') : null));
@@ -887,8 +968,8 @@ class SoftSkin {
     for (const l of ls) if (l) beginLayer(l);
     for (const l of ln) if (l) beginLayer(l);
     for (const l of lt) if (l) beginLayer(l);
-    const TI = this.tint;
-    const D = this.D, ND = this.ND, Nr = this.Nr, v = new THREE.Vector3();
+    const TI = this.ST;
+    const D = this.S, ND = this.ND, Nr = this.Nr, v = new THREE.Vector3();
     for (const w of set) {
       const dx = D[w * 3], dy = D[w * 3 + 1], dz = D[w * 3 + 2];
       if (!dx && !dy && !dz) continue;
@@ -906,7 +987,7 @@ class SoftSkin {
       }
     }
     for (const m of this.meshes) commit(m);
-    this.active = true;
+    this.active = set.length > 0;
   }
 
   // the per-bone indent settings (model.indent[bone uuid] = { give, depth, width, rim, pale,
@@ -976,6 +1057,9 @@ class SoftSkin {
   }
 
   clear() {
+    if (this.S && this.shown) for (const w of this.shown) { this.S[w * 3] = this.S[w * 3 + 1] = this.S[w * 3 + 2] = 0; this.ST[w * 3] = this.ST[w * 3 + 1] = this.ST[w * 3 + 2] = 0; }
+    this.shown = [];
+    this.settling = false;
     if (!this.active) return;
     this.active = false;
     for (const m of this.meshes) {
