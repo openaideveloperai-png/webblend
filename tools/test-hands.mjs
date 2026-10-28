@@ -126,6 +126,30 @@ ok('scan description', /finger bones/.test(describeRig(model)));
   ok('bone keys: a face bone slides at most a few cm, any bone turns within limits', face.my >= -3.5 && face.my < 0 && spine.x <= 150 && plan.limited.length === 2, JSON.stringify({ my: face.my, x: spine.x, limited: plan.limited }));
 }
 
+// ---- constraints: a copy-location with offset (teeth riding on a lip handle) must not
+// add up when its clip turns the bone but holds its position (three.js only writes changes)
+{
+  const arm = new THREE.Group(); arm.name = 'Arm';
+  const headB = new THREE.Bone(); headB.name = 'H'; arm.add(headB);
+  const handle = new THREE.Bone(); handle.name = 'Handle'; handle.position.set(0, 0.1, 0.05); headB.add(handle);
+  const teeth = new THREE.Bone(); teeth.name = 'Teeth'; teeth.position.set(0, 0.08, 0.03); headB.add(teeth);
+  for (const b of [headB, handle, teeth]) b.userData.rest = { p: b.position.toArray(), q: b.quaternion.toArray(), len: 0.02 };
+  teeth.userData.constraints = [{ type: 'COPY_LOCATION', influence: 1, ownerSpace: 'LOCAL', targetSpace: 'LOCAL', headTail: 0, target: '', subtarget: 'Handle', flag: 128 + 7 }];
+  handle.position.y += 0.004; // the lip handle is posed (moved off its rest)
+  arm.updateMatrixWorld(true);
+  const { ConstraintSolver } = await import('../src/anim/constraints.js');
+  const solver = new ConstraintSolver(arm, [headB, handle, teeth]);
+  const clip = new THREE.AnimationClip('c', 2, [
+    new THREE.VectorKeyframeTrack(teeth.uuid + '.position', [0, 2], [0, 0.081, 0.03, 0, 0.081, 0.03]),
+    new THREE.QuaternionKeyframeTrack(teeth.uuid + '.quaternion', [0, 2], [0, 0, 0, 1, 0.1, 0, 0, 0.995]),
+  ]);
+  const mixer = new THREE.AnimationMixer(arm); mixer.clipAction(clip).play();
+  const animated = new Set([teeth.uuid]);
+  const ys = [];
+  for (let i = 0; i <= 60; i++) { mixer.setTime(i / 30); arm.updateMatrixWorld(true); solver.solve(animated); ys.push(teeth.position.y); }
+  ok('constraints: an offset copy-location stays put while its clip only turns the bone', Math.abs(ys[60] - ys[5]) < 1e-6 && Math.abs(ys[5] - 0.085) < 1e-6, `y ${ys[5].toFixed(4)} -> ${ys[60].toFixed(4)}`);
+}
+
 // ---- the self-check
 {
   const T = (t) => ({ t, hand: 'right', spot: 'mouth', weight: 1, finger: 'index', mode: 'tip', depth: 0.3 });

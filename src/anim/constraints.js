@@ -623,11 +623,17 @@ export class ConstraintSolver {
 
   // Constraints apply on top of the animated / hand-posed transform, not on
   // top of their own result from the last frame.
+  // Per channel: three.js writes a property only when its value changed, so a bone can
+  // get a new rotation from its clip while its position still holds the constraint's
+  // own result from the last frame. Taking that result as the new base made offset
+  // constraints (teeth riding on a lip handle plus their own offset) add up every frame.
   restoreBase() {
     for (const b of this.touched) {
       const st = this.state.get(b);
-      if (st.post && same(b, st.post)) load(b, st.base);
-      else st.base = snap(b, st.base);
+      if (!st.post) { st.base = snap(b, st.base); continue; }
+      if (b.position.equals(st.post.p)) b.position.copy(st.base.p); else st.base.p.copy(b.position);
+      if (b.quaternion.equals(st.post.q)) b.quaternion.copy(st.base.q); else st.base.q.copy(b.quaternion);
+      if (b.scale.equals(st.post.s)) b.scale.copy(st.base.s); else st.base.s.copy(b.scale);
     }
   }
 
@@ -739,8 +745,6 @@ function snap(o, out) {
   return out;
 }
 function snap0(t) { return { p: t.p.clone(), q: t.q.clone(), s: t.s.clone() }; }
-function load(o, t) { o.position.copy(t.p); o.quaternion.copy(t.q); o.scale.copy(t.s); }
-function same(o, t) { return o.position.equals(t.p) && o.quaternion.equals(t.q) && o.scale.equals(t.s); }
 
 // Bake what the constraints do into a clip (for exporting to other apps).
 export function bakeConstraints(model, clip, fps = 30) {

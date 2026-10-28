@@ -180,7 +180,11 @@ function sampler(model, clip) {
   const animated = new Set(clip.tracks.map((t) => t.name.slice(0, t.name.indexOf('.'))));
   const base = saved.filter(([o]) => !animated.has(o.uuid) && !animated.has(o.name)).map(([o, p, q, sc]) => { const r = o !== root && model.rest && model.rest.get(o); return r ? [o, r.p.clone(), r.q.clone(), r.s.clone()] : [o, p.clone(), q.clone(), sc.clone()]; });
   const mixer = new THREE.AnimationMixer(root);
-  mixer.clipAction(clip).play();
+  // played once and held: sampling at the very end must not wrap to the first frame
+  const action = mixer.clipAction(clip);
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;
+  action.play();
   const inv = new THREE.Matrix4();
   let last = NaN;
   return {
@@ -188,7 +192,7 @@ function sampler(model, clip) {
       if (t === last) return;
       last = t;
       for (const [o, p, q, s] of base) { o.position.copy(p); o.quaternion.copy(q); o.scale.copy(s); }
-      mixer.setTime(clamp(t, 0, clip.duration));
+      mixer.setTime(clamp(t, 0, Math.max(0, clip.duration - 1e-4)));
       root.updateMatrixWorld(true);
       inv.copy(root.matrixWorld).invert();
     },
