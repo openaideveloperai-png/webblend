@@ -228,6 +228,56 @@ function turnedMouth({ w = 0.5 } = {}) {
   ok('marked (Tools → Lips react to the selected object): the lips wrap around it', st.active && st.leftCm === 0 && st.pushCm > 0.1, JSON.stringify(st));
 }
 
+// ---- marked objects of every kind: a rigged (skinned) one, one inside a marked group, an
+// odd-shaped one only partly at the lips
+{
+  const { model, mid, A, B, C, head } = turnedMouth();
+  model.lipBones = [mid, ...A, ...B].map((b) => b.name);
+  resetLips(model);
+  const s = softLips(model);
+  const run = (label, make) => {
+    const o = make();
+    model.root.updateMatrixWorld(true);
+    s.sig = null;
+    const st = s.update({ write: false });
+    ok(`marked ${label}: the lips wrap around it`, st.active && st.leftCm === 0 && st.pushCm > 0.1, JSON.stringify(st));
+    o.parent.remove(o);
+    s.sig = null;
+  };
+  // rigged: a cigarette skinned to the head bone
+  run('rigged object (skinned to the head)', () => {
+    const g = new THREE.CylinderGeometry(0.004, 0.004, 0.07, 8, 6).rotateX(Math.PI / 2).translate(C.x, C.y, C.z + 0.03);
+    const n = g.attributes.position.count;
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(new Uint16Array(n * 4), 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(new Float32Array(n * 4).map((_, i) => (i % 4 ? 0 : 1)), 4));
+    const m = new THREE.SkinnedMesh(g, new THREE.MeshStandardMaterial());
+    m.name = 'RiggedCig';
+    model.root.add(m); model.root.updateMatrixWorld(true);
+    m.bind(new THREE.Skeleton([head]), m.matrixWorld);
+    m.userData.lipCollider = true;
+    return m;
+  });
+  // a group marked, the mesh inside it with its geometry off-centre
+  run('group (the mesh inside it)', () => {
+    const grp = new THREE.Group(); grp.name = 'Props';
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.07, 8).rotateX(Math.PI / 2).translate(0.5, 0, 0), new THREE.MeshStandardMaterial());
+    m.position.set(C.x - 0.5, C.y, C.z + 0.03);
+    grp.add(m); model.root.add(grp);
+    grp.userData.lipCollider = true;
+    return grp;
+  });
+  // a big L-shaped thing whose short arm pokes between the lips (its bounding box is huge)
+  run('odd-shaped object partly at the lips', () => {
+    const arm1 = new THREE.BoxGeometry(0.008, 0.008, 0.05).translate(C.x, C.y, C.z + 0.02);
+    const arm2 = new THREE.BoxGeometry(0.3, 0.008, 0.008).translate(C.x + 0.15, C.y, C.z + 0.045);
+    const m = new THREE.Mesh(mergeGeometries([arm1, arm2]), new THREE.MeshStandardMaterial());
+    m.name = 'LShape';
+    model.root.add(m);
+    m.userData.lipCollider = true;
+    return m;
+  });
+}
+
 // ---- a second mouth (on the chest)
 function twoMouths() {
   const t = mouthy();

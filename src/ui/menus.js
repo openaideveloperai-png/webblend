@@ -219,9 +219,14 @@ export function toolsMenu(app, ui) {
     } },
     (() => {
       const o = app.selection.object;
-      const ok = o && !o.isBone && !o.isSkinnedMesh && m && (o !== m.root || !m.humanoid);
+      // any object or part, rigged or not; not the character whose lips they are (pick the
+      // part in the Scene list), and not the lips' own mesh
+      const ownChar = o && m && o === m.root && m.humanoid && (m._soft || (m._softX || []).length);
+      const ok = o && !o.isBone && m && !ownChar;
       const on = ok && !!o.userData.lipCollider;
-      return { label: (on ? '✓ ' : '') + 'Lips react to the selected object', icon: 'mesh', disabled: !ok, action: () => {
+      return { label: (on ? '✓ ' : '') + 'Lips react to the selected object' + (ownChar ? ' (pick the part in the Scene list)' : ''), icon: 'mesh', disabled: !ok, action: () => {
+        const lipMesh = app.models.some((x) => [x._soft, ...(x._softX || [])].some((L) => L && L.meshes.includes(o)));
+        if (lipMesh && !on) { app.toast(`"${o.name || 'That'}" is the same mesh as the lips, so it can't push them. Separate the object into its own mesh (in Blender: Edit Mode → P → Selection), then mark it.`, 'warn', 6000); return; }
         o.userData.lipCollider = !on;
         for (const x of app.models) { if (x._soft) x._soft.sig = null; for (const y of x._softX || []) y.sig = null; }
         app.toast(on ? `The lips no longer react to "${o.name || 'the object'}"` : `The lips now wrap around "${o.name || 'the object'}" where it touches them (it\'s kept with the scene)`, 'ok', 3500);

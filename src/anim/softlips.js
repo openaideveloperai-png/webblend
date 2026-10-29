@@ -379,17 +379,27 @@ class SoftLips {
     const reach = this.hw * 6;
     const heldBy = this.handBones || (this.handBones = new Set([this.model.humanoid.map.leftHand, this.model.humanoid.map.rightHand].filter(Boolean)));
     const props = [];
+    // objects you marked (Tools → Lips react to the selected object), in any model, rigged
+    // or not: fitted to their actual surface where it's at the lips
+    const marked = new Set();
+    const lipMeshes = new Set(this.meshes);
+    const pad = this.hw * 0.4;
+    for (const m of app && app.models ? app.models : [this.model]) {
+      m.root.traverse((o) => {
+        if (!o.isMesh || !visibleChain(o) || o.userData.editorOnly || o.userData.helper || lipMeshes.has(o)) return;
+        for (let p = o; p && p !== m.root.parent; p = p.parent) if (p.userData.lipCollider) { marked.add(o); fitCapsule(o, F, b, pad, out); return; }
+      });
+    }
+    // anything held in a hand
     this.model.root.traverse((o) => {
-      if (!o.isMesh || o.isSkinnedMesh || !o.visible || o.userData.editorOnly || o.userData.helper) return;
-      // objects you marked (Tools → Lips react to this object), and anything held in a hand
-      for (let p = o; p; p = p.parent) if (p.userData.lipCollider) { props.push(o); return; }
+      if (!o.isMesh || o.isSkinnedMesh || !o.visible || o.userData.editorOnly || o.userData.helper || marked.has(o)) return;
       for (let p = o.parent; p; p = p.parent) if (heldBy.has(p)) { props.push(o); return; }
     });
     if (app && app.models) for (const m of app.models) {
       if (m === this.model || !m.root.visible) continue;
       if (m.humanoid && m._softFingers) fingerCaps(m._softFingers);
       else if (m.humanoid && m.humanoid.handRig) fingerCaps(m._softFingers = fingerCapsules(m, new Map()));
-      for (const o of m.meshes || []) if (o.isMesh && !o.isSkinnedMesh && visibleChain(o)) props.push(o);
+      for (const o of m.meshes || []) if (o.isMesh && !o.isSkinnedMesh && !marked.has(o) && visibleChain(o)) props.push(o);
     }
     for (const o of props) {
       const c = meshCapsule(o);
@@ -882,6 +892,70 @@ export function fingerCapsules(model, verts) {
 
 // a mesh (prop part) as one capsule along its longest side, in its own space
 const _capCache = new WeakMap();
+// a marked object's surface where it's at the lips -> one capsule fitted to it (frame
+// coordinates): its vertices as posed (skinned, morphed) plus points across its triangles,
+// so a low-poly object crossing the lips between its corners still counts
+const _fv = new THREE.Vector3();
+function fitCapsule(o, F, b, pad, out) {
+  const g = o.geometry, pos = g && g.attributes && g.attributes.position;
+  if (!pos) return;
+  const n = pos.count;
+  const step = n > 30000 ? Math.ceil(n / 30000) : 1;
+  const P = new Float32Array(Math.ceil(n / step) * 3);
+  o.updateWorldMatrix(true, false);
+  for (let i = 0, j = 0; i < n; i += step, j += 3) {
+    o.getVertexPosition(i, _fv).applyMatrix4(o.matrixWorld);
+    P[j] = F.x(_fv); P[j + 1] = F.y(_fv); P[j + 2] = F.z(_fv);
+  }
+  const x0 = b.x0 - pad, x1 = b.x1 + pad, y0 = b.y0 - pad, y1 = b.y1 + pad, z0 = b.z0 - pad, z1 = b.z1 + pad;
+  const inside = (x, y, z) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && z >= z0 && z <= z1;
+  const pts = [];
+  for (let j = 0; j < P.length; j += 3) if (inside(P[j], P[j + 1], P[j + 2])) pts.push(P[j], P[j + 1], P[j + 2]);
+  // points across triangles that overlap the lips (only when every vertex was read)
+  if (step === 1) {
+    const idx = g.index ? g.index.array : null;
+    const tris = idx ? idx.length : n;
+    const W = [[1 / 3, 1 / 3, 1 / 3], [0.5, 0.5, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.75, 0.25, 0], [0.25, 0.75, 0], [0, 0.75, 0.25], [0, 0.25, 0.75], [0.75, 0, 0.25], [0.25, 0, 0.75]];
+    for (let t = 0; t + 2 < tris && pts.length < 30000; t += 3) {
+      const a = (idx ? idx[t] : t) * 3, c = (idx ? idx[t + 1] : t + 1) * 3, d = (idx ? idx[t + 2] : t + 2) * 3;
+      if (Math.max(P[a], P[c], P[d]) < x0 || Math.min(P[a], P[c], P[d]) > x1 || Math.max(P[a + 1], P[c + 1], P[d + 1]) < y0 || Math.min(P[a + 1], P[c + 1], P[d + 1]) > y1 || Math.max(P[a + 2], P[c + 2], P[d + 2]) < z0 || Math.min(P[a + 2], P[c + 2], P[d + 2]) > z1) continue;
+      for (const [u, v, w] of W) {
+        const x = u * P[a] + v * P[c] + w * P[d], y = u * P[a + 1] + v * P[c + 1] + w * P[d + 1], z = u * P[a + 2] + v * P[c + 2] + w * P[d + 2];
+        if (inside(x, y, z)) pts.push(x, y, z);
+      }
+    }
+  }
+  const m = pts.length / 3;
+  if (m < 3) return;
+  let cx = 0, cy = 0, cz = 0;
+  for (let k = 0; k < pts.length; k += 3) { cx += pts[k]; cy += pts[k + 1]; cz += pts[k + 2]; }
+  cx /= m; cy /= m; cz /= m;
+  // its long direction (power iteration on the spread)
+  let xx = 0, xy = 0, xz = 0, yy = 0, yz = 0, zz = 0;
+  for (let k = 0; k < pts.length; k += 3) { const dx = pts[k] - cx, dy = pts[k + 1] - cy, dz = pts[k + 2] - cz; xx += dx * dx; xy += dx * dy; xz += dx * dz; yy += dy * dy; yz += dy * dz; zz += dz * dz; }
+  let ax = 1, ay = 0.31, az = 0.17;
+  for (let it = 0; it < 32; it++) {
+    const nx = xx * ax + xy * ay + xz * az, ny = xy * ax + yy * ay + yz * az, nz = xz * ax + yz * ay + zz * az;
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-18) break;
+    ax = nx / l; ay = ny / l; az = nz / l;
+  }
+  let t0 = Infinity, t1 = -Infinity;
+  const rr = [];
+  for (let k = 0; k < pts.length; k += 3) {
+    const dx = pts[k] - cx, dy = pts[k + 1] - cy, dz = pts[k + 2] - cz;
+    const t = dx * ax + dy * ay + dz * az;
+    if (t < t0) t0 = t; if (t > t1) t1 = t;
+    rr.push(Math.hypot(dx - t * ax, dy - t * ay, dz - t * az));
+  }
+  rr.sort((p, q) => p - q);
+  // its thickness: most of its surface (the odd stray point doesn't blow it up)
+  const r = Math.max(5e-4, rr[Math.floor(rr.length * 0.8)]);
+  let ta = t0 + r, tb = t1 - r;
+  if (ta > tb) ta = tb = (t0 + t1) / 2;
+  out.push({ ax: cx + ax * ta, ay: cy + ay * ta, az: cz + az * ta, bx: cx + ax * tb, by: cy + ay * tb, bz: cz + az * tb, r });
+}
+
 function meshCapsule(o) {
   const g = o.geometry;
   if (!g || !g.attributes || !g.attributes.position) return null;
