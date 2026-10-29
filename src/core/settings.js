@@ -43,6 +43,27 @@ export const DEFAULTS = {
   showEffects: true,
   exportPlatform: 'roblox',
   demoScene: true,
+  introAnimation: true,
+  uniformScale: false,
+  // bone dots
+  boneColor: '#9fb4d0',
+  boneSelColor: '#ffb84a',
+  boneChainColor: '#4aa8ff',
+  boneMultiColor: '#ff6ad5',
+  boneLineColor: '#7f93ad',
+  boneColorByPart: false,
+  bonePartColors: null, // { head: '#…', … } over BONE_PART_COLORS
+};
+
+// body parts the bone dots can be colored by
+export const BONE_PARTS = [
+  ['head', 'Head & neck'], ['face', 'Face (eyes, jaw, lips, tongue)'], ['hair', 'Hair'], ['torso', 'Torso & hips'],
+  ['arms', 'Arms & shoulders'], ['hands', 'Hands & fingers'], ['legs', 'Legs'], ['feet', 'Feet & toes'],
+  ['extras', 'Extras (tail, skirt, cloth, breasts)'], ['other', 'Other (root, helpers)'],
+];
+export const BONE_PART_COLORS = {
+  head: '#ffd36e', face: '#ff8fb1', hair: '#c39bff', torso: '#7fd1ff', arms: '#6effb0',
+  hands: '#c8ff6e', legs: '#ffa45e', feet: '#ff6e6e', extras: '#e2b8ff', other: '#9fb4d0',
 };
 
 export class Settings {

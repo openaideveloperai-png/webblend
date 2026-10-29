@@ -31,7 +31,7 @@ export class App extends Emitter {
     this.settings = new Settings();
     this.history = new History(this, this.settings.get('undoLimit'));
     this.models = [];
-    this.selection = { model: null, object: null };
+    this.selection = { model: null, object: null, extra: [] };
     this.transport = { time: 0, playing: false, loop: true };
     this.needsEval = false;
     this.toast = (msg) => console.log('[toast]', msg);
@@ -56,6 +56,12 @@ export class App extends Emitter {
     this.ikTarget.name = 'IK target';
     this.ikTarget.userData.helper = true;
     this.viewport.helpers.add(this.ikTarget);
+    // the gizmo's handle when several bones are selected (at their middle)
+    this.multiPivot = new THREE.Object3D();
+    this.multiPivot.name = 'Selection pivot';
+    this.multiPivot.userData.helper = true;
+    this.viewport.helpers.add(this.multiPivot);
+    this.multiActive = false;
     this.selBox = new THREE.BoxHelper(new THREE.Object3D(), 0xffb84a);
     this.selBox.userData.helper = true;
     this.selBox.material.depthTest = false;
@@ -81,6 +87,7 @@ export class App extends Emitter {
     root.updateMatrixWorld(true);
     const model = new Model(this, root, opts);
     this.models.push(model);
+    if (this.settings.get('boneColorByPart') && model.joints) model.joints.recolor();
     if (root.isCamera) this.attachCameraHelper(model);
     // single-frame actions (a rig's mouth shapes, saved poses) are poses, not clips:
     // they go to Animations -> Poses and the AI can blend them
@@ -233,6 +240,10 @@ export class App extends Emitter {
     if (model.softSkin !== undefined) m2.softSkin = model.softSkin;
     if (model.softSkinSoftness !== undefined) m2.softSkinSoftness = model.softSkinSoftness;
     if (model.solidBody !== undefined) m2.solidBody = model.solidBody;
+    // Advanced: lip bones, more mouths and soft-skin numbers (by bone name, so they carry over)
+    if (model.lipBones) m2.lipBones = [...model.lipBones];
+    if (model.extraMouths) m2.extraMouths = model.extraMouths.map((x) => ({ name: x.name, bones: [...x.bones] }));
+    if (model.skinTune) m2.skinTune = { ...model.skinTune };
     // per-bone indent settings follow to the copy's bones
     if (model.indent) { m2.indent = {}; for (const [id, v] of Object.entries(model.indent)) if (map.has(id)) m2.indent[map.get(id)] = { ...v }; m2.indentVersion = 1; }
     this.toast(`Duplicated "${model.name}"`, 'ok');
@@ -280,18 +291,17 @@ export class App extends Emitter {
   }
 
   // ------------------------------------------------------------ selection
-  select(object, model) {
+  // extra: more bones of the same model selected along with object (Shift+click, Tools → Select…)
+  select(object, model, opts = {}) {
     if (object && !model) model = this.modelOf(object);
     const prev = this.selection;
-    if (prev.object === object && prev.model === model) return;
+    const extra = object && object.isBone && model ? [...new Set(opts.extra || [])].filter((b) => b && b.isBone && b !== object && model.bones.includes(b)) : [];
+    if (prev.object === object && prev.model === model && sameList(prev.extra || [], extra)) return;
     // highlight
     for (const m of this.models) if (m.joints) m.joints.highlight(null);
-    this.selection = { model: model || null, object: object || null };
-    if (model && model.joints && object && object.isBone) {
-      const chain = this.settings.get('ikChain') > 0 ? ikChain(object, this.settings.get('ikChain')) : [];
-      model.joints.highlight(object, this.gizmoMode === 'translate' ? chain : []);
-    }
-    if (object && object.isBone && this.gizmoMode === 'translate' && !this.canIK(object)) this.setGizmoMode('rotate', true);
+    this.selection = { model: model || null, object: object || null, extra };
+    this.highlightSelection();
+    if (object && object.isBone && this.gizmoMode === 'translate' && !extra.length && !this.canIK(object)) this.setGizmoMode('rotate', true);
     this.attachGizmo();
     this.updateSelBox();
     this.emit('selection', this.selection);
@@ -299,9 +309,45 @@ export class App extends Emitter {
     this.viewport.requestRender();
   }
 
+  highlightSelection() {
+    const { object, model, extra } = this.selection;
+    if (!model || !model.joints) return;
+    if (!object || !object.isBone) { model.joints.highlight(null); return; }
+    const chain = !extra.length && this.gizmoMode === 'translate' && this.settings.get('ikChain') > 0 ? ikChain(object, this.settings.get('ikChain')) : [];
+    model.joints.highlight(object, chain, extra);
+  }
+
+  // every selected bone: the active one first
+  selectedBones() {
+    const { object, extra } = this.selection;
+    return object && object.isBone ? [object, ...(extra || [])] : [];
+  }
+
+  // select several bones at once (the last one is the active bone, like a click)
+  selectBones(bones, model) {
+    bones = [...new Set(bones)].filter((b) => b && b.isBone);
+    if (!bones.length) return;
+    model = model || this.modelOf(bones[0]);
+    const active = bones[bones.length - 1];
+    this.select(active, model, { extra: bones.slice(0, -1) });
+  }
+
+  // Shift+click on a bone: add it to the selection (it becomes the active bone), or take it out
+  toggleBone(bone, model) {
+    const { object, model: cur } = this.selection;
+    if (!object || !object.isBone || cur !== model) return this.select(bone, model);
+    const all = this.selectedBones();
+    if (all.includes(bone)) {
+      const rest = all.filter((b) => b !== bone);
+      if (!rest.length) return this.select(null);
+      return this.selectBones([...rest.slice(1), rest[0]], model);
+    }
+    return this.selectBones([...all, bone], model);
+  }
+
   selectFromViewport(hit, shift) {
     if (!hit) { if (!shift) this.select(null); return; }
-    if (hit.bone) return this.select(hit.bone, hit.model);
+    if (hit.bone) return shift ? this.toggleBone(hit.bone, hit.model) : this.select(hit.bone, hit.model);
     let obj = hit.object;
     const model = hit.model || this.modelOf(obj);
     if (!model) return;
@@ -345,13 +391,14 @@ export class App extends Emitter {
     this.gizmoMode = mode;
     this.viewport.gizmo.setMode(mode);
     this.attachGizmo();
-    const o = this.selection.object;
-    if (o && o.isBone && this.selection.model && this.selection.model.joints) {
-      const chain = mode === 'translate' && this.canIK(o) ? ikChain(o, this.settings.get('ikChain')) : [];
-      this.selection.model.joints.highlight(o, chain);
-    }
+    this.highlightSelection();
     if (!silent) this.emit('gizmo', mode);
     this.viewport.requestRender();
+  }
+
+  setUniformScale(on) {
+    this.setSetting('uniformScale', !!on);
+    this.emit('gizmo', this.gizmoMode);
   }
 
   setGizmoSpace(space) {
@@ -366,7 +413,16 @@ export class App extends Emitter {
     const o = this.selection.object;
     g.setMode(this.gizmoMode);
     g.setSpace(this.gizmoSpace);
+    this.multiActive = false;
     if (!o) { g.detach(); return; }
+    // several bones: the gizmo sits at their middle and moves them all
+    if (o.isBone && this.selection.extra && this.selection.extra.length) {
+      this.placePivot();
+      g.attach(this.multiPivot);
+      this.ikActive = false;
+      this.multiActive = true;
+      return;
+    }
     if (o.isBone && this.gizmoMode === 'translate' && this.canIK(o)) {
       o.getWorldPosition(this.ikTarget.position);
       this.ikTarget.updateMatrixWorld(true);
@@ -379,6 +435,62 @@ export class App extends Emitter {
     g.attach(o);
   }
 
+  // the multi-bone pivot: at the middle of the selected bones, turned like the active bone
+  placePivot() {
+    const bones = this.selectedBones();
+    if (!bones.length) return;
+    const c = new THREE.Vector3(), p = new THREE.Vector3();
+    for (const b of bones) c.add(b.getWorldPosition(p));
+    c.multiplyScalar(1 / bones.length);
+    this.multiPivot.position.copy(c);
+    if (this.gizmoSpace === 'local') bones[0].getWorldQuaternion(this.multiPivot.quaternion); else this.multiPivot.quaternion.identity();
+    this.multiPivot.scale.set(1, 1, 1);
+    this.multiPivot.updateMatrixWorld(true);
+  }
+
+  // dragging the pivot of several bones: move / turn / scale them all around their middle;
+  // with Ctrl held while moving, spread them apart along the drag instead (lips open,
+  // fingers fan out), or bring them together dragging the other way
+  applyMulti(d) {
+    const m = d.multi, P = this.multiPivot;
+    const dp = P.position.clone().sub(m.p0);
+    const dq = P.quaternion.clone().multiply(m.q0.clone().invert());
+    const k = P.scale.clone().divide(m.s0);
+    const spread = this.gizmoMode === 'translate' && (this.viewport.ctrlHeld || d.spread);
+    let axis = null, amount = 0, meanAbs = 0;
+    if (spread && dp.lengthSq() > 1e-14) {
+      const ax = this.viewport.gizmo.axis;
+      if (ax === 'X' || ax === 'Y' || ax === 'Z') {
+        axis = new THREE.Vector3(ax === 'X' ? 1 : 0, ax === 'Y' ? 1 : 0, ax === 'Z' ? 1 : 0).applyQuaternion(m.q0);
+        amount = dp.dot(axis);
+      } else { axis = dp.clone().normalize(); amount = dp.length(); }
+      for (const w of m.world) meanAbs += Math.abs(w.p.clone().sub(m.p0).dot(axis));
+      meanAbs = Math.max(meanAbs / m.world.length, 1e-6);
+    }
+    const tmpQ = new THREE.Quaternion(), pq = new THREE.Quaternion();
+    for (const w of m.world) {
+      const b = w.bone;
+      const off = w.p.clone().sub(m.p0);
+      let pos, q = w.q;
+      if (spread) {
+        const f = axis ? Math.max(-0.95, amount / meanAbs) : 0;
+        pos = axis ? w.p.clone().addScaledVector(axis, off.dot(axis) * f) : w.p.clone();
+      } else if (this.gizmoMode === 'translate') pos = w.p.clone().add(dp);
+      else if (this.gizmoMode === 'rotate') { pos = m.p0.clone().add(off.applyQuaternion(dq)); q = dq.clone().multiply(w.q); }
+      else {
+        // scale about the middle, in the pivot's axes
+        const loc = off.applyQuaternion(m.q0.clone().invert()).multiply(k).applyQuaternion(m.q0);
+        pos = m.p0.clone().add(loc);
+      }
+      b.parent.updateMatrixWorld(true);
+      b.position.copy(b.parent.worldToLocal(pos));
+      b.parent.getWorldQuaternion(pq);
+      b.quaternion.copy(tmpQ.copy(pq).invert().multiply(q));
+      if (this.gizmoMode === 'scale' && !spread) b.scale.copy(w.s).multiply(k);
+      b.updateMatrixWorld(true);
+    }
+  }
+
   bindGizmo() {
     this.on('gizmo:start', () => {
       if (this.transport.playing) this.pause();
@@ -386,9 +498,25 @@ export class App extends Emitter {
       if (!o) return;
       let objs = [o];
       if (this.ikActive) objs = ikChain(o, this.settings.get('ikChain'));
-      this._drag = { objs, before: objs.map(snapTransform), ik: this.ikActive };
+      let multi = null;
+      if (this.multiActive) {
+        // parents before children, so each bone lands where it's meant to in the world
+        objs = this.selectedBones().sort((a, b) => depthOf(a) - depthOf(b));
+        const P = this.multiPivot;
+        multi = { p0: P.position.clone(), q0: P.quaternion.clone(), s0: P.scale.clone(), world: objs.map((b) => ({ bone: b, p: b.getWorldPosition(new THREE.Vector3()), q: b.getWorldQuaternion(new THREE.Quaternion()), s: b.scale.clone() })) };
+      }
+      this._drag = { objs, before: objs.map(snapTransform), ik: this.ikActive, multi };
     });
     this.on('gizmo:change', () => {
+      if (this._drag && this._drag.multi) {
+        if (this.gizmoMode === 'scale' && this.settings.get('uniformScale')) uniformize(this.multiPivot, this._drag.multi.s0);
+        this.applyMulti(this._drag);
+        this.updateSelBox();
+        this.emit('transform');
+        return;
+      }
+      // uniform scale: whichever handle is dragged, all three axes follow it equally
+      if (this.gizmoMode === 'scale' && this.settings.get('uniformScale') && this._drag && !this._drag.ik) uniformize(this.selection.object, this._drag.before[0].s);
       if (this.ikActive && this._drag) {
         const o = this.selection.object;
         const chain = ikChain(o, this.settings.get('ikChain'));
@@ -407,6 +535,7 @@ export class App extends Emitter {
       this._drag = null;
       this.viewport.gizmoJustUsed = true;
       if (!d) return;
+      if (d.multi) this.placePivot();
       const after = d.objs.map(snapTransform);
       const changed = new Set();
       d.objs.forEach((o, i) => {
@@ -444,6 +573,7 @@ export class App extends Emitter {
   }
 
   afterEdit() {
+    if (this.multiActive && !this._drag) this.placePivot();
     this.updateSelBox();
     this.emit('transform');
     this.viewport.requestRender();
@@ -520,11 +650,56 @@ export class App extends Emitter {
     if (!object || !model) { this.toast('Select something to key first', 'warn'); return; }
     const entry = this.ensureClip(model);
     const t = this.localTime(entry);
-    props = props || this.defaultKeyProps(object);
+    const objs = this.selectedBones().length > 1 ? this.selectedBones() : [object];
     this.editClip(model, entry, (clip) => {
-      for (const p of props) setKey(clip, model.root, object, p, t, propDesc(p).get(object), this.keyEps());
+      for (const o of objs) for (const p of props || this.defaultKeyProps(o)) setKey(clip, model.root, o, p, t, propDesc(p).get(o), this.keyEps());
     }, 'Insert key');
-    this.toast(`Keyed ${object.name || 'object'} at frame ${Math.round(t * this.settings.get('fps'))}`, 'ok', 1200);
+    this.toast(`Keyed ${objs.length > 1 ? objs.length + ' bones' : object.name || 'object'} at frame ${Math.round(t * this.settings.get('fps'))}`, 'ok', 1200);
+  }
+
+  // change several bones in one undo step (and key them with auto-key on)
+  editBones(bones, fn, label = 'Edit bones') {
+    const model = this.selection.model || this.modelOf(bones[0]);
+    if (!bones.length || !model) return;
+    const before = bones.map(snapTransform);
+    fn(bones);
+    const after = bones.map(snapTransform);
+    let clipUndo = null;
+    if (this.settings.get('autoKey')) {
+      const entry = this.ensureClip(model);
+      const b0 = snapshotClip(entry.clip);
+      const t = this.localTime(entry);
+      for (const o of bones) for (const prop of ['position', 'quaternion', 'scale']) setKey(entry.clip, model.root, o, prop, t, PROPS[prop].get(o), this.keyEps());
+      model.rebuildClip(entry.clip);
+      clipUndo = { entry, before: b0, after: snapshotClip(entry.clip) };
+      this.emit('keys', model);
+    }
+    const restore = (snaps, clipSnap) => {
+      bones.forEach((o, i) => applyTransform(o, snaps[i]));
+      if (clipUndo) { restoreClip(clipUndo.entry.clip, clipSnap); model.rebuildClip(clipUndo.entry.clip); this.emit('keys', model); }
+      this.afterEdit();
+    };
+    this.history.push({ label, undo: () => restore(before, clipUndo && clipUndo.before), redo: () => restore(after, clipUndo && clipUndo.after) });
+    this.afterEdit();
+  }
+
+  // move the selected bones apart from their middle (f > 0) or together (f < 0):
+  // lips open, fingers fan out
+  spreadSelected(f, axis = null) {
+    const bones = this.selectedBones();
+    if (bones.length < 2) { this.toast('Select two or more bones first (Shift+click, or Tools → Select…)', 'warn'); return; }
+    bones.sort((a, b) => depthOf(a) - depthOf(b));
+    const world = bones.map((b) => b.getWorldPosition(new THREE.Vector3()));
+    const c = world.reduce((a, p) => a.add(p), new THREE.Vector3()).multiplyScalar(1 / bones.length);
+    this.editBones(bones, () => {
+      bones.forEach((b, i) => {
+        const off = world[i].clone().sub(c);
+        const pos = axis ? world[i].clone().addScaledVector(axis, off.dot(axis) * f) : c.clone().addScaledVector(off, 1 + f);
+        b.parent.updateMatrixWorld(true);
+        b.position.copy(b.parent.worldToLocal(pos));
+        b.updateMatrixWorld(true);
+      });
+    }, f > 0 ? 'Spread bones' : 'Bring bones together');
   }
 
   // Key every bone of a model (pose key)
@@ -837,6 +1012,7 @@ export class App extends Emitter {
       for (const m of this.models) m.evaluate(tr.time);
       this.needsEval = false;
       if (this.ikActive && this.selection.object) this.selection.object.getWorldPosition(this.ikTarget.position);
+      if (this.multiActive) { this.world.updateMatrixWorld(true); this.placePivot(); }
       this.emit('evaluated');
     }
     this.world.updateMatrixWorld(true);
@@ -893,6 +1069,7 @@ export class App extends Emitter {
     if (k === 'bgColor') this.viewport.renderer.setClearColor(new THREE.Color(v), 1);
     if (k === 'ikChain') this.select(this.selection.object, this.selection.model);
     if (k === 'showEffects') this.needsEval = true;
+    if (/^bone(Color|SelColor|ChainColor|MultiColor|LineColor|ColorByPart|PartColors)$/.test(k)) for (const m of this.models) if (m.joints) m.joints.recolor();
     this.emit('settings', k, v);
     this.viewport.requestRender();
   }
@@ -1045,6 +1222,19 @@ export class App extends Emitter {
 function restoreSoftMeta(m, info) {
   for (const k of ['softLips', 'softSkin', 'solidBody']) if (typeof info[k] === 'boolean') m[k] = info[k];
   for (const k of ['softLipsSoftness', 'softSkinSoftness']) if (Number.isFinite(info[k])) m[k] = Math.min(2, Math.max(0.3, info[k]));
+  // Advanced: lip bones, more mouths, soft-skin numbers
+  const names = (a) => (Array.isArray(a) ? a.filter((n) => typeof n === 'string').slice(0, 500) : null);
+  if (names(info.lipBones) && names(info.lipBones).length) m.lipBones = names(info.lipBones);
+  if (Array.isArray(info.extraMouths)) {
+    const mouths = info.extraMouths.filter((x) => x && names(x.bones) && names(x.bones).length).slice(0, 16).map((x) => ({ name: typeof x.name === 'string' ? x.name.slice(0, 80) : '', bones: names(x.bones) }));
+    if (mouths.length) m.extraMouths = mouths;
+  }
+  if (info.skinTune && typeof info.skinTune === 'object') {
+    const t = {};
+    for (const [k, lo, hi] of [['settleIn', 0.001, 1], ['settleOut', 0.001, 3], ['maxTurn', 0, 1.6], ['crater', 0.1, 3], ['depth', 0, 3], ['mouthZone', 0.2, 3]]) if (Number.isFinite(info.skinTune[k])) t[k] = Math.min(hi, Math.max(lo, info.skinTune[k]));
+    if (typeof info.skinTune.anatomy === 'boolean') t.anatomy = info.skinTune.anatomy;
+    if (Object.keys(t).length) m.skinTune = t;
+  }
   if (info.indent && typeof info.indent === 'object') {
     const byName = new Map();
     m.root.traverse((o) => { if (o.isBone && !byName.has(o.name)) byName.set(o.name, o); });
@@ -1072,3 +1262,18 @@ export function friendlyError(e) {
   if (/fbx version/i.test(m)) return 'this FBX version isn\'t supported (re-export as FBX 2014/2018 binary, or glTF)';
   return m;
 }
+
+// scale an object by the factor of its most-changed axis on all three axes
+export function uniformize(o, s0) {
+  if (!o || !s0) return;
+  let r = 1, dev = 0;
+  for (const ax of ['x', 'y', 'z']) {
+    if (Math.abs(s0[ax]) < 1e-9) continue;
+    const k = o.scale[ax] / s0[ax];
+    if (Math.abs(k - 1) > dev) { dev = Math.abs(k - 1); r = k; }
+  }
+  o.scale.copy(s0).multiplyScalar(r);
+}
+
+function sameList(a, b) { return a.length === b.length && a.every((x, i) => x === b[i]); }
+function depthOf(o) { let n = 0; for (let p = o.parent; p; p = p.parent) n++; return n; }

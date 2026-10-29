@@ -110,6 +110,9 @@ export async function exportGLB(app, models, filename) {
 function softMeta(m) {
   const out = {};
   for (const k of ['softLips', 'softLipsSoftness', 'softSkin', 'softSkinSoftness', 'solidBody']) if (m[k] !== undefined) out[k] = m[k];
+  if (Array.isArray(m.lipBones) && m.lipBones.length) out.lipBones = [...m.lipBones];
+  if (Array.isArray(m.extraMouths) && m.extraMouths.length) out.extraMouths = m.extraMouths.map((x) => ({ name: x.name || '', bones: [...x.bones] }));
+  if (m.skinTune && Object.keys(m.skinTune).length) out.skinTune = { ...m.skinTune };
   if (m.indent && Object.keys(m.indent).length) {
     const byName = {};
     m.root.traverse((o) => { if (o.isBone && m.indent[o.uuid] && !(o.name in byName)) byName[o.name] = { ...m.indent[o.uuid] }; });

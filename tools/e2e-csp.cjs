@@ -35,6 +35,23 @@ const csp = [
     const r = await pg.evaluate(() => { const ms = window.webblend.models; const m = ms[ms.length - 1]; let meshes = 0, maps = 0; m && m.root.traverse((o) => { if (o.isMesh) { meshes++; if (o.material && o.material.map) maps++; } }); return { name: m && m.name, meshes, maps, toasts: [...document.querySelectorAll('.toast.warn,.toast.error')].map((t) => t.textContent) }; });
     console.log(f.padEnd(18), JSON.stringify(r));
   }
+  // the console runs code even where the page may not eval (it falls back to an inline script)
+  await pg.click('#btn-settings');
+  await pg.waitForTimeout(150);
+  await pg.evaluate(() => document.activeElement && document.activeElement.blur());
+  for (const k of ['8', '8', '8', '8', 'x']) await pg.keyboard.press(k);
+  await pg.waitForTimeout(150);
+  let out = 'no console';
+  if (await pg.isVisible('.con-in')) {
+    await pg.fill('.con-in', 'const a = 2\na * 21');
+    await pg.press('.con-in', 'Control+Enter');
+    await pg.waitForTimeout(150);
+    out = await pg.evaluate(() => [...document.querySelectorAll('.con-line')].slice(-1)[0]?.textContent || '');
+  }
+  console.log((out === '42' ? 'ok   ' : 'FAIL ') + 'console runs code under the artifact CSP  ' + out);
+  // the eval attempt itself is reported by the browser; that one is expected
+  const rest = errors.filter((e) => !/unsafe-eval|evaluate a string as JavaScript|EvalError/i.test(e));
+  errors.length = 0; errors.push(...rest);
   console.log('errors:', errors.length ? errors.slice(0, 6) : 'none');
   await browser.close();
 })();

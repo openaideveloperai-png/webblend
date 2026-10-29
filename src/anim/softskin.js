@@ -15,7 +15,7 @@
 // the rig and shape keys, summed with the soft lips.
 import * as THREE from 'three';
 import { evaluator, EMPTY } from './mouth.js';
-import { softLips, fingerCapsules } from './softlips.js';
+import { softLips, softLipsExtra, fingerCapsules } from './softlips.js';
 import { faceLandmarks } from './landmarks.js';
 import { prepareMesh, layer, beginLayer, setOffset, commit, ATTR, normalDeltas, weldedTriangles, unfold } from './offsets.js';
 
@@ -100,6 +100,11 @@ export function updateSoftSkin(model, dt) {
 // with what presses it at once (it can't lag into clipping); the crater around it settles in
 // a few frames, and once let go it springs back over a fraction of a second, not instantly
 const SETTLE_IN = 0.03, SETTLE_OUT = 0.16;
+// per-character tuning (Advanced → Soft skin): model.skinTune = { settleIn, settleOut (seconds),
+// maxTurn (radians), crater, depth (multipliers), anatomy (false = even flesh everywhere),
+// mouthZone (multiplier) }
+export const SKIN_TUNE = { settleIn: SETTLE_IN, settleOut: SETTLE_OUT, maxTurn: 0.45, crater: 1, depth: 1, anatomy: true, mouthZone: 1 };
+const tune = (model, k) => { const v = model.skinTune && model.skinTune[k]; return v === undefined || v === null ? SKIN_TUNE[k] : v; };
 
 // ---------------------------------------------------------------- solid body
 // The body can't go through itself: where a press goes past what the flesh on both sides
@@ -297,7 +302,8 @@ export function solidBody(model) {
       L.bone.quaternion.copy(parentQ.invert().multiply(_q.multiply(_q2)));
       // never far from the pose as animated, however hard it's pressed
       const turned = L.bone.quaternion.angleTo(e.base);
-      if (turned > MAX_TURN) L.bone.quaternion.copy(e.base).slerp(_q2.copy(L.bone.quaternion), MAX_TURN / turned);
+      const maxTurn = Math.max(0, tune(model, 'maxTurn'));
+      if (turned > maxTurn) L.bone.quaternion.copy(e.base).slerp(_q2.copy(L.bone.quaternion), turned > 1e-9 ? maxTurn / turned : 0);
       e.applied.copy(L.bone.quaternion);
       st.set(L.bone, e);
       any = true; moved++;
@@ -384,13 +390,16 @@ function build(model) {
   }
   if (!canon.size) return null;
   const lips = softLips(model);
+  const extra = softLipsExtra(model);
   const lipKeys = new Set();
-  if (lips) for (let i = 0; i < lips.N; i++) for (let k = lips.memStart[i]; k < lips.memStart[i + 1]; k++) lipKeys.add(lips.meshes[lips.memMesh[k]].uuid + ':' + lips.memIdx[k]);
+  for (const L of [lips, ...extra]) if (L) for (let i = 0; i < L.N; i++) for (let k = L.memStart[i]; k < L.memStart[i + 1]; k++) lipKeys.add(L.meshes[L.memMesh[k]].uuid + ':' + L.memIdx[k]);
   const lm = faceLandmarks(model);
   const ev = evaluator(model);
   try {
     ev.at(EMPTY, 0);
-    return new SoftSkin(model, { partOf, canon, lipKeys, lm, mouth: mouthZone(model, lips, lm) });
+    // every mouth is left to its soft lips (the extra ones wherever they are on the body)
+    const zones = extra.map((L) => mouthZone(model, L, null)).filter(Boolean);
+    return new SoftSkin(model, { partOf, canon, lipKeys, lm, mouth: mouthZone(model, lips, lm), zones });
   } finally { ev.done(); }
 }
 
@@ -412,7 +421,7 @@ function mouthZone(model, lips, lm) {
       const c = pts.reduce((a, p) => a.add(p), new THREE.Vector3()).divideScalar(pts.length);
       let half = 0;
       for (const p of pts) half = Math.max(half, Math.abs(p.clone().sub(c).dot(lat)));
-      if (half > 0) return { c, r: half * 1.3 };
+      if (half > 0) return { c, r: half * 1.3 * Math.max(0.2, (model.skinTune && model.skinTune.mouthZone) ?? 1) };
     }
   }
   const head = rig.map.head;
@@ -429,7 +438,7 @@ function mouthZone(model, lips, lm) {
 }
 
 class SoftSkin {
-  constructor(model, { partOf, canon, lipKeys, lm, mouth }) {
+  constructor(model, { partOf, canon, lipKeys, lm, mouth, zones = [] }) {
     this.model = model;
     const rig = model.humanoid;
     // ---- body parts: a segment along each humanoid bone, its group, its neighbours
@@ -484,6 +493,13 @@ class SoftSkin {
           if (d < 1) continue;
           nearMouth = smoothstep(1, 1.6, d);
         }
+        let inZone = false;
+        for (const z of zones) {
+          const d = v.distanceTo(z.c) / z.r;
+          if (d < 1) { inZone = true; break; }
+          nearMouth = Math.min(nearMouth, smoothstep(1, 1.6, d));
+        }
+        if (inZone) continue;
         n.fromBufferAttribute(na, i).applyMatrix3(nm).normalize();
         raw.push({ mesh: s, i, x: v.x, y: v.y, z: v.z, nx: n.x, ny: n.y, nz: n.z, part: pIndex.get(part), bone: b, nearMouth });
         used = true;
@@ -497,6 +513,7 @@ class SoftSkin {
     if (followers.size || raw.some((e) => e.drop)) raw = raw.filter((e) => !followers.has(e) && !e.drop);
     this.followerMeshes = [...new Set([...followers.keys()].map((e) => e.mesh))].map((m) => m.name);
     this.mouthZone = mouth || null;
+    this.mouthZones = zones;
     this.meshes = meshes;
     const mi = new Map(meshes.map((m, i) => [m, i]));
     // weld seams (same spot, same part)
@@ -642,7 +659,7 @@ class SoftSkin {
     }
     // what's under the skin at each spot (bone close under it, muscle, fat, the belly...)
     let anatomy = null;
-    try { anatomy = anatomyMap(model, rig, parts, canon, restPos, segB, reps, groups, this.group, cheek); } catch (e) { console.warn('soft skin anatomy', e); }
+    if (tune(model, 'anatomy') !== false) { try { anatomy = anatomyMap(model, rig, parts, canon, restPos, segB, reps, groups, this.group, cheek); } catch (e) { console.warn('soft skin anatomy', e); } }
     reps.forEach((e, w) => {
       const g = groups[this.group[w]];
       const a = anatomy ? anatomy(e, g, w) : null;
@@ -1120,7 +1137,8 @@ class SoftSkin {
     const tag = (this.setTag = (this.setTag || 0) + 1);
     for (const w of set) inSet[w] = tag;
     const dt = this.dt > 0 ? this.dt : 0;
-    const aIn = dt ? 1 - Math.exp(-dt / SETTLE_IN) : 1, aOut = dt ? 1 - Math.exp(-dt / SETTLE_OUT) : 1;
+    const sIn = Math.max(0.001, tune(this.model, 'settleIn')), sOut = Math.max(0.001, tune(this.model, 'settleOut'));
+    const aIn = dt ? 1 - Math.exp(-dt / sIn) : 1, aOut = dt ? 1 - Math.exp(-dt / sOut) : 1;
     const hardNow = solved && this.isHard ? this.hardStamp : -1;
     const old = this.shown || [];
     const list = [];
@@ -1414,6 +1432,7 @@ class SoftSkin {
   applyOverrides() {
     const ov = this.model.indent || {};
     this._ov = this.model.indentVersion || 0;
+    const gWidth = Math.max(0.1, tune(this.model, 'crater')), gDepth = Math.max(0, tune(this.model, 'depth'));
     const byBone = new Map();
     // a setting reaches down through helper bones (twist, breast, skirt...) but stops at the
     // next main body bone, which is its own region
@@ -1433,8 +1452,8 @@ class SoftSkin {
       const o = lookup(this.dBones[this.dbone[w]]);
       const rigid = o && o.rigid;
       this.soft[w] = rigid ? 1e-4 : this.soft0[w] * (o ? Math.max(0.01, o.give ?? 1) : 1);
-      this.maxDepth[w] = rigid ? 0 : this.maxDepth0[w] * (o ? Math.max(0, o.depth ?? 1) : 1);
-      this.widthMul[w] = o ? Math.max(0.1, o.width ?? 1) : 1;
+      this.maxDepth[w] = rigid ? 0 : this.maxDepth0[w] * (o ? Math.max(0, o.depth ?? 1) : 1) * gDepth;
+      this.widthMul[w] = (o ? Math.max(0.1, o.width ?? 1) : 1) * gWidth;
       this.rimAdd[w] = o ? Math.max(0, o.rim ?? 0) : 0;
       this.paleMul[w] = o ? Math.max(0, o.pale ?? 1) : 1;
     }

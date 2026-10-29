@@ -11,7 +11,7 @@
 // The offsets go to the GPU as a per-vertex attribute added after skinning, so the lips
 // deform on top of whatever the rig and the shape keys do.
 import * as THREE from 'three';
-import { mouthProbe, mouthEffects, evaluator, headFrame, EMPTY, NOT_FACE, TONGUE, nameOf } from './mouth.js';
+import { mouthProbe, mouthProbeFor, mouthEffects, evaluator, headFrame, EMPTY, NOT_FACE, TONGUE, nameOf } from './mouth.js';
 import { faceTracks } from './face.js';
 import { ATTR, prepareMesh, layer, beginLayer, setOffset, commit, detachOffsets, weldedTriangles, unfold } from './offsets.js';
 
@@ -31,12 +31,45 @@ function dominant(si, sw, i) {
 // -> the model's soft lips (built once per rig), or null when there's no mouth to wrap
 export function softLips(model) {
   if (!model || !model.humanoid || !model.skinned || !model.skinned.length) return null;
-  if (model._soft !== undefined && model._softN === model.nodeCount) return model._soft;
+  const ver = model.lipsVersion || 0;
+  if (model._soft !== undefined && model._softN === model.nodeCount && model._softV === ver) return model._soft;
   if (model._soft) model._soft.clear();
   model._softN = model.nodeCount;
+  model._softV = ver;
   model._soft = null;
   try { model._soft = build(model); } catch (e) { console.warn('soft lips', e); model._soft = null; }
   return model._soft;
+}
+
+// more mouths, from bones the user picked (Advanced → More mouths): each its own soft lips
+export function softLipsExtra(model) {
+  if (!model || !model.humanoid || !model.skinned || !model.skinned.length) return [];
+  const ver = model.lipsVersion || 0;
+  if (model._softX && model._softXN === model.nodeCount && model._softXV === ver) return model._softX;
+  for (const x of model._softX || []) x.clear();
+  model._softXN = model.nodeCount;
+  model._softXV = ver;
+  model._softX = [];
+  (model.extraMouths || []).forEach((mouth, i) => {
+    try {
+      const probe = mouthProbeFor(model, mouth.bones);
+      const sl = probe ? build(model, probe, { layerName: 'lips' + (i + 1), extra: true }) : null;
+      if (sl) { sl.label = mouth.name || `Mouth ${i + 2}`; model._softX.push(sl); }
+    } catch (e) { console.warn('extra mouth', e); }
+  });
+  return model._softX;
+}
+
+// the main mouth and any extra ones
+export function allSoftLips(model) {
+  const main = softLips(model);
+  return [...(main ? [main] : []), ...softLipsExtra(model)];
+}
+
+// forget what was measured (after the lip bones or mouths change)
+export function resetLips(model) {
+  model.lipsVersion = (model.lipsVersion || 0) + 1;
+  if (model._skin) { model._skin.clear(); model._skin = undefined; }
 }
 
 // on unless switched off in the model's properties
@@ -46,20 +79,20 @@ export const softLipsOn = (model) => model.softLips !== false && !!softLips(mode
 export function updateSoftLips(model) {
   if (!model.humanoid || !model.root.visible) return;
   const s = softLips(model);
-  if (!s) return;
-  if (model.softLips === false) { s.clear(); return; }
-  s.update();
+  const extra = model.extraMouths && model.extraMouths.length ? softLipsExtra(model) : model._softX || [];
+  if (model.softLips === false) { if (s) s.clear(); for (const x of extra) x.clear(); return; }
+  if (s) s.update();
+  for (const x of extra) x.update();
 }
 
 // the GLB writer leaves the live offsets out of the file
 export const detachSoftLips = detachOffsets;
 
-function build(model) {
-  const probe = mouthProbe(model);
+function build(model, probe = mouthProbe(model), { layerName = 'lips', extra = false } = {}) {
   if (!probe) return null;
   const rig = model.humanoid, head = probe.head, hw = probe.halfWidth;
   const C = { x: probe.latC, y: probe.mouthUp, z: probe.lipFront };
-  const fx = mouthEffects(model) || new Map();
+  const fx = extra ? new Map() : mouthEffects(model) || new Map();
   const opener = [...fx].filter(([, e]) => e.open > 0.003 && e.tongue < 0.004).sort((a, b) => b[1].open - a[1].open)[0];
   const headBones = new Set();
   head.traverse((o) => { if (o.isBone) headBones.add(o); });
@@ -103,8 +136,12 @@ function build(model) {
       }
     }
     if (raw.length < 12) return null;
+    // your own lip bones: the lower lip is the bones below the middle
+    const sp = probe.own && probe.split;
+    if (sp && sp.lowerIds) for (const e of raw) e.lower = sp.lowerIds.has(e.b) ? true : sp.upperIds.has(e.b) ? false : e.y < C.y;
+    else if (sp && sp.y !== undefined) for (const e of raw) e.lower = e.y < sp.y;
     // the lower lip is what goes down when the mouth opens
-    if (opener) {
+    else if (opener) {
       const { tracks } = faceTracks(model, [{ t: 0, control: opener[0], value: 1 }, { t: 1, control: opener[0], value: 1 }], 1, 2);
       ev.at(new THREE.AnimationClip('open', 1, tracks), 0.5);
       const f2 = headFrame(head, probe.axes);
@@ -114,7 +151,7 @@ function build(model) {
       ev.at(EMPTY, 0);
     } else for (const e of raw) e.lower = e.y < C.y;
     // built in the rest pose (what sits inside the tongue at rest, finger thickness)
-    return new SoftLips(model, probe, raw, fingerVerts, { C, hw, R: [RX, RY, RB, RF] });
+    return new SoftLips(model, probe, raw, fingerVerts, { C, hw, R: [RX, RY, RB, RF], layerName });
   } finally { ev.done(); }
 }
 
@@ -127,6 +164,9 @@ class SoftLips {
     this.R = g.R;
     this.active = false;
     this.mats = new Map();
+    this.layerName = g.layerName || 'lips';
+    // the bones that carry the lips (for Tools → Select lip bones on rigs without lip names)
+    this.boneIds = [...new Set(raw.filter((e) => e.r < 0.6).map((e) => e.b))];
     // ---- weld duplicates (UV seams) so the lip can't tear; upper and lower lip vertices
     // sitting on the same spot stay apart
     const q = g.hw * 0.004;
@@ -565,7 +605,7 @@ class SoftLips {
   write() {
     const F = this.F, D = this.D;
     const inv = this.meshes.map((m) => new THREE.Matrix3().setFromMatrix4(m.matrixWorld).invert());
-    const ls = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, 'lips') : null));
+    const ls = this.meshes.map((m) => (m.geometry.attributes[ATTR] ? layer(m, this.layerName) : null));
     for (const l of ls) if (l) beginLayer(l);
     for (let i = 0; i < this.N; i++) {
       const dx = D[i * 3], dy = D[i * 3 + 1], dz = D[i * 3 + 2];
@@ -589,7 +629,7 @@ class SoftLips {
     this.active = false;
     for (const m of this.meshes) {
       if (!m.geometry.attributes[ATTR]) continue;
-      beginLayer(layer(m, 'lips'));
+      beginLayer(layer(m, this.layerName));
       commit(m);
     }
   }

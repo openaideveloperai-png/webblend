@@ -5,6 +5,9 @@ import { PRIMITIVES } from '../scene/primitives.js';
 import { exportGLB, screenshot, recordVideo, exportClipJSON } from '../io/export.js';
 import { openExportDialog } from './export-dialog.js';
 import { ACCEPT } from '../io/importer.js';
+import { lipBones, fingerBones, partBones, partOf, childBones, mirrorBone } from '../anim/select.js';
+import { BONE_PARTS } from '../core/settings.js';
+import { openAdvanced } from './advanced.js';
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -88,6 +91,7 @@ export function initMenus(app, ui) {
       { label: 'Duplicate model', icon: 'copy', kbd: MOD + 'D', disabled: !app.selection.model, action: () => app.duplicateModel(app.selection.model) },
       { label: 'Delete model', icon: 'trash', kbd: 'Del', disabled: !app.selection.model, action: () => app.removeModel(app.selection.model) },
     ],
+    Tools: () => toolsMenu(app, ui),
     View: () => [
       { label: 'Frame selected', icon: 'frame', kbd: 'F', disabled: !app.selection.object, action: () => app.viewport.frameObject(app.selection.object) },
       { label: 'Frame everything', icon: 'frame', kbd: 'Shift+F', action: () => app.viewport.frameAll() },
@@ -135,10 +139,15 @@ export function initMenus(app, ui) {
     btns[mode] = b;
     tools.append(b);
   }
+  // uniform scale: every scale handle scales all axes equally
+  const uni = h('button', { class: 'tbtn', title: 'Uniform scale: scale equally on all sides (Shift+R)', 'aria-label': 'Uniform scale', onclick: () => { app.setUniformScale(!app.settings.get('uniformScale')); if (app.settings.get('uniformScale')) app.setGizmoMode('scale'); } }, icon('frame'), h('span', { class: 'lbl' }, 'Uniform'));
+  tools.append(uni);
   const space = h('button', { class: 'tbtn', title: 'Toggle local / world axes (Q)', onclick: () => app.setGizmoSpace(app.gizmoSpace === 'local' ? 'world' : 'local') });
   tools.append(space);
   const sync = () => {
     for (const [m, b] of Object.entries(btns)) b.classList.toggle('on', app.gizmoMode === m);
+    uni.classList.toggle('on', !!app.settings.get('uniformScale'));
+    uni.setAttribute('aria-pressed', String(!!app.settings.get('uniformScale')));
     space.replaceChildren(icon(app.gizmoSpace === 'local' ? 'local' : 'globe'), h('span', { class: 'lbl' }, app.gizmoSpace === 'local' ? 'Local' : 'World'));
   };
   app.on('gizmo', sync);
@@ -158,4 +167,43 @@ export function initMenus(app, ui) {
   document.getElementById('btn-add-quick').append(icon('plus'));
   document.getElementById('btn-add-quick').addEventListener('click', (e) => dropdown(addMenuItems(app), { anchor: e.currentTarget }));
   document.getElementById('search-ico').replaceWith(icon('search'));
+}
+
+// Tools: select groups of bones (the lips, fingers, a body part…), spread them, and the
+// tools added from the console this session
+export function toolsMenu(app, ui) {
+  const m = app.selection.model;
+  const bone = app.selection.object && app.selection.object.isBone ? app.selection.object : null;
+  const pick = (bones, what) => {
+    if (!m) return;
+    if (!bones.length) { app.toast(`No ${what} found on this model`, 'warn'); return; }
+    app.selectBones(bones, m);
+    app.toast(`${bones.length} ${what} selected · drag to move them together, hold Ctrl while moving to spread them apart`, 'ok', 3200);
+  };
+  const add = (bones, what) => pick([...app.selectedBones().filter((b) => !bones.includes(b)), ...bones], what);
+  const sel = app.selectedBones();
+  const items = [
+    { header: 'Select bones' },
+    { label: 'Lip bones (all the lips)', icon: 'bone', disabled: !m || !m.bones.length, action: () => pick(lipBones(m), 'lip bones') },
+    { label: 'Face bones', icon: 'bone', disabled: !m || !m.bones.length, action: () => pick(partBones(m, 'face'), 'face bones') },
+    { label: 'Fingers: left hand', icon: 'bone', disabled: !m || !m.humanoid, action: () => pick(fingerBones(m, 'left'), 'finger bones') },
+    { label: 'Fingers: right hand', icon: 'bone', disabled: !m || !m.humanoid, action: () => pick(fingerBones(m, 'right'), 'finger bones') },
+    { label: 'Same body part as this bone', icon: 'bone', disabled: !bone, action: () => pick(partBones(m, partOf(m, bone)).filter((b) => b !== bone).concat(bone), 'bones') },
+    { label: 'This bone and everything under it', icon: 'bone', disabled: !bone, action: () => pick([...childBones(bone), bone], 'bones') },
+    { label: 'Add the other side (left ↔ right)', icon: 'mirror', disabled: !sel.length, action: () => add(sel.map((b) => mirrorBone(m, b)).filter(Boolean), 'bones') },
+    { label: 'Body part…', icon: 'bone', disabled: !m || !m.bones.length, action: () => setTimeout(() => dropdown(BONE_PARTS.map(([k, label]) => ({ label, action: () => pick(partBones(m, k), label.toLowerCase() + ' bones') })), { anchor: [...document.querySelectorAll('.menu-btn')].find((b) => b.textContent === 'Tools') }), 0) },
+    { label: 'Keep only the active bone', icon: 'close', disabled: sel.length < 2, action: () => app.select(bone, m) },
+    { sep: true },
+    { header: 'Selected bones' },
+    { label: 'Spread apart (+15%)', icon: 'plus', disabled: sel.length < 2, action: () => app.spreadSelected(0.15) },
+    { label: 'Bring together (−15%)', icon: 'minus', disabled: sel.length < 2, action: () => app.spreadSelected(-0.15) },
+    { label: (app.settings.get('uniformScale') ? '✓ ' : '') + 'Uniform scale', icon: 'frame', kbd: 'Shift+R', action: () => app.setUniformScale(!app.settings.get('uniformScale')) },
+    { sep: true },
+    { label: 'Advanced character settings… (lips, mouths, soft skin)', icon: 'gear', disabled: !m || !m.humanoid, action: () => openAdvanced(app, m) },
+  ];
+  const own = app.sessionTools || [];
+  if (own.length || app.consoleUnlocked) items.push({ sep: true }, { header: 'This session' });
+  for (const t of own) items.push({ label: t.name, icon: t.icon || 'wand', kbd: t.key || undefined, action: () => app.runTool(t) });
+  if (app.consoleUnlocked) items.push({ label: 'Console…', icon: 'dots', action: () => ui.openConsole?.() });
+  return items;
 }

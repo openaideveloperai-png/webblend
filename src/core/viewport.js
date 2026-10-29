@@ -245,6 +245,17 @@ export class Viewport {
   bindCanvasEvents() {
     const dom = this.renderer.domElement;
     let down = null;
+    // Ctrl held while dragging several bones spreads them apart (see App.applyMulti)
+    this.ctrlHeld = false;
+    const mods = (e) => {
+      const was = this.ctrlHeld;
+      this.ctrlHeld = !!(e.ctrlKey || e.metaKey);
+      if (was !== this.ctrlHeld && this.app._drag && this.app._drag.multi) { this.app.emit('gizmo:change'); this.requestRender(); }
+    };
+    window.addEventListener('keydown', mods, true);
+    window.addEventListener('keyup', mods, true);
+    window.addEventListener('pointermove', mods, true);
+    window.addEventListener('blur', () => { this.ctrlHeld = false; });
     dom.addEventListener('pointerdown', (e) => {
       down = { x: e.clientX, y: e.clientY, t: performance.now(), button: e.button };
       dom.focus({ preventScroll: true });

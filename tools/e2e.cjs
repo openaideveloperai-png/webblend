@@ -138,6 +138,8 @@ const state = (page) => page.evaluate(() => {
   const indentBone = await page.evaluate(() => {
     const m = window.webblend.models.find((x) => x.humanoid); const b = m.humanoid.map.spine || m.humanoid.map.hips;
     m.indent = { [b.uuid]: { width: 2, rigid: false, give: 0.5 } }; m.indentVersion = (m.indentVersion || 0) + 1; m.softSkinSoftness = 1.4;
+    // Advanced: lip bones, another mouth, soft-skin numbers
+    m.lipBones = [b.name]; m.extraMouths = [{ name: 'Belly mouth', bones: [b.name] }]; m.skinTune = { settleOut: 0.3, crater: 1.5, anatomy: false };
     return { model: m.name, bone: b.name };
   });
   await page.click('.menu-btn:has-text("File")');
@@ -160,8 +162,9 @@ const state = (page) => page.evaluate(() => {
   const reIndent = await page.evaluate((want) => {
     const m = window.webblend.models.find((x) => x.name === want.model); if (!m) return null;
     let bone = null; m.root.traverse((o) => { if (!bone && o.isBone && o.name === want.bone) bone = o; });
-    return { softness: m.softSkinSoftness, indent: bone && m.indent ? m.indent[bone.uuid] : null };
+    return { softness: m.softSkinSoftness, indent: bone && m.indent ? m.indent[bone.uuid] : null, lips: m.lipBones, mouths: m.extraMouths, tune: m.skinTune };
   }, indentBone);
+  ok('...and its Advanced settings (lip bones, more mouths, soft-skin numbers)', reIndent && reIndent.lips && reIndent.lips[0] === indentBone.bone && reIndent.mouths && reIndent.mouths[0].name === 'Belly mouth' && reIndent.tune && reIndent.tune.settleOut === 0.3 && reIndent.tune.anatomy === false, JSON.stringify({ lips: reIndent && reIndent.lips, mouths: reIndent && reIndent.mouths, tune: reIndent && reIndent.tune }));
   ok('...and its per-bone indent (Ctrl+Shift+4) and skin softness', reIndent && reIndent.softness === 1.4 && reIndent.indent && reIndent.indent.width === 2 && reIndent.indent.give === 0.5, JSON.stringify(reIndent));
 
   // 9. quality switching (renderer rebuild for antialias)

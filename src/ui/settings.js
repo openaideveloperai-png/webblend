@@ -1,7 +1,9 @@
 // Settings dialog.
 import { h, icon } from './dom.js';
 import { modal } from './toast.js';
-import { QUALITY_LEVELS, QUALITY_PRESETS } from '../core/settings.js';
+import { QUALITY_LEVELS, QUALITY_PRESETS, BONE_PARTS, BONE_PART_COLORS, DEFAULTS } from '../core/settings.js';
+import { playIntro } from './intro.js';
+import { watchUnlock } from './console.js';
 import { fmtBytes, inArtifact } from '../core/util.js';
 
 const Q_ICONS = { potato: 'potato', low: 'bolt', medium: 'mesh', high: 'sparkle', ultra: 'sparkle' };
@@ -15,7 +17,7 @@ const Q_DESC = {
 
 export const SHORTCUTS = [
   ['Space', 'Play / pause'], ['K', 'Key selected object'], ['Shift+K', 'Key whole pose (all bones)'], ['Alt+K', 'Delete keys at current frame'],
-  ['W / E / R', 'Move / rotate / scale'], ['Q', 'Local / world axes'], ['F', 'Frame selected'], ['Shift+F', 'Frame everything'],
+  ['W / E / R', 'Move / rotate / scale'], ['Shift+R', 'Uniform scale on / off (scale equally on all sides)'], ['Shift+click', 'Add a bone to the selection (or take it out)'], ['Ctrl while moving', 'Several bones selected: spread them apart along the drag (lips open)'], ['Q', 'Local / world axes'], ['F', 'Frame selected'], ['Shift+F', 'Frame everything'],
   ['← / →', 'Previous / next frame'], ['↑ / ↓', 'Next / previous keyframe'], ['Shift+← / →', 'Start / end'],
   ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / redo'], ['Ctrl+C / Ctrl+V', 'Copy / paste pose (keys when timeline focused)'], ['Ctrl+D', 'Duplicate model'],
   ['Del', 'Delete selected keys, or the selected model'], ['P', 'Select parent'], ['H', 'Hide / show model'], ['Esc', 'Deselect'],
@@ -68,7 +70,41 @@ export function openSettings(app, ui, section) {
     select('pickMode', 'Clicking selects', [['object', 'The part under the mouse'], ['model', 'The whole model']]),
     (() => { const c = h('input', { type: 'color', value: s.get('bgColor') }); c.addEventListener('input', () => app.setSetting('bgColor', c.value)); return h('div', { class: 'field' }, h('label', {}, 'Background'), c); })(),
     toggle('importLights', 'Import lights from .blend files'),
-    toggle('demoScene', 'Start with the demo mannequin'));
+    toggle('demoScene', 'Start with the demo mannequin'),
+    h('div', { class: 'field' }, h('label', { class: 'toggle', for: 'set-introAnimation' },
+      (() => { const c = h('input', { type: 'checkbox', id: 'set-introAnimation', checked: s.get('introAnimation') !== false || undefined }); c.addEventListener('change', () => app.setSetting('introAnimation', c.checked)); return c; })(),
+      'Play the intro animation at start'),
+      h('button', { class: 'btn sm ghost', onclick: () => playIntro() }, 'Play now')));
+
+  // bone dots: colors, one per body part if wanted
+  const colorField = (label, get, set, id) => {
+    const c = h('input', { type: 'color', value: get(), id });
+    c.addEventListener('input', () => set(c.value));
+    return h('div', { class: 'field' }, h('label', { for: id }, label), c);
+  };
+  const colorKey = (key, label) => colorField(label, () => s.get(key) || DEFAULTS[key], (v) => app.setSetting(key, v), 'set-' + key);
+  const partGrid = h('div', { class: 'part-colors' });
+  const drawParts = () => {
+    const cur = { ...BONE_PART_COLORS, ...(s.get('bonePartColors') || {}) };
+    partGrid.replaceChildren(...BONE_PARTS.map(([k, label]) => colorField(label, () => cur[k], (v) => { cur[k] = v; app.setSetting('bonePartColors', { ...cur }); }, 'set-part-' + k)));
+    partGrid.style.display = s.get('boneColorByPart') ? '' : 'none';
+  };
+  drawParts();
+  const bones = sec('bones', 'Bones',
+    colorKey('boneColor', 'Bone dots'),
+    colorKey('boneSelColor', 'Selected bone'),
+    colorKey('boneChainColor', 'IK chain (bones that follow a drag)'),
+    colorKey('boneMultiColor', 'Extra selected bones (Shift+click)'),
+    colorKey('boneLineColor', 'Lines between bones'),
+    toggle('boneColorByPart', 'Color the dots by body part', () => drawParts()),
+    partGrid,
+    h('div', { class: 'btns' }, h('button', { class: 'btn sm ghost', onclick: () => {
+      for (const k of ['boneColor', 'boneSelColor', 'boneChainColor', 'boneMultiColor', 'boneLineColor']) app.setSetting(k, DEFAULTS[k]);
+      app.setSetting('bonePartColors', null);
+      for (const k of ['boneColor', 'boneSelColor', 'boneChainColor', 'boneMultiColor', 'boneLineColor']) { const el = bones.querySelector('#set-' + k); if (el) el.value = DEFAULTS[k]; }
+      drawParts();
+    } }, icon('reset'), 'Reset colors')),
+    h('div', { class: 'hint' }, 'With body parts on, the hand dots, face dots (lips, eyes, jaw) and the rest each get their own color, so they are easy to find and click.'));
 
   const anim = sec('animation', 'Animation',
     select('fps', 'Frame rate', [12, 24, 25, 30, 48, 60].map((f) => [f, f + ' fps']), Number),
@@ -100,8 +136,10 @@ export function openSettings(app, ui, section) {
   const shortcuts = sec('about', 'Keyboard shortcuts', h('div', { class: 'shortcuts' }, ...SHORTCUTS.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)])),
     h('div', { class: 'hint', style: { marginTop: '12px' } }, 'WebBlend Animator runs entirely in your browser. Files you open never leave your computer.'));
 
-  const body = h('div', {}, perf, view, anim, ai, shortcuts);
-  const m = modal('Settings', body, { width: 620 });
+  const body = h('div', {}, perf, view, bones, anim, ai, shortcuts);
+  // 8 8 8 8 X (with or without Ctrl) while this is open: the console
+  const unwatch = watchUnlock(() => { m.close(); ui.openConsole?.(); });
+  const m = modal('Settings', body, { width: 620, onClose: () => unwatch() });
   if (section) setTimeout(() => body.querySelector('#set-' + section)?.scrollIntoView({ block: 'start' }), 50);
   return m;
 }

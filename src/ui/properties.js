@@ -7,6 +7,7 @@ import { propOf, heldProps, bakeHoldClip, attachProp } from '../anim/props-anim.
 import { bakeVFX, removeVFX } from '../anim/vfx.js';
 import { softLips } from '../anim/softlips.js';
 import { openIndentEditor } from './indent.js';
+import { openAdvanced } from './advanced.js';
 
 const R2D = THREE.MathUtils.RAD2DEG, D2R = THREE.MathUtils.DEG2RAD;
 
@@ -149,6 +150,19 @@ export function initProperties(app, ui) {
     return h('div', { class: 'prow' }, lab, h('div', { class: 'xyz' }, fields), keyButton(obj, prop));
   };
 
+  // one number that scales all three axes together, keeping their proportions
+  const uniformRow = (obj) => {
+    const read = () => (obj.scale.x + obj.scale.y + obj.scale.z) / 3;
+    const write = (v) => {
+      const cur = read();
+      if (Math.abs(cur) > 1e-9) obj.scale.multiplyScalar(v / cur); else obj.scale.setScalar(v);
+      app.afterEdit();
+    };
+    const f = numField('All', read, write, { step: 0.005, precision: 3, onCommit: committer(obj, 'scale', 'Uniform scale') });
+    updaters.push(f.update);
+    return h('div', { class: 'prow' }, h('span', { class: 'plabel', title: 'Scale all axes equally' }, 'Uniform'), h('div', { class: 'xyz one' }, f), h('span'));
+  };
+
   const sliderRow = (label, obj, prop, min, max, step = 0.01) => {
     const desc = propDesc(prop);
     const range = h('input', { type: 'range', min, max, step, 'aria-label': label });
@@ -225,6 +239,17 @@ export function initProperties(app, ui) {
     root.append(h('div', { class: 'sec' },
       h('div', { class: 'sel-head' }, icon(obj.isBone ? 'bone' : obj === model.root && model.humanoid ? 'person' : obj.isLight ? 'light' : obj.isCamera ? 'camera' : 'mesh'), nameInput),
       h('div', { class: 'sub' }, `${typeLabel}${obj !== model.root ? ' in ' + model.name : ''}`)));
+    // several bones selected: what dragging does, and quick spread buttons
+    const extra = app.selection.extra || [];
+    if (obj.isBone && extra.length) {
+      root.append(h('div', { class: 'sec' },
+        h('div', { class: 'multi-note' }, icon('bone'), h('b', {}, `${extra.length + 1} bones selected`), h('span', {}, '· the gizmo moves, turns or scales them together; hold Ctrl while moving to spread them apart (drag back to close)')),
+        h('div', { class: 'btns', style: { marginTop: '6px' } },
+          h('button', { class: 'btn sm', onclick: () => app.spreadSelected(0.15) }, icon('plus'), 'Spread'),
+          h('button', { class: 'btn sm', onclick: () => app.spreadSelected(-0.15) }, icon('minus'), 'Together'),
+          h('button', { class: 'btn sm amber', onclick: () => app.keySelection() }, icon('key'), 'Key all'),
+          h('button', { class: 'btn sm ghost', onclick: () => app.select(obj, model) }, 'Only this bone'))));
+    }
 
     // an effect made by the AI (trail, particles...): recolor, retime or remove it
     if (obj.userData.fx === 'vfx') { root.append(effectSection(obj, model)); return; }
@@ -233,7 +258,8 @@ export function initProperties(app, ui) {
     const t = sec('Transform',
       vecRow('Position', obj, 'position', { step: Math.max(model.size, 0.01) * 0.004 }),
       vecRow('Rotation', obj, 'quaternion', { step: 0.5, precision: 1 }),
-      vecRow('Scale', obj, 'scale', { step: 0.005 }));
+      vecRow('Scale', obj, 'scale', { step: 0.005 }),
+      uniformRow(obj));
     const tb = h('div', { class: 'btns' },
       h('button', { class: 'btn sm amber', onclick: () => app.keySelection() }, icon('key'), 'Key all (K)'),
       h('button', { class: 'btn sm', onclick: () => { const r = model.rest.get(obj); if (!r) return; const before = { p: obj.position.clone(), q: obj.quaternion.clone(), s: obj.scale.clone() }; obj.position.copy(r.p); obj.quaternion.copy(r.q); obj.scale.copy(r.s); const after = { p: r.p.clone(), q: r.q.clone(), s: r.s.clone() }; app.history.push({ label: 'Reset transform', undo: () => { obj.position.copy(before.p); obj.quaternion.copy(before.q); obj.scale.copy(before.s); app.afterEdit(); }, redo: () => { obj.position.copy(after.p); obj.quaternion.copy(after.q); obj.scale.copy(after.s); app.afterEdit(); } }); app.afterEdit(); } }, icon('reset'), 'Reset'));
@@ -306,7 +332,8 @@ export function initProperties(app, ui) {
         h('div', { class: 'field' }, h('label', {}, 'Dent'), h('label', { class: 'toggle' }, on)),
         h('div', { class: 'field' }, h('label', { title: 'Where a press goes past what the flesh can take, the arm or leg stops there instead of going through (the keys stay as they are)' }, 'Solid body'), h('label', { class: 'toggle' }, solid)),
         h('div', { class: 'field' }, h('label', { title: 'How far the flesh gives way where body parts press together' }, 'Softness'), range, val),
-        h('div', { class: 'hint' }, 'Where body parts press together (an arm against the side, a hand on the cheek, fingers pinching, thighs) the skin dents and bulges instead of clipping, up to how much flesh there is over the bone. Live, like a soft body.')));
+        h('div', { class: 'hint' }, 'Where body parts press together (an arm against the side, a hand on the cheek, fingers pinching, thighs) the skin dents and bulges instead of clipping, up to how much flesh there is over the bone. Live, like a soft body.'),
+        h('div', { class: 'btns' }, h('button', { class: 'btn sm', title: 'Which bones are the lips, more mouths, where the soft skin is off, every soft-skin number', onclick: () => openAdvanced(app, model) }, icon('gear'), 'Advanced…'))));
     }
     const holders = app.models.filter((m) => m !== model && m.humanoid);
     if (obj === model.root && !model.humanoid && !obj.isLight && !obj.isCamera && model.meshes.length && holders.length) {

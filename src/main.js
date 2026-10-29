@@ -17,10 +17,15 @@ import { QUALITY_LEVELS, QUALITY_PRESETS } from './core/settings.js';
 import { store, isTextInput, fmtBytes } from './core/util.js';
 import { bakeHumanoid } from './anim/motions.js';
 import { openIndentEditor } from './ui/indent.js';
+import { playIntro, shouldPlayIntro } from './ui/intro.js';
+import { openConsole, runTool, consoleAPI, keyMatches } from './ui/console.js';
+import { Settings } from './core/settings.js';
 
 function boot() {
   const appEl = document.getElementById('app');
   const ui = {};
+  // the 2D start-up animation plays over the app while it loads
+  try { if (shouldPlayIntro(new Settings())) playIntro(); } catch (e) { console.warn('intro', e); }
   let app;
   try {
     app = new App({ viewport: document.getElementById('viewport') });
@@ -147,6 +152,9 @@ function boot() {
   ui.confirmClear = async () => { if (await confirmDialog('Clear scene', 'Remove every model and animation from the scene? This can\'t be undone.', 'Clear', true)) app.clearScene(); };
   ui.shortcuts = () => modal('Keyboard shortcuts', h('div', { class: 'sec' }, h('div', { class: 'shortcuts' }, ...SHORTCUTS.flatMap(([k, d]) => [h('kbd', {}, k), h('span', {}, d)]))), { width: 560 });
   ui.openSettings = (section) => openSettings(app, ui, section);
+  // the hidden console (8 8 8 8 X in Settings) and the tools made with it
+  ui.openConsole = () => openConsole(app, ui);
+  app.runTool = (t) => runTool(app, t, consoleAPI(app, ui, (txt) => app.toast(txt, 'ok', 3000)));
   ui.recordDialog = () => {
     const secs = h('input', { class: 'inp', type: 'number', min: 0.5, max: 120, step: 0.5, value: +app.duration().toFixed(2), style: { maxWidth: '90px' } });
     const bar = h('div', { class: 'progress' }, h('div'));
@@ -297,6 +305,8 @@ function boot() {
     const kl = k.toLowerCase();
     const tlFocused = ui.timelineFocused?.();
     const handled = () => { e.preventDefault(); e.stopPropagation(); };
+    // shortcuts of tools added from the console
+    if (app.sessionTools && app.sessionTools.length) { const t = app.sessionTools.find((x) => keyMatches(x.key, e)); if (t) { handled(); app.runTool(t); return; } }
     if (mod && kl === 'z' && !e.shiftKey) { handled(); app.history.undo(); return; }
     if ((mod && kl === 'z' && e.shiftKey) || (mod && kl === 'y')) { handled(); app.history.redo(); return; }
     if (mod && kl === 'o') { handled(); openFiles(app); return; }
@@ -328,7 +338,7 @@ function boot() {
       case 'k': case 'i': handled(); if (e.shiftKey) app.keyPose(); else app.keySelection(); return;
       case 'w': handled(); app.setGizmoMode('translate'); return;
       case 'e': handled(); app.setGizmoMode('rotate'); return;
-      case 'r': handled(); app.setGizmoMode('scale'); return;
+      case 'r': handled(); if (e.shiftKey) app.setUniformScale(!app.settings.get('uniformScale')); app.setGizmoMode('scale'); return;
       case 'q': handled(); app.setGizmoSpace(app.gizmoSpace === 'local' ? 'world' : 'local'); return;
       case 'f': handled(); if (e.shiftKey || !app.selection.object) app.viewport.frameAll(); else app.viewport.frameObject(app.selection.object); return;
       case 'p': handled(); app.selectParent(); return;

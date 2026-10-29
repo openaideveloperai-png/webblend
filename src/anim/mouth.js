@@ -73,23 +73,56 @@ export const EMPTY = new THREE.AnimationClip('rest', 1, []);
 // -> probe { head, axes (head-local up / forward / left), upper, lower, tongue: [{mesh, i}],
 //            restGap, lipFront, mouthUp, halfWidth, tongueThick } or null
 export function mouthProbe(model) {
-  if (model._mouthProbe !== undefined && model._mouthProbeN === model.nodeCount) return model._mouthProbe;
+  const ver = model.lipsVersion || 0;
+  if (model._mouthProbe !== undefined && model._mouthProbeN === model.nodeCount && model._mouthProbeV === ver) return model._mouthProbe;
   model._mouthProbeN = model.nodeCount;
+  model._mouthProbeV = ver;
   model._mouthProbe = null;
   const rig = model.humanoid;
   const head = rig && rig.map.head;
   if (!head || !(model.skinned || []).length) return null;
+  // the user's own lip bones (Advanced → Lips) win over names and shape keys
+  const own = bonesByName(model, model.lipBones);
+  model._mouthProbe = probeAt(model, head, own && own.length ? new Set(own) : null);
+  return model._mouthProbe;
+}
+
+// another mouth, made of the bones the user picked (Advanced → More mouths): measured the
+// same way, around the bones' common parent
+export function mouthProbeFor(model, names) {
+  const bones = bonesByName(model, names);
+  if (!bones || !bones.length || !(model.skinned || []).length) return null;
+  let anchor = bones[0].parent && bones[0].parent.isBone ? bones[0].parent : bones[0];
+  for (const b of bones) while (anchor && !isUnder(b, anchor)) anchor = anchor.parent;
+  if (!anchor) return null;
+  return probeAt(model, anchor, new Set(bones));
+}
+function isUnder(b, a) { for (let p = b; p; p = p.parent) if (p === a) return true; return false; }
+function bonesByName(model, names) {
+  if (!Array.isArray(names) || !names.length) return null;
+  const by = new Map();
+  for (const b of model.bones) if (!by.has(b.name)) by.set(b.name, b);
+  return names.map((n) => by.get(n)).filter(Boolean);
+}
+
+function probeAt(model, head, own) {
+  const rig = model.humanoid;
   const headSet = new Set();
   head.traverse((o) => { if (o.isBone) headSet.add(o); });
   const ev = evaluator(model);
   let probe = null;
   try {
     ev.at(EMPTY, 0);
-    const hr = rig.rest.get(head);
-    const inv = hr.Wq.clone().invert();
+    let hq = rig.rest.get(head) && rig.rest.get(head).Wq;
+    if (!hq) {
+      // a bone the rig didn't record: its rest turn relative to the model
+      const rq = new THREE.Quaternion(); model.root.getWorldQuaternion(rq);
+      hq = rq.invert().multiply(head.getWorldQuaternion(new THREE.Quaternion()));
+    }
+    const inv = hq.clone().invert();
     const axes = { up: rig.up.clone().applyQuaternion(inv), fwd: rig.fwd.clone().applyQuaternion(inv), lat: rig.lat.clone().applyQuaternion(inv) };
     const frame = headFrame(head, axes);
-    const cand = { upper: [], lower: [], tongue: [], face: [] };
+    const cand = { upper: [], lower: [], tongue: [], face: [], own: [] };
     const v = V();
     for (const s of model.skinned) {
       let vis = true;
@@ -97,17 +130,14 @@ export function mouthProbe(model) {
       if (!vis || !s.skeleton) continue;
       const si = s.geometry.attributes.skinIndex, sw = s.geometry.attributes.skinWeight;
       if (!si || !sw) continue;
-      const mats = [].concat(s.material);
-      const groups = s.geometry.groups || [];
-      const matOf = (i) => { if (!groups.length) return mats[0]; const g = groups.find((gg) => i >= gg.start && i < gg.start + gg.count); return g ? mats[g.materialIndex] : mats[0]; };
-      void matOf;
       for (let i = 0; i < si.count; i++) {
         let bi = 0, bw = -1;
         for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w > bw) { bw = w; bi = si.getComponent(i, k); } }
         const b = s.skeleton.bones[bi];
         if (!headSet.has(b)) continue;
         const n = nameOf(b);
-        const e = { mesh: s, i };
+        const e = { mesh: s, i, b };
+        if (own) { if (own.has(b)) cand.own.push(e); else if (TONGUE.test(n)) cand.tongue.push(e); else if (!NOT_FACE.test(n)) cand.face.push(e); continue; }
         if (TONGUE.test(n)) cand.tongue.push(e);
         else if (LIP.test(n) && LOWER.test(n)) cand.lower.push(e);
         else if (LIP.test(n) && UPPER.test(n)) cand.upper.push(e);
@@ -115,9 +145,11 @@ export function mouthProbe(model) {
       }
     }
     const P = (e) => frame.local(e, v).clone();
-    // lips from lip bones; else from the mouth-open shape key
     let upper = cand.upper, lower = cand.lower;
-    if (upper.length < 3 || lower.length < 3) ({ upper, lower } = lipsFromMorph(model, cand.face, frame) || { upper: [], lower: [] });
+    let split = null;
+    if (own) ({ upper, lower, split } = splitLips(cand.own, P));
+    // lips from lip bones; else from the mouth-open shape key
+    else if (upper.length < 3 || lower.length < 3) ({ upper, lower } = lipsFromMorph(model, cand.face, frame) || { upper: [], lower: [] });
     if (upper.length < 3 || lower.length < 3) return null;
     const pts = (list) => list.map((e) => ({ e, p: P(e) }));
     const U = pts(upper), L = pts(lower);
@@ -134,10 +166,31 @@ export function mouthProbe(model) {
     const mouthUp = (mean(ue, 'y') + mean(le, 'y')) / 2;
     const T = pts(cand.tongue);
     const tongueThick = T.length ? Math.max(0.004, (Math.max(...T.map((x) => x.p.y)) - Math.min(...T.map((x) => x.p.y))) * 0.55) : 0;
-    probe = { head, axes, upper: ue.map((x) => x.e), lower: le.map((x) => x.e), tongue: T.map((x) => x.e), restGap, lipFront, mouthUp, latC, halfWidth, tongueThick, restTongueFront: T.length ? Math.max(...T.map((x) => x.p.z)) : null };
+    probe = { head, axes, upper: ue.map((x) => x.e), lower: le.map((x) => x.e), tongue: T.map((x) => x.e), restGap, lipFront, mouthUp, latC, halfWidth, tongueThick, restTongueFront: T.length ? Math.max(...T.map((x) => x.p.z)) : null, own: !!own, split };
   } catch (e) { console.warn('mouth probe', e); probe = null; } finally { ev.done(); }
-  model._mouthProbe = probe;
   return probe;
+}
+
+// the user's lip bones -> upper / lower lip vertices: bones above the middle are the upper
+// lip, below the lower (one bone for both lips: split its vertices at the middle)
+function splitLips(list, P) {
+  const by = new Map();
+  for (const e of list) { const y = P(e).y; e.y = y; if (!by.has(e.b)) by.set(e.b, []); by.get(e.b).push(e); }
+  const means = [...by].map(([b, l]) => [b, l.reduce((a, e) => a + e.y, 0) / l.length]);
+  const upper = [], lower = [];
+  if (means.length >= 2) {
+    const ys = means.map((m) => m[1]);
+    const mid = (Math.max(...ys) + Math.min(...ys)) / 2;
+    if (Math.max(...ys) - Math.min(...ys) > 1e-5) {
+      const lowerIds = new Set(), upperIds = new Set();
+      for (const [b, y] of means) { (y >= mid ? upper : lower).push(...by.get(b)); (y >= mid ? upperIds : lowerIds).add(b.uuid); }
+      return { upper, lower, split: { lowerIds, upperIds } };
+    }
+  }
+  const ys = list.map((e) => e.y).sort((a, b) => a - b);
+  const mid = ys[Math.floor(ys.length / 2)];
+  for (const e of list) (e.y >= mid ? upper : lower).push(e);
+  return { upper, lower, split: { y: mid } };
 }
 
 // head-relative coordinates in world units: x = character's left, y = up, z = forward

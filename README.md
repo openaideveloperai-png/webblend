@@ -25,6 +25,12 @@ Nothing is uploaded anywhere: files you open stay on your computer.
 - **Exports**: a `.glb` of the whole scene (reopen it later to keep editing), **FBX or GLB for other apps** with presets for Roblox Studio, Unity, Unreal, Blender and Godot (see below), animation clips as JSON, PNG screenshots, and WebM video of the animation.
 - **Undo/redo** for edits, keys and poses.
 - **Handy extras**: View → Turntable slowly orbits the camera to show a model off, View → Hide effects, and the export dialog opens on the platform you used last.
+- **Uniform scale**: the **Uniform** button next to Move / Rotate / Scale (or **Shift+R**) makes every scale handle scale equally on all sides, and Properties → Transform has a **Uniform** box that scales all three axes at once, keeping their proportions.
+- **Select many bones at once**: Shift+click bone dots to add them to the selection (or take them out; the last one clicked is the active bone), or use the **Tools** menu: all the lip bones, the face bones, the fingers of either hand, every bone of a body part, the bones of the same body part as the selected one, a bone and everything under it, and the other side's bones (left ↔ right). The gizmo then sits at their middle: moving, turning or scaling moves them all together, and **holding Ctrl while moving spreads them apart** along the drag (select the lips, hold Ctrl and drag up: the upper lip goes up and the lower lip down, the mouth opens; drag back to close it; sideways widens it). Properties shows how many are selected with **Spread** / **Together** buttons (for touch screens), and **K** keys them all. One undo step each.
+- **Advanced character settings** (a character's properties → Soft skin → **Advanced…**, or Tools → Advanced character settings): choose **which bones are the lips** (select them, then "Use the selected bones as the lips"; the soft lips and Tools → Select lip bones then use them, and "Find automatically" goes back), **add more mouths** for a character with more than one (select another mouth's lip bones and add it: each mouth gets its own soft lips, and the soft skin leaves each mouth alone), **switch the soft skin off where you don't want it** (on the selected bones, or a whole body part such as the head or the hands; that skin stays rigid and other parts dent against it) and back on, and set **every soft-skin number**: softness, how long pressed skin takes to spring back, how fast the crater settles, crater width, how deep a dent can go, how far the solid body may turn an arm back, how much skin around each mouth is left to the soft lips, and whether the anatomy map is used (off = the same flesh everywhere). It's kept with the scene and copied with a duplicated character.
+- **Console (hidden)**: open Settings and type **8 8 8 8 X** (holding Ctrl or not) to open a JavaScript console for this session. It has the whole app at hand (`app`, `THREE`, the selection) and helpers to make your own tools: `addTool(name, fn, { key })` adds a menu item to Tools with its own shortcut, `panel(title)` opens a small window of your own, `every(fn)` runs something every frame, `on(event, fn)` reacts to the app, `css(…)` restyles the interface, `select(/regex/)` picks bones by name; `help()` lists it all and the Examples menu has starting points. Nothing is saved: a reload starts clean.
+- **Bone colors**: Settings → Bones sets the color of the bone dots, the selected bone, the IK chain, extra selected bones and the lines between bones, or colors the dots by body part (head, face, hair, torso, arms, hands, legs, feet, extras such as tails and skirts) with a color for each part.
+- **Intro**: a short 2D start-up animation (a sniper on a rooftop, the shot through the scope, and the impact opening into the "WebBlend XV" title). Click or press a key to skip it; switch it off or replay it in Settings → Viewport.
 
 ## Supported files
 
@@ -177,6 +183,9 @@ The FBX is binary FBX 7.4 with meshes, normals, UVs, material slots, embedded te
 | Space | Play / pause |
 | K · Shift+K · Alt+K | Key selection · key whole pose · delete keys at this frame |
 | W / E / R · Q | Move / rotate / scale · local/world axes |
+| Shift+R | Uniform scale on / off (scale equally on all sides) |
+| Shift+click | Add a bone to the selection (or take it out) |
+| Ctrl while moving | Several bones selected: spread them apart along the drag (lips open) |
 | F · Shift+F | Frame selected · frame everything |
 | ← / → · ↑ / ↓ | Previous/next frame · next/previous keyframe |
 | Ctrl+Z · Ctrl+Shift+Z | Undo · redo |
@@ -222,6 +231,8 @@ node tools/e2e-ai.cjs                                                # Claude in
 node tools/e2e-export.cjs ./out [python-with-bpy]                    # FBX export read back by three.js and, if given, Blender
 node tools/e2e-archives.cjs ./out                                    # .jar scan (hidden folders, nested jars), Minecraft / GeckoLib / Blockbench models
 node tools/e2e-qol.cjs                                               # effect editor, hide effects, turntable, export platform, file poses
+node tools/e2e-tools.cjs                                             # intro, bone colors by body part, uniform scale, multi-select bones, console, Advanced dialog
+node tools/test-advanced.mjs                                         # your own lip bones, more mouths, soft skin off per bone, soft-skin numbers, bone groups
 node tools/e2e-softlips.cjs                                          # soft lips on the GPU (offset after skinning)
 node tools/e2e-ui.cjs test-assets/assets ./out                       # timeline, properties, recording…
 node tools/test-mmd.mjs test-assets/mmd/goat/goatchan.blend test-assets/mmd/goat_truth.json  # constraints + IK vs Blender
