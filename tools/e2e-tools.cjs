@@ -270,6 +270,13 @@ const url = 'file://' + path.resolve(__dirname, '../index.html');
   const lipsMenu = await page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); const r = { lips: (m.lipBones || []).length, mouths: (m.extraMouths || []).length }; delete m.lipBones; m.extraMouths = []; return r; });
   ok('Tools → make the selected bones the lips, and add another mouth', lipsMenu.lips === 2 && lipsMenu.mouths === 1, JSON.stringify(lipsMenu));
 
+  // ---------------------------------------------------------------- lips react to an object
+  await page.evaluate(() => { const a = window.webblend; const cube = a.addPrimitive('cube'); a.select(cube.root, cube); });
+  await page.click('.menu-btn:has-text("Tools")');
+  await page.click('.dd-item:has-text("Lips react to the selected object")');
+  const marked = await page.evaluate(() => { const a = window.webblend; const r = !!a.selection.object.userData.lipCollider; const m = a.selection.model; a.removeModel(m, { undoable: false }); return r; });
+  ok('Tools → Lips react to the selected object marks it', marked);
+
   // ---------------------------------------------------------------- Del deletes body parts
   const tris = () => page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); return m.skinned.reduce((a, s) => a + (s.geometry.index ? s.geometry.index.count : s.geometry.attributes.position.count) / 3, 0); });
   const t0 = await tris();

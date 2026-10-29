@@ -211,6 +211,23 @@ function turnedMouth({ w = 0.5 } = {}) {
   }
 }
 
+// ---- an object you mark makes the lips wrap around it (a cigarette in the model itself)
+{
+  const { model, mid, A, B, C } = turnedMouth();
+  model.lipBones = [mid, ...A, ...B].map((b) => b.name);
+  resetLips(model);
+  const s = softLips(model);
+  const cig = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.07, 8).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial());
+  cig.name = 'Cigarette';
+  cig.position.copy(C).add(new THREE.Vector3(0, 0, 0.03));
+  model.root.add(cig);
+  model.root.updateMatrixWorld(true);
+  ok('an object in the model that isn\'t marked: the lips ignore it', s && !s.update({ write: false }).active);
+  cig.userData.lipCollider = true;
+  const st = s ? s.update({ write: false }) : {};
+  ok('marked (Tools → Lips react to the selected object): the lips wrap around it', st.active && st.leftCm === 0 && st.pushCm > 0.1, JSON.stringify(st));
+}
+
 // ---- a second mouth (on the chest)
 function twoMouths() {
   const t = mouthy();

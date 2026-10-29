@@ -381,6 +381,8 @@ class SoftLips {
     const props = [];
     this.model.root.traverse((o) => {
       if (!o.isMesh || o.isSkinnedMesh || !o.visible || o.userData.editorOnly || o.userData.helper) return;
+      // objects you marked (Tools → Lips react to this object), and anything held in a hand
+      for (let p = o; p; p = p.parent) if (p.userData.lipCollider) { props.push(o); return; }
       for (let p = o.parent; p; p = p.parent) if (heldBy.has(p)) { props.push(o); return; }
     });
     if (app && app.models) for (const m of app.models) {

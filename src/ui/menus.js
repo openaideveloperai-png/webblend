@@ -217,6 +217,17 @@ export function toolsMenu(app, ui) {
       app.toast(ok ? `Mouth ${n} added (${sel.length} bones): it has its own soft lips, and the soft skin leaves it alone. Manage mouths in Tools → Advanced character settings.` : `Mouth ${n} added, but its bones don't move an upper and a lower lip soft lips can use. Manage mouths in Tools → Advanced character settings.`, ok ? 'ok' : 'warn', 5000);
       app.needsEval = true; app.viewport.requestRender();
     } },
+    (() => {
+      const o = app.selection.object;
+      const ok = o && !o.isBone && !o.isSkinnedMesh && m && (o !== m.root || !m.humanoid);
+      const on = ok && !!o.userData.lipCollider;
+      return { label: (on ? '✓ ' : '') + 'Lips react to the selected object', icon: 'mesh', disabled: !ok, action: () => {
+        o.userData.lipCollider = !on;
+        for (const x of app.models) { if (x._soft) x._soft.sig = null; for (const y of x._softX || []) y.sig = null; }
+        app.toast(on ? `The lips no longer react to "${o.name || 'the object'}"` : `The lips now wrap around "${o.name || 'the object'}" where it touches them (it\'s kept with the scene)`, 'ok', 3500);
+        app.needsEval = true; app.viewport.requestRender();
+      } };
+    })(),
     { label: 'Find the lips automatically again', icon: 'reset', disabled: !m || !(m.lipBones && m.lipBones.length), action: () => { delete m.lipBones; resetLips(m); app.toast('Lip bones are found automatically again', 'ok'); app.needsEval = true; app.viewport.requestRender(); } },
     { label: 'Advanced character settings… (lips, mouths, soft skin)', icon: 'gear', disabled: !m || !m.humanoid, action: () => openAdvanced(app, m) },
   ];
