@@ -326,7 +326,13 @@ function boot() {
       case 'Escape': app.select(null); return;
       case 'Delete': case 'Backspace':
         if (tlFocused && ui.hasKeySelection()) return;
-        if (app.selection.model) { handled(); if (app.selection.object === app.selection.model.root) app.removeModel(app.selection.model); else app.deleteKeysAt(); }
+        if (app.selection.model) {
+          handled();
+          const o = app.selection.object;
+          if (o === app.selection.model.root) app.removeModel(app.selection.model);
+          else if (o && o.isBone) app.deleteBoneParts(app.selectedBones());
+          else if (o) app.deletePart(o);
+        }
         return;
       case '?': handled(); ui.shortcuts(); return;
       case '`': handled(); app.viewport.fly.toggle(); return;

@@ -18,7 +18,8 @@ import { Importer, unsupportedMessage } from '../io/importer.js';
 import { optimizeTextures } from '../io/textures.js';
 import { makePrimitive, makeLight, makeCamera, makeEmpty, makeMannequin, PRIMITIVES } from '../scene/primitives.js';
 import { onDecorationReady } from '../scene/patterns.js';
-import { updateSoftLips } from '../anim/softlips.js';
+import { updateSoftLips, resetLips } from '../anim/softlips.js';
+import { cutBoneParts } from '../anim/cut.js';
 import { faceLandmarks } from '../anim/landmarks.js';
 import { updateSoftSkin, solidBody, unsolidBody, limitDrag } from '../anim/softskin.js';
 
@@ -656,6 +657,41 @@ export class App extends Emitter {
       for (const o of objs) for (const p of props || this.defaultKeyProps(o)) setKey(clip, model.root, o, p, t, propDesc(p).get(o), this.keyEps());
     }, 'Insert key');
     this.toast(`Keyed ${objs.length > 1 ? objs.length + ' bones' : object.name || 'object'} at frame ${Math.round(t * this.settings.get('fps'))}`, 'ok', 1200);
+  }
+
+  // Del on a bone: cut the body part it moves (and everything under it) out of the skin;
+  // Del on a mesh piece: delete that piece. Both undo.
+  deleteBoneParts(bones) {
+    const model = this.selection.model || this.modelOf(bones[0]);
+    if (!model || !bones.length) return false;
+    const cut = cutBoneParts(model, bones);
+    if (!cut) { this.toast('No skin follows that bone, so there\'s nothing to delete there', 'warn'); return false; }
+    const refresh = () => { resetLips(model); model.nodeCount++; if (model._skin) model._skin.clear(); model._skin = undefined; this.needsEval = true; this.viewport.requestRender(); this.emit('models'); };
+    refresh();
+    const name = bones.length > 1 ? `${bones.length} bones' parts` : `"${bones[0].name}" and what's under it`;
+    this.history.push({ label: 'Delete body part', undo: () => { cut.undo(); refresh(); }, redo: () => { cut.redo(); refresh(); } });
+    this.toast(`Deleted ${name} (${cut.removed.toLocaleString()} triangles) · Ctrl+Z brings it back`, 'ok', 3500);
+    return true;
+  }
+
+  deletePart(obj) {
+    const model = this.modelOf(obj);
+    if (!model || !obj || obj === model.root || obj.isBone || !obj.parent) return false;
+    let bones = false;
+    obj.traverse((o) => { if (o.isBone) bones = true; });
+    if (bones) { this.toast('That part holds the skeleton; select a bone and press Del to delete a body part instead', 'warn', 4000); return false; }
+    const parent = obj.parent, index = parent.children.indexOf(obj);
+    const remove = () => { parent.remove(obj); model.refreshParts(); resetLips(model); this.select(model.root, model); this.emit('models'); this.viewport.requestRender(); };
+    const restore = () => {
+      parent.add(obj);
+      parent.children.splice(parent.children.indexOf(obj), 1);
+      parent.children.splice(Math.min(index, parent.children.length), 0, obj);
+      model.refreshParts(); resetLips(model); this.select(obj, model); this.emit('models'); this.viewport.requestRender();
+    };
+    remove();
+    this.history.push({ label: 'Delete part', undo: restore, redo: remove });
+    this.toast(`Deleted "${obj.name || 'part'}" · Ctrl+Z brings it back`, 'ok', 3000);
+    return true;
   }
 
   // change several bones in one undo step (and key them with auto-key on)

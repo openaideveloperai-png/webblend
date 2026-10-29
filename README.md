@@ -190,7 +190,7 @@ The FBX is binary FBX 7.4 with meshes, normals, UVs, material slots, embedded te
 | ← / → · ↑ / ↓ | Previous/next frame · next/previous keyframe |
 | Ctrl+Z · Ctrl+Shift+Z | Undo · redo |
 | Ctrl+C / Ctrl+V | Copy/paste pose (keys, when the timeline has focus) |
-| Ctrl+D · Del | Duplicate model · delete keys or model |
+| Ctrl+D · Del | Duplicate model · delete keys, the model, a mesh piece, or the body part a selected bone moves (Ctrl+Z undoes) |
 | 1 / 3 / 7 / 5 · 0 | Front / right / top / perspective · look through camera |
 | ` | Fly mode: W A S D move, E / Q up / down, right-drag look, Shift faster, mouse wheel sets speed, Esc exits |
 | P · H · Esc | Select parent · hide model · deselect |

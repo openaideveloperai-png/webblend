@@ -187,6 +187,22 @@ export class Model {
     this.height = s.y;
   }
 
+  // after a part is deleted or put back: the mesh lists and size (bones stay as they are)
+  refreshParts() {
+    this.skinned = [];
+    this.meshes = [];
+    this.morphMeshes = [];
+    this.root.traverse((o) => {
+      if (o.userData.editorOnly) return;
+      if (o.isSkinnedMesh) this.skinned.push(o);
+      if (o.isMesh || o.isPoints || o.isLine) this.meshes.push(o);
+      if (o.morphTargetInfluences && o.morphTargetInfluences.length) this.morphMeshes.push(o);
+    });
+    this.nodeCount = 0;
+    this.root.traverse(() => { this.nodeCount++; });
+    this.computeSize();
+  }
+
   buildJoints() {
     if (this.joints) { this.joints.parent?.remove(this.joints); this.joints.dispose(); this.joints = null; }
     if (!this.bones.length) return;

@@ -20,7 +20,7 @@ export const SHORTCUTS = [
   ['W / E / R', 'Move / rotate / scale'], ['Shift+R', 'Uniform scale on / off (scale equally on all sides)'], ['Shift+click', 'Add a bone to the selection (or take it out)'], ['Ctrl while moving', 'Several bones selected: spread them apart along the drag (lips open)'], ['Q', 'Local / world axes'], ['F', 'Frame selected'], ['Shift+F', 'Frame everything'],
   ['← / →', 'Previous / next frame'], ['↑ / ↓', 'Next / previous keyframe'], ['Shift+← / →', 'Start / end'],
   ['Ctrl+Z / Ctrl+Shift+Z', 'Undo / redo'], ['Ctrl+C / Ctrl+V', 'Copy / paste pose (keys when timeline focused)'], ['Ctrl+D', 'Duplicate model'],
-  ['Del', 'Delete selected keys, or the selected model'], ['P', 'Select parent'], ['H', 'Hide / show model'], ['Esc', 'Deselect'],
+  ['Del', 'Delete selected keys, the selected model, a selected mesh piece, or the body part a selected bone moves (Ctrl+Z undoes)'], ['P', 'Select parent'], ['H', 'Hide / show model'], ['Esc', 'Deselect'],
   ['`', 'Fly mode: WASD move, E/Q up/down, right-drag look, Shift faster, wheel speed, Esc exits'],
   ['Ctrl+Shift+4', 'Indent settings for the selected bone (how its skin dents)'],
   ['1 / 3 / 7 / 5', 'Front / right / top / perspective view'], ['0', 'Look through camera'], ['Ctrl+O', 'Open files'], ['Ctrl+E', 'Export GLB'],

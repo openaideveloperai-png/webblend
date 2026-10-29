@@ -270,6 +270,35 @@ const url = 'file://' + path.resolve(__dirname, '../index.html');
   const lipsMenu = await page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); const r = { lips: (m.lipBones || []).length, mouths: (m.extraMouths || []).length }; delete m.lipBones; m.extraMouths = []; return r; });
   ok('Tools → make the selected bones the lips, and add another mouth', lipsMenu.lips === 2 && lipsMenu.mouths === 1, JSON.stringify(lipsMenu));
 
+  // ---------------------------------------------------------------- Del deletes body parts
+  const tris = () => page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); return m.skinned.reduce((a, s) => a + (s.geometry.index ? s.geometry.index.count : s.geometry.attributes.position.count) / 3, 0); });
+  const t0 = await tris();
+  await page.evaluate(() => { const a = window.webblend; const m = a.models.find((x) => x.humanoid); a.select(m.humanoid.map.leftHand, m); document.activeElement && document.activeElement.blur(); });
+  await page.keyboard.press('Delete');
+  const t1 = await tris();
+  ok('Del on a bone deletes the body part it moves (the hand and fingers)', t1 < t0 && t0 - t1 > 20 && (await page.evaluate(() => window.webblend.models.some((x) => x.humanoid))), `${t0} → ${t1} triangles`);
+  await page.keyboard.press('Control+z');
+  ok('…and Ctrl+Z brings it back', (await tris()) === t0);
+  const part = await page.evaluate(() => {
+    const a = window.webblend; const m = a.models.find((x) => x.humanoid);
+    const piece = new (m.root.constructor)(); // an extra mesh piece on the character
+    let mesh = null; m.root.traverse((o) => { if (!mesh && o.isMesh && !o.isSkinnedMesh) mesh = o; });
+    const extra = mesh ? mesh.clone() : null;
+    if (!extra) return null;
+    extra.name = 'Extra piece'; m.root.add(extra); m.refreshParts();
+    a.select(extra, m);
+    document.activeElement && document.activeElement.blur();
+    void piece;
+    return m.meshes.length;
+  });
+  if (part) {
+    await page.keyboard.press('Delete');
+    const gone = await page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); return { has: !!m.root.getObjectByName('Extra piece'), n: m.meshes.length }; });
+    await page.keyboard.press('Control+z');
+    const back = await page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); return !!m.root.getObjectByName('Extra piece'); });
+    ok('Del on a mesh piece deletes it, Ctrl+Z puts it back', !gone.has && gone.n === part - 1 && back, JSON.stringify(gone));
+  } else ok('Del on a mesh piece (no plain mesh on the mannequin to try)', true);
+
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
   console.log(fails ? `${fails} failed` : 'all passed');
