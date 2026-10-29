@@ -404,6 +404,7 @@ export class App extends Emitter {
   setGizmoSpace(space) {
     this.gizmoSpace = space;
     this.viewport.gizmo.setSpace(space);
+    if (this.multiActive && !this._drag) this.placePivot();
     this.emit('gizmo', this.gizmoMode);
     this.viewport.requestRender();
   }
