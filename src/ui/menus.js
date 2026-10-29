@@ -8,6 +8,7 @@ import { ACCEPT } from '../io/importer.js';
 import { lipBones, fingerBones, partBones, partOf, childBones, mirrorBone } from '../anim/select.js';
 import { BONE_PARTS } from '../core/settings.js';
 import { openAdvanced } from './advanced.js';
+import { softLips, softLipsExtra, resetLips } from '../anim/softlips.js';
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 export const MOD = isMac ? '⌘' : 'Ctrl+';
@@ -184,7 +185,7 @@ export function toolsMenu(app, ui) {
   const sel = app.selectedBones();
   const items = [
     { header: 'Select bones' },
-    { label: 'Lip bones (all the lips)', icon: 'bone', disabled: !m || !m.bones.length, action: () => pick(lipBones(m), 'lip bones') },
+    { label: m && m.lipBones && m.lipBones.length ? `Lip bones (yours: ${m.lipBones.length})` : 'Lip bones (all the lips)', icon: 'bone', disabled: !m || !m.bones.length, action: () => pick(lipBones(m), 'lip bones') },
     { label: 'Face bones', icon: 'bone', disabled: !m || !m.bones.length, action: () => pick(partBones(m, 'face'), 'face bones') },
     { label: 'Fingers: left hand', icon: 'bone', disabled: !m || !m.humanoid, action: () => pick(fingerBones(m, 'left'), 'finger bones') },
     { label: 'Fingers: right hand', icon: 'bone', disabled: !m || !m.humanoid, action: () => pick(fingerBones(m, 'right'), 'finger bones') },
@@ -199,6 +200,24 @@ export function toolsMenu(app, ui) {
     { label: 'Bring together (−15%)', icon: 'minus', disabled: sel.length < 2, action: () => app.spreadSelected(-0.15) },
     { label: (app.settings.get('uniformScale') ? '✓ ' : '') + 'Uniform scale', icon: 'frame', kbd: 'Shift+R', action: () => app.setUniformScale(!app.settings.get('uniformScale')) },
     { sep: true },
+    { header: 'Lips & mouths' },
+    { label: `Make the ${sel.length > 1 ? sel.length + ' ' : ''}selected bone${sel.length === 1 ? '' : 's'} the lips`, icon: 'bone', disabled: !m || !m.humanoid || !sel.length, action: () => {
+      m.lipBones = sel.map((b) => b.name);
+      resetLips(m);
+      const s = softLips(m);
+      app.toast(s ? `Lips set: ${sel.length} bone${sel.length === 1 ? '' : 's'}, ${s.N.toLocaleString()} lip vertices. Tools → Lip bones selects them now, and the soft lips use them.` : `Lip bones set (${sel.length}). They don't move an upper and a lower lip that soft lips can use, but Tools → Lip bones selects them.`, s ? 'ok' : 'warn', 4500);
+      app.needsEval = true; app.viewport.requestRender();
+    } },
+    { label: 'Add the selected bones as another mouth', icon: 'plus', disabled: !m || !m.humanoid || !sel.length, action: () => {
+      const n = (m.extraMouths || []).length + 2;
+      m.extraMouths = [...(m.extraMouths || []), { name: `Mouth ${n}`, bones: sel.map((b) => b.name) }];
+      resetLips(m);
+      const x = softLipsExtra(m);
+      const ok = x.length === m.extraMouths.length;
+      app.toast(ok ? `Mouth ${n} added (${sel.length} bones): it has its own soft lips, and the soft skin leaves it alone. Manage mouths in Tools → Advanced character settings.` : `Mouth ${n} added, but its bones don't move an upper and a lower lip soft lips can use. Manage mouths in Tools → Advanced character settings.`, ok ? 'ok' : 'warn', 5000);
+      app.needsEval = true; app.viewport.requestRender();
+    } },
+    { label: 'Find the lips automatically again', icon: 'reset', disabled: !m || !(m.lipBones && m.lipBones.length), action: () => { delete m.lipBones; resetLips(m); app.toast('Lip bones are found automatically again', 'ok'); app.needsEval = true; app.viewport.requestRender(); } },
     { label: 'Advanced character settings… (lips, mouths, soft skin)', icon: 'gear', disabled: !m || !m.humanoid, action: () => openAdvanced(app, m) },
   ];
   const own = app.sessionTools || [];

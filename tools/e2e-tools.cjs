@@ -261,6 +261,14 @@ const url = 'file://' + path.resolve(__dirname, '../index.html');
   await page.click('.menu-btn:has-text("Tools")');
   ok('Tools has Advanced character settings', await page.isVisible('.dd-item:has-text("Advanced character settings")'));
   await page.keyboard.press('Escape');
+  // Tools → make the selected bones the lips / another mouth
+  await page.evaluate(() => { const a = window.webblend; const m = a.models.find((x) => x.humanoid); a.selectBones([m.humanoid.map.neck, m.humanoid.map.head], m); });
+  await page.click('.menu-btn:has-text("Tools")');
+  await page.click('.dd-item:has-text("selected bones the lips")');
+  await page.click('.menu-btn:has-text("Tools")');
+  await page.click('.dd-item:has-text("another mouth")');
+  const lipsMenu = await page.evaluate(() => { const m = window.webblend.models.find((x) => x.humanoid); const r = { lips: (m.lipBones || []).length, mouths: (m.extraMouths || []).length }; delete m.lipBones; m.extraMouths = []; return r; });
+  ok('Tools → make the selected bones the lips, and add another mouth', lipsMenu.lips === 2 && lipsMenu.mouths === 1, JSON.stringify(lipsMenu));
 
   ok('no page errors', errors.length === 0, errors.slice(0, 3).join(' | '));
   await browser.close();
