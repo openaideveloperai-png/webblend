@@ -164,8 +164,26 @@ function probeAt(model, head, own) {
     }
     const P = (e) => frame.local(e, v).clone();
     let upper = cand.upper, lower = cand.lower;
-    let split = null;
-    if (own) ({ upper, lower, split } = splitLips(cand.own, P));
+    let split = null, lipFrame = null;
+    if (own) {
+      // the lips' own layout from their bones: across the mouth, between the lips, out
+      lipFrame = ringFrame([...own], cand.own, P, frame, axes);
+      if (lipFrame) {
+        const fm = headFrame(head, lipFrame.axes);
+        const cy = fm.point(lipFrame.center, V()).y;
+        // each lip bone is on the upper or the lower lip (or the middle one, which moves both)
+        const ys = [...own].map((b) => [b, fm.point(b.getWorldPosition(V()), V()).y - cy]);
+        const span = Math.max(1e-6, ...ys.map(([, y]) => Math.abs(y)));
+        const upperIds = new Set(), lowerIds = new Set();
+        for (const [b, y] of ys) { if (y > span * 0.15) upperIds.add(b.uuid); else if (y < -span * 0.15) lowerIds.add(b.uuid); }
+        upper = []; lower = [];
+        for (const e of cand.own) {
+          const side = upperIds.has(e.b.uuid) ? 1 : lowerIds.has(e.b.uuid) ? -1 : fm.local(e, v).y >= cy ? 1 : -1;
+          (side > 0 ? upper : lower).push(e);
+        }
+        split = { y: cy, upperIds, lowerIds, ids: new Set([...own].map((b) => b.uuid)) };
+      } else ({ upper, lower, split } = splitLips(cand.own, P));
+    }
     // lips from lip bones; else from the mouth-open shape key
     else if (upper.length < 3 || lower.length < 3) ({ upper, lower } = lipsFromMorph(model, cand.face, frame) || { upper: [], lower: [] });
     if (own) model._lipWhy = cand.own.length < 6 ? `only ${cand.own.length} vertices follow those bones (are they the bones the lips are weighted to?)` : upper.length < 3 || lower.length < 3 ? 'couldn\'t tell the upper lip from the lower one' : '';
@@ -194,7 +212,7 @@ function probeAt(model, head, own) {
     // side of the head or tilted opens and closes the same way as one across the face
     let soft = null;
     if (own) {
-      const mAxes = mouthAxes(upper, lower, P, axes);
+      const mAxes = lipFrame ? lipFrame.axes : mouthAxes(upper, lower, P, axes);
       if (mAxes) {
         const fm = headFrame(head, mAxes);
         const ms = measure((e) => fm.local(e, v).clone());
@@ -242,6 +260,73 @@ function mouthAxes(upper, lower, P, axes) {
   return { lat: toLocal(lat), up: toLocal(up), fwd: toLocal(fwd) };
 }
 
+// the lips' frame from their bones (rest pose): the ring of lip bones is longest across the
+// mouth and next longest between the two lips; out of the mouth is the third direction. The
+// bone in the middle that moves all the lips (a parent of the others, or right at the
+// middle) isn't part of the ring. Too few bones: the lip vertices' spread instead.
+function ringFrame(bones, verts, P, frame, axes) {
+  const pos = (b) => frame.point(b.getWorldPosition(V()), V());
+  let ring = bones.filter((b) => bones.filter((o) => o !== b && isUnder(o, b)).length < 2);
+  if (ring.length >= 4) {
+    const pts = ring.map(pos), c = pts.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / pts.length);
+    const rad = pts.map((p) => p.distanceTo(c)), med = [...rad].sort((a, b) => a - b)[Math.floor(rad.length / 2)];
+    ring = ring.filter((b, i) => rad[i] > med * 0.3);
+  }
+  const vpts = verts.map(P);
+  let pts = ring.length >= 3 ? ring.map(pos) : vpts;
+  if (pts.length < 3) return null;
+  const c = pts.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / pts.length);
+  const e = pca(pts.map((p) => p.clone().sub(c)));
+  if (!e) return null;
+  let [across, up] = e;
+  // two lip bones (one per lip): up is from one to the other, across the lips' long spread
+  if (ring.length === 2) {
+    const d = pos(ring[0]).sub(pos(ring[1]));
+    const vc0 = vpts.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / vpts.length);
+    const ev = pca(vpts.map((p) => p.clone().sub(vc0)));
+    if (ev && d.length() > 1e-6) {
+      across = ev[0];
+      up = d.addScaledVector(across, -d.dot(across));
+      if (up.length() < 1e-6) up = ev[1]; else up.normalize();
+    }
+  }
+  // the lips' middle: where the lip vertices are (the bones can sit off the surface)
+  const vc = verts.length ? verts.map(P).reduce((a, p) => a.add(p), V()).multiplyScalar(1 / verts.length) : c;
+  // up: toward the head's up when the mouth is at all upright
+  if (Math.abs(up.y) > 0.3 ? up.y < 0 : up.x < 0) up.negate();
+  let out = V().crossVectors(across, up).normalize();
+  const flip = Math.abs(out.z) > 0.3 ? out.z < 0 : out.dot(vc) < 0;
+  if (flip) { across.negate(); out.negate(); }
+  const toLocal = (v) => axes.lat.clone().multiplyScalar(v.x).addScaledVector(axes.up, v.y).addScaledVector(axes.fwd, v.z).normalize();
+  // the middle point in world space (for splitting the lips)
+  const centerW = frame.world ? frame.world(vc) : null;
+  return { axes: { lat: toLocal(across), up: toLocal(up), fwd: toLocal(out) }, center: centerW || worldOf(frame, vc) };
+}
+// principal directions of centred points: [largest, second] (unit vectors) or null
+function pca(d) {
+  const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (const p of d) { const a = [p.x, p.y, p.z]; for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) C[i][j] += a[i] * a[j]; }
+  const mul = (v) => V().set(C[0][0] * v.x + C[0][1] * v.y + C[0][2] * v.z, C[1][0] * v.x + C[1][1] * v.y + C[1][2] * v.z, C[2][0] * v.x + C[2][1] * v.y + C[2][2] * v.z);
+  const power = (start, skip) => {
+    let v = start.clone();
+    for (let it = 0; it < 40; it++) {
+      if (skip) v.addScaledVector(skip, -v.dot(skip));
+      const n = mul(v);
+      if (skip) n.addScaledVector(skip, -n.dot(skip));
+      if (n.length() < 1e-14) return null;
+      v = n.normalize();
+    }
+    return v;
+  };
+  const e1 = power(V().set(1, 0.3, 0.2).normalize());
+  if (!e1) return null;
+  let s2 = Math.abs(e1.y) < 0.9 ? V().set(0, 1, 0) : V().set(1, 0, 0);
+  s2.addScaledVector(e1, -s2.dot(e1)).normalize();
+  const e2 = power(s2, e1) || s2;
+  return [e1, e2];
+}
+function worldOf(frame, p) { return frame.world ? frame.world(p) : null; }
+
 // rough head-frame numbers for a mouth measured only in its own frame
 function headFallback(soft, pts) {
   const c = pts.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / pts.length);
@@ -287,6 +372,8 @@ export function headFrame(head, axes) {
     local(e, out) { e.mesh.getVertexPosition(e.i, w); w.applyMatrix4(e.mesh.matrixWorld).sub(hp); return out.set(w.dot(ax.lat), w.dot(ax.up), w.dot(ax.fwd)); },
     // a world point -> head frame
     point(p, out) { w.copy(p).sub(hp); return out.set(w.dot(ax.lat), w.dot(ax.up), w.dot(ax.fwd)); },
+    // head frame -> a world point (the axes are orthonormal)
+    world(p, out = V()) { return out.copy(hp).addScaledVector(ax.lat, p.x).addScaledVector(ax.up, p.y).addScaledVector(ax.fwd, p.z); },
   };
 }
 

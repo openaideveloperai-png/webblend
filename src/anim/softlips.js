@@ -111,7 +111,13 @@ function build(model, probe = mouthProbe(model), { layerName = 'lips', extra = f
   }
   // your own lip bones -> which lip each is (1 upper, -1 lower, 2 = split by height)
   const sp0 = probe.own && probe.split;
-  const ownIds = sp0 ? new Map(sp0.lowerIds ? [...[...sp0.upperIds].map((id) => [id, 1]), ...[...sp0.lowerIds].map((id) => [id, -1])] : [...sp0.ids].map((id) => [id, 2])) : null;
+  let ownIds = null;
+  if (sp0) {
+    ownIds = new Map();
+    for (const id of sp0.ids || []) ownIds.set(id, 2); // the middle bone: by height
+    for (const id of sp0.upperIds || []) ownIds.set(id, 1);
+    for (const id of sp0.lowerIds || []) ownIds.set(id, -1);
+  }
   const ev = evaluator(model);
   const v = new THREE.Vector3();
   try {

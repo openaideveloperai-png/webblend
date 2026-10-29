@@ -133,6 +133,84 @@ for (const [label, opts] of [['under the neck, 40% weight', { parentName: 'Neck'
   }
 }
 
+// ---- lips turned sideways: the slit runs up and down, the two lips sit left and right;
+// 6 lip bones under a middle bone that moves them all, partly weighted (like a remodeled
+// lips model put on a character on its side)
+function turnedMouth({ w = 0.5 } = {}) {
+  const t = mouthy();
+  const { model } = t;
+  const root = model.root;
+  const old = root.getObjectByName('Mouth');
+  old.parent.remove(old);
+  model.skinned = model.skinned.filter((x) => x !== old);
+  const head = root.getObjectByName('Head');
+  root.updateMatrixWorld(true);
+  const C = new THREE.Vector3(0, 1.6, 0.115);
+  // across = up the slit (world y), sep = which lip (world x), out = forward (z)
+  const W = (across, sep, out = 0) => new THREE.Vector3(C.x + sep, C.y + across, C.z + out);
+  const inv = new THREE.Matrix4().copy(head.matrixWorld).invert();
+  const mid = new THREE.Bone(); mid.name = 'mouthMover'; mid.position.copy(W(0, 0).applyMatrix4(inv)); head.add(mid);
+  root.updateMatrixWorld(true);
+  const minv = new THREE.Matrix4().copy(mid.matrixWorld).invert();
+  const bone = (name, p) => { const b = new THREE.Bone(); b.name = name; b.position.copy(p.applyMatrix4(minv)); mid.add(b); return b; };
+  const as = [-0.018, 0, 0.018];
+  const A = as.map((a, k) => bone('lipBoneA' + k, W(a, 0.003))), B = as.map((a, k) => bone('lipBoneB' + k, W(a, -0.003)));
+  root.updateMatrixWorld(true);
+  const bones = [head, mid, ...A, ...B];
+  const geos = [[0.003, A], [-0.003, B]].map(([sep, set]) => {
+    const g = new THREE.BoxGeometry(0.006, 0.05, 0.01, 3, 24, 4);
+    g.translate(C.x + sep, C.y, C.z);
+    const n = g.attributes.position.count, P = g.attributes.position;
+    const si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      const a = P.getY(i) - C.y;
+      const k = a < -0.009 ? 0 : a > 0.009 ? 2 : 1;
+      si[i * 4] = bones.indexOf(set[k]); sw[i * 4] = w;
+      si[i * 4 + 1] = 1; sw[i * 4 + 1] = (1 - w) * 0.6; // the middle bone moves all of it a little
+      si[i * 4 + 2] = 0; sw[i * 4 + 2] = (1 - w) * 0.4;
+    }
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+    return g;
+  });
+  const mesh = new THREE.SkinnedMesh(mergeGeometries(geos), new THREE.MeshStandardMaterial());
+  mesh.name = 'TurnedMouth';
+  root.add(mesh); root.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton(bones), mesh.matrixWorld);
+  model.skinned.push(mesh);
+  model.bones.push(mid, ...A, ...B);
+  let n = 0; root.traverse(() => n++); model.nodeCount = n;
+  model.poses = [];
+  return { model, mid, A, B, C, head };
+}
+{
+  const { model, mid, A, B, C, head } = turnedMouth();
+  // the user picks all 7 (the middle one too)
+  model.lipBones = [mid, ...A, ...B].map((b) => b.name);
+  resetLips(model);
+  const s = softLips(model);
+  ok('turned lips (slit up and down, 6 bones + a middle one): soft lips found', s && s.N > 200, s ? `N ${s.N}` : `none: ${model._lipWhy}`);
+  if (s) {
+    const hq = head.getWorldQuaternion(new THREE.Quaternion());
+    const up = s.probe.axes.up.clone().applyQuaternion(hq), across = s.probe.axes.lat.clone().applyQuaternion(hq);
+    ok('…"between the lips" is sideways and "across" runs up the slit', Math.abs(up.x) > 0.9 && Math.abs(across.y) > 0.9, `up ${up.toArray().map((x) => x.toFixed(2))} across ${across.toArray().map((x) => x.toFixed(2))}`);
+    const sideA = new Set(), sideB = new Set();
+    for (let i = 0; i < s.N; i++) { const k = s.memStart[i]; const x = s.meshes[s.memMesh[k]].geometry.attributes.position.getX(s.memIdx[k]); if (Math.abs(x - C.x) > 1e-4) (x > C.x ? sideA : sideB).add(Math.sign(s.side[i])); }
+    ok('…each lip all on one side (no mixed-up halves)', sideA.size === 1 && sideB.size === 1 && [...sideA][0] !== [...sideB][0], `${[...sideA]} / ${[...sideB]}`);
+    const capsule = { a: C.clone().add(new THREE.Vector3(0, 0, 0.06)), b: C.clone().add(new THREE.Vector3(0, 0, -0.012)), r: 0.007 };
+    s.capsules = function () { const F = this.F, a = capsule.a, b = capsule.b; return [{ ax: F.x(a), ay: F.y(a), az: F.z(a), bx: F.x(b), by: F.y(b), bz: F.z(b), r: capsule.r }]; };
+    const st = s.update({ write: false });
+    const rows = (sd) => { const out = []; for (let i = 0; i < s.N; i++) { if (s.side[i] !== sd) continue; if (Math.abs(s.P[i * 3 + 1] - s.C.y) < 0.0005) out.push([s.P[i * 3], s.D[i * 3 + 1] * 1000]); } return out.sort((a, b) => a[0] - b[0]); };
+    const U = rows(1), L = rows(-1);
+    const near = (row, x) => (row.length ? row.reduce((b, r) => (Math.abs(r[0] - x) < Math.abs(b[0] - x) ? r : b), row[0])[1] : 0);
+    const xc = s.C.x;
+    ok('a finger between the turned lips: they part around it, smooth, closed at the ends, nothing inside', st.active && st.leftCm === 0 && near(U, xc) > 3 && near(L, xc) < -3 && Math.abs(near(U, xc + 0.023)) < near(U, xc) * 0.35 && Math.abs(near(U, xc - 0.023)) < near(U, xc) * 0.35, `${JSON.stringify(st)} ${near(U, xc).toFixed(1)} / ${near(L, xc).toFixed(1)} mm, ends ${near(U, xc - 0.023).toFixed(1)} ${near(U, xc + 0.023).toFixed(1)}`);
+    // smooth: no lip vertex jumps far from its neighbours along the lip line
+    const jumps = (row) => Math.max(0, ...row.slice(1).map((r, i) => Math.abs(r[1] - row[i][1]) / Math.max(1e-4, (r[0] - row[i][0]) * 1000)));
+    ok('…and the lip line is smooth (no spikes)', jumps(U) < 2.5 && jumps(L) < 2.5, `steepest ${jumps(U).toFixed(2)} / ${jumps(L).toFixed(2)} mm per mm`);
+  }
+}
+
 // ---- a second mouth (on the chest)
 function twoMouths() {
   const t = mouthy();
