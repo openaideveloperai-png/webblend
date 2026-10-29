@@ -170,24 +170,82 @@ function probeAt(model, head, own) {
     else if (upper.length < 3 || lower.length < 3) ({ upper, lower } = lipsFromMorph(model, cand.face, frame) || { upper: [], lower: [] });
     if (own) model._lipWhy = cand.own.length < 6 ? `only ${cand.own.length} vertices follow those bones (are they the bones the lips are weighted to?)` : upper.length < 3 || lower.length < 3 ? 'couldn\'t tell the upper lip from the lower one' : '';
     if (upper.length < 3 || lower.length < 3) return null;
-    const pts = (list) => list.map((e) => ({ e, p: P(e) }));
-    const U = pts(upper), L = pts(lower);
-    const latC = [...U, ...L].reduce((a, x) => a + x.p.x, 0) / (U.length + L.length);
-    const halfWidth = Math.max(...[...U, ...L].map((x) => Math.abs(x.p.x - latC))) || 0.02;
-    const band = (x) => Math.abs(x.p.x - latC) < halfWidth * 0.45;
-    const K = 8;
-    const ue = U.filter(band).sort((a, b) => a.p.y - b.p.y).slice(0, K);
-    const le = L.filter(band).sort((a, b) => b.p.y - a.p.y).slice(0, K);
-    if (ue.length < 2 || le.length < 2) { if (own) model._lipWhy = 'the lips are too uneven to find where they meet'; return null; }
-    const mean = (l, k) => l.reduce((a, x) => a + x.p[k], 0) / l.length;
-    const restGap = mean(ue, 'y') - mean(le, 'y');
-    const lipFront = (mean(ue, 'z') + mean(le, 'z')) / 2;
-    const mouthUp = (mean(ue, 'y') + mean(le, 'y')) / 2;
-    const T = pts(cand.tongue);
-    const tongueThick = T.length ? Math.max(0.004, (Math.max(...T.map((x) => x.p.y)) - Math.min(...T.map((x) => x.p.y))) * 0.55) : 0;
-    probe = { head, axes, upper: ue.map((x) => x.e), lower: le.map((x) => x.e), tongue: T.map((x) => x.e), restGap, lipFront, mouthUp, latC, halfWidth, tongueThick, restTongueFront: T.length ? Math.max(...T.map((x) => x.p.z)) : null, own: !!own, split };
+    // where the lips meet and how wide they are, in a frame (x across, y up, z out of the mouth)
+    const measure = (Pf) => {
+      const pts = (list) => list.map((e) => ({ e, p: Pf(e) }));
+      const U = pts(upper), L = pts(lower);
+      const latC = [...U, ...L].reduce((a, x) => a + x.p.x, 0) / (U.length + L.length);
+      const halfWidth = Math.max(...[...U, ...L].map((x) => Math.abs(x.p.x - latC))) || 0.02;
+      const band = (x) => Math.abs(x.p.x - latC) < halfWidth * 0.45;
+      const K = 8;
+      const ue = U.filter(band).sort((a, b) => a.p.y - b.p.y).slice(0, K);
+      const le = L.filter(band).sort((a, b) => b.p.y - a.p.y).slice(0, K);
+      if (ue.length < 2 || le.length < 2) return null;
+      const mean = (l, k) => l.reduce((a, x) => a + x.p[k], 0) / l.length;
+      const T = pts(cand.tongue);
+      return {
+        upper: ue.map((x) => x.e), lower: le.map((x) => x.e), tongue: T.map((x) => x.e),
+        restGap: mean(ue, 'y') - mean(le, 'y'), lipFront: (mean(ue, 'z') + mean(le, 'z')) / 2, mouthUp: (mean(ue, 'y') + mean(le, 'y')) / 2, latC, halfWidth,
+        tongueThick: T.length ? Math.max(0.004, (Math.max(...T.map((x) => x.p.y)) - Math.min(...T.map((x) => x.p.y))) * 0.55) : 0,
+        restTongueFront: T.length ? Math.max(...T.map((x) => x.p.z)) : null,
+      };
+    };
+    // your own lips get their own frame, measured from them: a mouth along a muzzle, on the
+    // side of the head or tilted opens and closes the same way as one across the face
+    let soft = null;
+    if (own) {
+      const mAxes = mouthAxes(upper, lower, P, axes);
+      if (mAxes) {
+        const fm = headFrame(head, mAxes);
+        const ms = measure((e) => fm.local(e, v).clone());
+        if (ms) soft = { head, axes: mAxes, ...ms };
+      }
+    }
+    const mh = measure(P);
+    if (!mh && !soft) { if (own) model._lipWhy = 'the lips are too uneven to find where they meet'; return null; }
+    // the face spots and the AI's checks stay in the head's own directions
+    const base = mh || headFallback(soft, [...upper, ...lower].map(P));
+    probe = { head, axes, ...base, own: !!own, split };
+    if (soft) probe.soft = { ...soft, own: true, split };
   } catch (e) { console.warn('mouth probe', e); probe = null; } finally { ev.done(); }
   return probe;
+}
+
+// the mouth's own directions from its lips (in the head frame's terms -> bone-local axes):
+// up = lower lip -> upper lip, across = along the slit (the lips' longest spread), out = the
+// third, facing away from the head (or forward when it faces forward at all)
+function mouthAxes(upper, lower, P, axes) {
+  const pu = upper.map(P), pl = lower.map(P);
+  const mean = (l) => l.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / l.length);
+  const cu = mean(pu), cl = mean(pl);
+  const up = cu.clone().sub(cl);
+  if (up.length() < 1e-5) return null;
+  up.normalize();
+  const all = [...pu, ...pl], c = mean(all);
+  // longest spread across the opening direction (power iteration on the covariance)
+  const d = all.map((p) => { const q = p.clone().sub(c); return q.addScaledVector(up, -q.dot(up)); });
+  let a = Math.abs(up.x) < 0.9 ? V().set(1, 0, 0) : V().set(0, 0, 1);
+  a.addScaledVector(up, -a.dot(up)).normalize();
+  for (let it = 0; it < 24; it++) {
+    const n = V();
+    for (const q of d) n.addScaledVector(q, q.dot(a));
+    n.addScaledVector(up, -n.dot(up));
+    if (n.length() < 1e-12) break;
+    a = n.normalize();
+  }
+  const lat = a.clone();
+  let fwd = V().crossVectors(lat, up).normalize();
+  // facing out: forward if the mouth faces forward at all, else away from the bone it's on
+  const flip = Math.abs(fwd.z) > 0.3 ? fwd.z < 0 : fwd.dot(c) < 0;
+  if (flip) { lat.negate(); fwd.negate(); }
+  const toLocal = (v) => axes.lat.clone().multiplyScalar(v.x).addScaledVector(axes.up, v.y).addScaledVector(axes.fwd, v.z).normalize();
+  return { lat: toLocal(lat), up: toLocal(up), fwd: toLocal(fwd) };
+}
+
+// rough head-frame numbers for a mouth measured only in its own frame
+function headFallback(soft, pts) {
+  const c = pts.reduce((a, p) => a.add(p), V()).multiplyScalar(1 / pts.length);
+  return { upper: soft.upper, lower: soft.lower, tongue: soft.tongue, restGap: 0, lipFront: Math.max(...pts.map((p) => p.z)), mouthUp: c.y, latC: c.x, halfWidth: Math.max(...pts.map((p) => Math.abs(p.x - c.x))) || 0.02, tongueThick: soft.tongueThick, restTongueFront: null };
 }
 
 // the user's lip bones -> upper / lower lip vertices: bones above the middle are the upper
@@ -264,6 +322,7 @@ function lipsFromMorph(model, face, frame) {
 // lips the tongue reaches, thick = the tongue's height where it crosses the lips, fingers
 // = fingertips inside the lips
 export function measureMouth(model, probe) {
+  if (probe && probe.soft) probe = probe.soft;
   const frame = headFrame(probe.head, probe.axes);
   const v = V();
   const ys = (list) => list.reduce((a, e) => a + frame.local(e, v).y, 0) / list.length;

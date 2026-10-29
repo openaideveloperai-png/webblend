@@ -90,6 +90,8 @@ export const detachSoftLips = detachOffsets;
 
 function build(model, probe = mouthProbe(model), { layerName = 'lips', extra = false } = {}) {
   if (!probe) return null;
+  // your own lips work in their own frame (see mouthAxes)
+  if (probe.soft) probe = probe.soft;
   const rig = model.humanoid, head = probe.head, hw = probe.halfWidth;
   const C = { x: probe.latC, y: probe.mouthUp, z: probe.lipFront };
   const fx = extra ? new Map() : mouthEffects(model) || new Map();
