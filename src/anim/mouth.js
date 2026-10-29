@@ -12,6 +12,7 @@ import { softLips, softLipsOn } from './softlips.js';
 const V = () => new THREE.Vector3();
 export const TONGUE = /tongue|舌|べろ/i;
 const LIP = /lip|唇|くちびる/i;
+const OWN_MIN = 0.2; // a vertex counts as on your lip bones when they move at least this much of it
 const UPPER = /upper|上|top|_u\b|\.u\b/i;
 const LOWER = /lower|下|bottom|_d\b|\.d\b|_l\b(?!eft)/i;
 export const NOT_FACE = /hair|bang|ahoge|髪|毛|ear|耳|horn|角|eye|目|瞳|brow|眉|lash|teeth|歯/i;
@@ -82,20 +83,30 @@ export function mouthProbe(model) {
   const head = rig && rig.map.head;
   if (!head || !(model.skinned || []).length) return null;
   // the user's own lip bones (Advanced → Lips) win over names and shape keys
-  const own = bonesByName(model, model.lipBones);
-  model._mouthProbe = probeAt(model, head, own && own.length ? new Set(own) : null);
+  let own = bonesByName(model, model.lipBones);
+  // the head / neck / spine picked along with the lips aren't lips themselves
+  if (own && own.length) { const plain = own.filter((b) => !rig.canonOf.has(b)); if (plain.length) own = plain; }
+  // your own lip bones can sit anywhere in the rig (not only under the head bone)
+  const anchor = own && own.length && !own.every((b) => isUnder(b, head)) ? anchorOf(own) || head : head;
+  model._mouthProbe = probeAt(model, anchor, own && own.length ? new Set(own) : null);
   return model._mouthProbe;
 }
 
 // another mouth, made of the bones the user picked (Advanced → More mouths): measured the
 // same way, around the bones' common parent
 export function mouthProbeFor(model, names) {
-  const bones = bonesByName(model, names);
+  let bones = bonesByName(model, names);
+  if (bones && bones.length && model.humanoid) { const plain = bones.filter((b) => !model.humanoid.canonOf.has(b)); if (plain.length) bones = plain; }
   if (!bones || !bones.length || !(model.skinned || []).length) return null;
-  let anchor = bones[0].parent && bones[0].parent.isBone ? bones[0].parent : bones[0];
-  for (const b of bones) while (anchor && !isUnder(b, anchor)) anchor = anchor.parent;
+  const anchor = anchorOf(bones);
   if (!anchor) return null;
   return probeAt(model, anchor, new Set(bones));
+}
+// the bones' common parent bone
+function anchorOf(bones) {
+  let anchor = bones[0].parent && bones[0].parent.isBone ? bones[0].parent : bones[0];
+  for (const b of bones) while (anchor && !isUnder(b, anchor)) anchor = anchor.parent;
+  return anchor && anchor.isBone ? anchor : anchor || null;
 }
 function isUnder(b, a) { for (let p = b; p; p = p.parent) if (p === a) return true; return false; }
 function bonesByName(model, names) {
@@ -134,10 +145,17 @@ function probeAt(model, head, own) {
         let bi = 0, bw = -1;
         for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w > bw) { bw = w; bi = si.getComponent(i, k); } }
         const b = s.skeleton.bones[bi];
+        // your own lip bones: any vertex they move a fair share of (lip bones often carry
+        // only part of the weight, the rest on the head or jaw)
+        if (own) {
+          let ob = null, ow = OWN_MIN;
+          for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w < ow) continue; const x = s.skeleton.bones[si.getComponent(i, k)]; if (x && own.has(x)) { ob = x; ow = w; } }
+          if (ob) { cand.own.push({ mesh: s, i, b: ob }); continue; }
+        }
         if (!headSet.has(b)) continue;
         const n = nameOf(b);
         const e = { mesh: s, i, b };
-        if (own) { if (own.has(b)) cand.own.push(e); else if (TONGUE.test(n)) cand.tongue.push(e); else if (!NOT_FACE.test(n)) cand.face.push(e); continue; }
+        if (own) { if (TONGUE.test(n)) cand.tongue.push(e); else if (!NOT_FACE.test(n)) cand.face.push(e); continue; }
         if (TONGUE.test(n)) cand.tongue.push(e);
         else if (LIP.test(n) && LOWER.test(n)) cand.lower.push(e);
         else if (LIP.test(n) && UPPER.test(n)) cand.upper.push(e);
@@ -150,6 +168,7 @@ function probeAt(model, head, own) {
     if (own) ({ upper, lower, split } = splitLips(cand.own, P));
     // lips from lip bones; else from the mouth-open shape key
     else if (upper.length < 3 || lower.length < 3) ({ upper, lower } = lipsFromMorph(model, cand.face, frame) || { upper: [], lower: [] });
+    if (own) model._lipWhy = cand.own.length < 6 ? `only ${cand.own.length} vertices follow those bones (are they the bones the lips are weighted to?)` : upper.length < 3 || lower.length < 3 ? 'couldn\'t tell the upper lip from the lower one' : '';
     if (upper.length < 3 || lower.length < 3) return null;
     const pts = (list) => list.map((e) => ({ e, p: P(e) }));
     const U = pts(upper), L = pts(lower);
@@ -159,7 +178,7 @@ function probeAt(model, head, own) {
     const K = 8;
     const ue = U.filter(band).sort((a, b) => a.p.y - b.p.y).slice(0, K);
     const le = L.filter(band).sort((a, b) => b.p.y - a.p.y).slice(0, K);
-    if (ue.length < 2 || le.length < 2) return null;
+    if (ue.length < 2 || le.length < 2) { if (own) model._lipWhy = 'the lips are too uneven to find where they meet'; return null; }
     const mean = (l, k) => l.reduce((a, x) => a + x.p[k], 0) / l.length;
     const restGap = mean(ue, 'y') - mean(le, 'y');
     const lipFront = (mean(ue, 'z') + mean(le, 'z')) / 2;
@@ -190,7 +209,7 @@ function splitLips(list, P) {
   const ys = list.map((e) => e.y).sort((a, b) => a - b);
   const mid = ys[Math.floor(ys.length / 2)];
   for (const e of list) (e.y >= mid ? upper : lower).push(e);
-  return { upper, lower, split: { y: mid } };
+  return { upper, lower, split: { y: mid, ids: new Set([...by.keys()].map((b) => b.uuid)) } };
 }
 
 // head-relative coordinates in world units: x = character's left, y = up, z = forward

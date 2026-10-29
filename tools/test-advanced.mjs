@@ -33,6 +33,60 @@ const ok = (label, cond, extra = '') => { console.log((cond ? 'ok   ' : 'FAIL ')
   ok('Tools → Select lip bones uses your pick', lipBones(model).map((b) => b.name).join() === 'mouthA,mouthB');
 }
 
+// ---- 6 lip bones in a ring, not named as lips, parented outside the head, partly weighted
+function ringMouth({ parentName = 'Neck', w = 0.4 } = {}) {
+  const t = mouthy();
+  const { model } = t;
+  const root = model.root;
+  // drop the named lip mesh: this mouth is made of its own bones
+  const old = root.getObjectByName('Mouth');
+  old.parent.remove(old);
+  model.skinned = model.skinned.filter((x) => x !== old);
+  const head = root.getObjectByName('Head'), parent = root.getObjectByName(parentName) || head;
+  root.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+  const bone = (name, p) => { const b = new THREE.Bone(); b.name = name; b.position.copy(new THREE.Vector3(...p).applyMatrix4(inv)); parent.add(b); return b; };
+  const xs = [-0.018, 0, 0.018];
+  const ups = xs.map((x, k) => bone('ring' + k, [x, 1.603, 0.115])), los = xs.map((x, k) => bone('ring' + (k + 3), [x, 1.597, 0.115]));
+  root.updateMatrixWorld(true);
+  const bones = [head, ...ups, ...los];
+  const geos = [[1.603, ups], [1.597, los]].map(([y, set]) => {
+    const g = new THREE.BoxGeometry(0.05, 0.006, 0.01, 24, 3, 4); g.translate(0, y, 0.115);
+    const n = g.attributes.position.count, P = g.attributes.position;
+    const si = new Uint16Array(n * 4), sw = new Float32Array(n * 4);
+    for (let i = 0; i < n; i++) {
+      const x = P.getX(i);
+      const k = x < -0.009 ? 0 : x > 0.009 ? 2 : 1;
+      si[i * 4] = bones.indexOf(set[k]); sw[i * 4] = w;
+      si[i * 4 + 1] = 0; sw[i * 4 + 1] = 1 - w; // the rest on the head
+    }
+    g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
+    g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
+    return g;
+  });
+  const mesh = new THREE.SkinnedMesh(mergeGeometries(geos), new THREE.MeshStandardMaterial());
+  mesh.name = 'RingMouth';
+  root.add(mesh); root.updateMatrixWorld(true);
+  mesh.bind(new THREE.Skeleton(bones), mesh.matrixWorld);
+  model.skinned.push(mesh);
+  model.bones.push(...ups, ...los);
+  let n = 0; root.traverse(() => n++); model.nodeCount = n;
+  model.poses = [];
+  return { ...t, model, ups, los };
+}
+for (const [label, opts] of [['under the neck, 40% weight', { parentName: 'Neck', w: 0.4 }], ['under the head, 30% weight', { parentName: 'Head', w: 0.3 }], ['under the head, full weight', { parentName: 'Head', w: 1 }]]) {
+  const { model, ups, los } = ringMouth(opts);
+  ok(`6 ring bones (${label}): no lips found by themselves`, !softLips(model));
+  model.lipBones = [...ups, ...los].map((b) => b.name);
+  resetLips(model);
+  const s = softLips(model);
+  ok(`…your pick of them makes the lips (${label})`, s && s.N > 200, s ? `N ${s.N}` : `none: ${model._lipWhy}`);
+  if (s) {
+    const up = [...s.side].filter((x) => x > 0).length, lo = [...s.side].filter((x) => x < 0).length;
+    ok(`…upper and lower lip told apart (${label})`, Math.abs(up - lo) < 30 && up > 50, `${up} / ${lo}`);
+  }
+}
+
 // ---- a second mouth (on the chest)
 function twoMouths() {
   const t = mouthy();

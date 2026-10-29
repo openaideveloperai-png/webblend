@@ -30,7 +30,7 @@ export function openAdvanced(app, model) {
     const lipSec = sec('lips', 'Lips',
       h('div', { class: 'hint' }, own ? 'Your lip bones:' : lips.length ? 'Found automatically (by name or by the mouth\'s vertices):' : 'No lip bones found on this rig.'),
       lips.length ? chips(lips) : null,
-      h('div', { class: 'hint' }, main ? `Soft lips: ${main.N.toLocaleString()} lip vertices${model.softLips === false ? ' (switched off)' : ''}.` : own ? 'Those bones don\'t move enough mouth vertices (an upper and a lower lip) for soft lips. Pick the bones the lips are weighted to.' : 'Soft lips need lip bones or a mouth-open shape key.'),
+      h('div', { class: 'hint' }, main ? `Soft lips: ${main.N.toLocaleString()} lip vertices${model.softLips === false ? ' (switched off)' : ''}.` : own ? `Soft lips can't use those bones: ${model._lipWhy || 'they don\'t move an upper and a lower lip'}. Pick the bones the lips are weighted to.` : 'Soft lips need lip bones or a mouth-open shape key.'),
       h('div', { class: 'btns' },
         h('button', { class: 'btn sm amber', disabled: !sel.length || undefined, title: 'Select the lip bones first (Shift+click their dots)', onclick: () => { model.lipBones = sel.map((b) => b.name); resetLips(model); draw(); redraw(); app.emit('selection', app.selection); } }, icon('bone'), `Use the ${sel.length || ''} selected bone${sel.length === 1 ? '' : 's'} as the lips`),
         h('button', { class: 'btn sm', disabled: !lips.length || undefined, onclick: () => app.selectBones(lips, model) }, 'Select them'),

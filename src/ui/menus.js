@@ -205,7 +205,7 @@ export function toolsMenu(app, ui) {
       m.lipBones = sel.map((b) => b.name);
       resetLips(m);
       const s = softLips(m);
-      app.toast(s ? `Lips set: ${sel.length} bone${sel.length === 1 ? '' : 's'}, ${s.N.toLocaleString()} lip vertices. Tools → Lip bones selects them now, and the soft lips use them.` : `Lip bones set (${sel.length}). They don't move an upper and a lower lip that soft lips can use, but Tools → Lip bones selects them.`, s ? 'ok' : 'warn', 4500);
+      app.toast(s ? `Lips set: ${sel.length} bone${sel.length === 1 ? '' : 's'}, ${s.N.toLocaleString()} lip vertices. Tools → Lip bones selects them now, and the soft lips use them.` : `Lip bones set (${sel.length}), but soft lips can't use them: ${m._lipWhy || 'they don\'t move an upper and a lower lip'}. Tools → Lip bones still selects them.`, s ? 'ok' : 'warn', 4500);
       app.needsEval = true; app.viewport.requestRender();
     } },
     { label: 'Add the selected bones as another mouth', icon: 'plus', disabled: !m || !m.humanoid || !sel.length, action: () => {

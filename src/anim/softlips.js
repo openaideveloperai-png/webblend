@@ -107,6 +107,9 @@ function build(model, probe = mouthProbe(model), { layerName = 'lips', extra = f
     const H = rig.handRig && rig.handRig(side);
     if (H) for (const ch of Object.values(H.chains)) for (const b of ch.bones) fingerBones.add(b.bone);
   }
+  // your own lip bones -> which lip each is (1 upper, -1 lower, 2 = split by height)
+  const sp0 = probe.own && probe.split;
+  const ownIds = sp0 ? new Map(sp0.lowerIds ? [...[...sp0.upperIds].map((id) => [id, 1]), ...[...sp0.lowerIds].map((id) => [id, -1])] : [...sp0.ids].map((id) => [id, 2])) : null;
   const ev = evaluator(model);
   const v = new THREE.Vector3();
   try {
@@ -126,20 +129,25 @@ function build(model, probe = mouthProbe(model), { layerName = 'lips', extra = f
           fingerVerts.get(b).push(v.clone());
           continue;
         }
-        if (!headBones.has(b)) continue;
+        // on your own lip bones (a fair share of its weight): upper (1), lower (-1) or by height (2)
+        let ownSide = 0;
+        if (ownIds) {
+          let ow = 0.2;
+          for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w < ow) continue; const x = s.skeleton.bones[si.getComponent(i, k)]; const c = x && ownIds.get(x.uuid); if (c) { ow = w; ownSide = c; } }
+        }
+        if (!ownSide && !headBones.has(b)) continue;
         const n = nameOf(b);
-        if (NOT_FACE.test(n) || TONGUE.test(n) || tongueKey.has(s.uuid + ':' + i)) continue;
+        if ((!ownSide && (NOT_FACE.test(n) || TONGUE.test(n))) || tongueKey.has(s.uuid + ':' + i)) continue;
         frame.local({ mesh: s, i }, v);
         const r = ell(v.x, v.y, v.z);
         if (r >= 1) continue;
-        raw.push({ mesh: s, i, x: v.x, y: v.y, z: v.z, r, b: b.uuid });
+        raw.push({ mesh: s, i, x: v.x, y: v.y, z: v.z, r, b: b.uuid, ownSide });
       }
     }
     if (raw.length < 12) return null;
     // your own lip bones: the lower lip is the bones below the middle
     const sp = probe.own && probe.split;
-    if (sp && sp.lowerIds) for (const e of raw) e.lower = sp.lowerIds.has(e.b) ? true : sp.upperIds.has(e.b) ? false : e.y < C.y;
-    else if (sp && sp.y !== undefined) for (const e of raw) e.lower = e.y < sp.y;
+    if (sp) for (const e of raw) e.lower = e.ownSide === -1 ? true : e.ownSide === 1 ? false : e.y < (sp.y !== undefined ? sp.y : C.y);
     // the lower lip is what goes down when the mouth opens
     else if (opener) {
       const { tracks } = faceTracks(model, [{ t: 0, control: opener[0], value: 1 }, { t: 1, control: opener[0], value: 1 }], 1, 2);

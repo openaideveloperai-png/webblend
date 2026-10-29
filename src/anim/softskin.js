@@ -399,7 +399,10 @@ function build(model) {
     ev.at(EMPTY, 0);
     // every mouth is left to its soft lips (the extra ones wherever they are on the body)
     const zones = extra.map((L) => mouthZone(model, L, null)).filter(Boolean);
-    return new SoftSkin(model, { partOf, canon, lipKeys, lm, mouth: mouthZone(model, lips, lm), zones });
+    // lips you put somewhere other than under the head bone: their zone covers any body part
+    const mz = mouthZone(model, lips, lm);
+    if (mz && lips && lips.probe && lips.probe.head !== rig.map.head) mz.any = true;
+    return new SoftSkin(model, { partOf, canon, lipKeys, lm, mouth: mz, zones });
   } finally { ev.done(); }
 }
 
@@ -488,7 +491,7 @@ class SoftSkin {
         s.getVertexPosition(i, v).applyMatrix4(s.matrixWorld);
         // the lips and the mouth: not soft skin (and a dent fades out before it reaches them)
         let nearMouth = 1;
-        if (mouth && GROUP[canon.get(part)] === 'head') {
+        if (mouth && (mouth.any || GROUP[canon.get(part)] === 'head')) {
           const d = v.distanceTo(mouth.c) / mouth.r;
           if (d < 1) continue;
           nearMouth = smoothstep(1, 1.6, d);
